@@ -1,0 +1,7 @@
+{
+  "interesting": [],
+  "recommended_tools": [
+    "ArtifactTriageTool",
+    "JSInterfaceExtractorTool"
+  ]
+}

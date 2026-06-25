@@ -1,0 +1,13 @@
+{
+  "name": "nginx-suspicious-path-demo",
+  "challenge_type": "log",
+  "description": "Nginx suspicious path drill",
+  "target": "",
+  "attachment": "access.log",
+  "tags": [
+    "final-drill",
+    "log"
+  ],
+  "priority": "medium",
+  "assignee": ""
+}

@@ -1,0 +1,10 @@
+{
+  "title": "Reverse Python Bytecode (pyc)",
+  "category": "reverse",
+  "difficulty": "medium",
+  "description": "我们拿到一个 Python 编译后的 verify.pyc 文件。它在执行时会读取用户输入并校验。请反编译或反汇编 pyc 还原校验逻辑，找到能让校验通过的输入（即 flag）。",
+  "flag_format": "flag\\{[^}]+\\}",
+  "hint": "pyc 可用 marshal + dis 反汇编，或直接 strings 提取常量",
+  "needs_llm": true,
+  "est_time_sec": 15
+}

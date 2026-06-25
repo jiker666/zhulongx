@@ -1,0 +1,13 @@
+{
+  "name": "mixed-project-demo",
+  "challenge_type": "misc",
+  "description": "混合前端/配置项目线索",
+  "target": "",
+  "attachment": "mixed-project.zip",
+  "tags": [
+    "final-drill",
+    "misc"
+  ],
+  "priority": "medium",
+  "assignee": ""
+}

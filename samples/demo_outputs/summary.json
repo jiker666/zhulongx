@@ -1,0 +1,37 @@
+{
+  "java_audit": {
+    "task_id": 1,
+    "report": "samples/demo_outputs/java_audit_report.md",
+    "steps": [
+      "FileParserTool",
+      "JavaCodeAuditTool",
+      "JavaCodeAuditTool",
+      "JavaCodeAuditTool",
+      "Reporter"
+    ]
+  },
+  "log_analysis": {
+    "task_id": 2,
+    "report": "samples/demo_outputs/log_analysis_report.md",
+    "steps": [
+      "FileParserTool",
+      "LogAnalyzerTool",
+      "LogAnalyzerTool",
+      "LogAnalyzerTool",
+      "LogAnalyzerTool",
+      "LogAnalyzerTool",
+      "Reporter"
+    ]
+  },
+  "web_scan": {
+    "task_id": 3,
+    "report": "samples/demo_outputs/web_scan_report.md",
+    "steps": [
+      "FileParserTool",
+      "HttpFingerprintTool",
+      "DirectoryProbeTool",
+      "JSInterfaceExtractorTool",
+      "Reporter"
+    ]
+  }
+}

@@ -1,0 +1,7 @@
+10.0.0.1 - - [12/Jan/2026:10:23:11 +0800] "GET / HTTP/1.1" 200 612 "-" "Mozilla/5.0"
+10.0.0.2 - - [12/Jan/2026:10:23:18 +0800] "GET /login HTTP/1.1" 200 1024 "-" "Mozilla/5.0"
+10.0.0.3 - - [12/Jan/2026:10:23:25 +0800] "POST /api/v1/upload HTTP/1.1" 200 256 "-" "curl/7.81.0"
+10.0.0.4 - - [12/Jan/2026:10:23:31 +0800] "GET /admin?debug=1&token=flag{f0rens1cs_url_l3ak_1n_log} HTTP/1.1" 200 256 "-" "Mozilla/5.0"
+10.0.0.5 - - [12/Jan/2026:10:23:42 +0800] "GET /assets/app.js HTTP/1.1" 200 4096 "-" "Mozilla/5.0"
+10.0.0.6 - - [12/Jan/2026:10:23:48 +0800] "GET /api/v1/users HTTP/1.1" 200 512 "-" "Mozilla/5.0"
+10.0.0.7 - - [12/Jan/2026:10:23:55 +0800] "GET /healthz HTTP/1.1" 200 4 "-" "kube-probe/1.27"

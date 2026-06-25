@@ -1,0 +1,13 @@
+{
+  "name": "web-out-of-scope",
+  "challenge_type": "web",
+  "description": "目标是 localhost，默认安全模式应触发 ScopeGuard 拦截，需要队员配置 scope 后再验证。",
+  "target": "http://127.0.0.1:65530",
+  "attachment": "",
+  "tags": [
+    "team-drill",
+    "web"
+  ],
+  "priority": "high",
+  "assignee": "B"
+}

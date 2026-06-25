@@ -1,0 +1,10 @@
+{
+  "title": "Forensics PCAP HTTP Flag",
+  "category": "forensics",
+  "difficulty": "medium",
+  "description": "我们拿到一段网络抓包 capture.pcap。其中某次 HTTP GET 请求的 URL 参数里藏着 admin 提交的 flag。请解析 pcap 提取 flag。",
+  "flag_format": "flag\\{[^}]+\\}",
+  "hint": "pcap 里 HTTP 请求的 URL query string",
+  "needs_llm": true,
+  "est_time_sec": 10
+}

@@ -1,0 +1,13 @@
+{
+  "name": "blocked-range-required",
+  "challenge_type": "web",
+  "description": "只给内网目标，无附件，训练 scope 拦截后的处理。",
+  "target": "http://10.255.255.1:8080",
+  "attachment": "",
+  "tags": [
+    "team-drill",
+    "web"
+  ],
+  "priority": "high",
+  "assignee": "B"
+}

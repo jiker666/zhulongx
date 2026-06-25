@@ -1,0 +1,236 @@
+{
+  "elapsed_seconds": 0.484,
+  "by_type_elapsed_seconds": {
+    "code": 0.061,
+    "crypto": 0.032,
+    "log": 0.063,
+    "misc": 0.059,
+    "pcap": 0.036,
+    "reverse": 0.029,
+    "unknown": 0.038,
+    "web": 0.108
+  },
+  "success": 12,
+  "failures": 0,
+  "blocked": 1,
+  "candidate_count": 15,
+  "correct_candidate_hits": 9,
+  "false_positive_candidates": 6,
+  "manual_backfills": 6,
+  "scopeguard_blocks": 1,
+  "llm_fallbacks": 12,
+  "results": [
+    {
+      "sample": "blocked-range-required",
+      "challenge_id": 1,
+      "type": "web",
+      "assignee": "B",
+      "success": true,
+      "status": "blocked",
+      "elapsed_seconds": 0.069,
+      "candidate_count": 0,
+      "correct_hits": 0,
+      "false_positive_count": 0,
+      "expected": [],
+      "top_candidates": []
+    },
+    {
+      "sample": "code-java-authz",
+      "challenge_id": 2,
+      "type": "code",
+      "assignee": "A",
+      "success": true,
+      "status": "need_human",
+      "elapsed_seconds": 0.022,
+      "candidate_count": 0,
+      "correct_hits": 0,
+      "false_positive_count": 0,
+      "expected": [
+        "flag{team_java_authz}"
+      ],
+      "top_candidates": []
+    },
+    {
+      "sample": "code-node-config",
+      "challenge_id": 3,
+      "type": "code",
+      "assignee": "B",
+      "success": true,
+      "status": "candidate_found",
+      "elapsed_seconds": 0.039,
+      "candidate_count": 1,
+      "correct_hits": 1,
+      "false_positive_count": 0,
+      "expected": [
+        "flag{team_node_config}"
+      ],
+      "top_candidates": [
+        "flag{team_node_config}"
+      ]
+    },
+    {
+      "sample": "crypto-hex-base64",
+      "challenge_id": 4,
+      "type": "crypto",
+      "assignee": "C",
+      "success": true,
+      "status": "candidate_found",
+      "elapsed_seconds": 0.032,
+      "candidate_count": 2,
+      "correct_hits": 1,
+      "false_positive_count": 1,
+      "expected": [
+        "flag{team_crypto_hex}"
+      ],
+      "top_candidates": [
+        "flag{crypto_decoy}",
+        "flag{team_crypto_hex}"
+      ]
+    },
+    {
+      "sample": "log-manual-submit",
+      "challenge_id": 5,
+      "type": "log",
+      "assignee": "C",
+      "success": true,
+      "status": "candidate_found",
+      "elapsed_seconds": 0.031,
+      "candidate_count": 1,
+      "correct_hits": 1,
+      "false_positive_count": 0,
+      "expected": [
+        "flag{team_manual_submit}"
+      ],
+      "top_candidates": [
+        "flag{team_manual_submit}"
+      ]
+    },
+    {
+      "sample": "log-two-candidates",
+      "challenge_id": 6,
+      "type": "log",
+      "assignee": "C",
+      "success": true,
+      "status": "candidate_found",
+      "elapsed_seconds": 0.032,
+      "candidate_count": 2,
+      "correct_hits": 1,
+      "false_positive_count": 1,
+      "expected": [
+        "flag{team_log_incident}"
+      ],
+      "top_candidates": [
+        "flag{log_false_positive}",
+        "flag{team_log_incident}"
+      ]
+    },
+    {
+      "sample": "misc-gzip-b64",
+      "challenge_id": 7,
+      "type": "misc",
+      "assignee": "A",
+      "success": true,
+      "status": "candidate_found",
+      "elapsed_seconds": 0.029,
+      "candidate_count": 1,
+      "correct_hits": 1,
+      "false_positive_count": 0,
+      "expected": [
+        "flag{team_misc_gzip}"
+      ],
+      "top_candidates": [
+        "flag{team_misc_gzip}"
+      ]
+    },
+    {
+      "sample": "misc-url-encoded",
+      "challenge_id": 8,
+      "type": "misc",
+      "assignee": "A",
+      "success": true,
+      "status": "candidate_found",
+      "elapsed_seconds": 0.03,
+      "candidate_count": 2,
+      "correct_hits": 1,
+      "false_positive_count": 1,
+      "expected": [
+        "flag{team_url_encoded}"
+      ],
+      "top_candidates": [
+        "flag{team_url_encoded}",
+        "flag{url_decoy}"
+      ]
+    },
+    {
+      "sample": "pcap-needs-review",
+      "challenge_id": 9,
+      "type": "pcap",
+      "assignee": "B",
+      "success": true,
+      "status": "candidate_found",
+      "elapsed_seconds": 0.036,
+      "candidate_count": 2,
+      "correct_hits": 1,
+      "false_positive_count": 1,
+      "expected": [
+        "flag{team_pcap_http}"
+      ],
+      "top_candidates": [
+        "flag{team_pcap_http}",
+        "flag{pcap_decoy}"
+      ]
+    },
+    {
+      "sample": "reverse-strings-many",
+      "challenge_id": 10,
+      "type": "reverse",
+      "assignee": "B",
+      "success": true,
+      "status": "candidate_found",
+      "elapsed_seconds": 0.029,
+      "candidate_count": 2,
+      "correct_hits": 1,
+      "false_positive_count": 1,
+      "expected": [
+        "flag{team_reverse_strings}"
+      ],
+      "top_candidates": [
+        "flag{team_reverse_strings}",
+        "flag{rev_decoy_old}"
+      ]
+    },
+    {
+      "sample": "unknown-no-answer",
+      "challenge_id": 11,
+      "type": "unknown",
+      "assignee": "C",
+      "success": true,
+      "status": "need_human",
+      "elapsed_seconds": 0.038,
+      "candidate_count": 0,
+      "correct_hits": 0,
+      "false_positive_count": 0,
+      "expected": [],
+      "top_candidates": []
+    },
+    {
+      "sample": "web-login-decoy",
+      "challenge_id": 12,
+      "type": "web",
+      "assignee": "A",
+      "success": true,
+      "status": "candidate_found",
+      "elapsed_seconds": 0.039,
+      "candidate_count": 2,
+      "correct_hits": 1,
+      "false_positive_count": 1,
+      "expected": [
+        "flag{team_web_login}"
+      ],
+      "top_candidates": [
+        "flag{team_web_login}",
+        "flag{old_decoy}"
+      ]
+    }
+  ]
+}

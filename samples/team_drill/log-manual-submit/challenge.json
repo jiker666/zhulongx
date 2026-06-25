@@ -1,0 +1,13 @@
+{
+  "name": "log-manual-submit",
+  "challenge_type": "log",
+  "description": "日志给出提交线索但需要队员确认。",
+  "target": "",
+  "attachment": "event.log",
+  "tags": [
+    "team-drill",
+    "log"
+  ],
+  "priority": "medium",
+  "assignee": "C"
+}

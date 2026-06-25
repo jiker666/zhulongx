@@ -1,0 +1,13 @@
+[2026-01-12 10:23:11] INFO  starting server v1.2.3
+[2026-01-12 10:23:12] INFO  loading config from /etc/server/config.yaml
+[2026-01-12 10:23:13] WARN  deprecated field 'legacy_mode' ignored
+[2026-01-12 10:23:14] INFO  connected to db mysql://127.0.0.1:3306
+[2026-01-12 10:23:18] DEBUG user=admin action=login ip=10.0.0.12
+[2026-01-12 10:23:21] INFO  the daily secret token is: flag{h1dd3n_1n_th3_l0gs}
+[2026-01-12 10:23:25] DEBUG user=guest action=view page=dashboard
+[2026-01-12 10:23:31] INFO  request=POST /api/v1/upload file=test.bin
+[2026-01-12 10:23:42] WARN  slow query detected duration=2.3s
+[2026-01-12 10:23:45] INFO  request=GET /api/v1/users
+[2026-01-12 10:23:48] ERROR division by zero in /app/handlers/billing.py:88
+[2026-01-12 10:23:50] INFO  request=GET /api/v1/orders
+[2026-01-12 10:23:52] INFO  daily statistics: 1234 requests, 56 errors

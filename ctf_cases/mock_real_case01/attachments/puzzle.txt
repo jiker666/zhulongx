@@ -1,0 +1,3 @@
+artifact_id=mock-real-misc-01
+encoding_hint=common web-safe blob, then compressed bytes
+blob=H4sIAIKQJ2oC/0vLSUyvTsrJzEuJz80sTo5PzkjMzIsvM6kFANZ3bCcZAAAA

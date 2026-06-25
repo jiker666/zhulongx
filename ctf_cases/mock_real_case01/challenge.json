@@ -1,0 +1,13 @@
+{
+  "id": "mock_real_case01",
+  "title": "Mock Real Misc Chain 01",
+  "category": "misc",
+  "description": "A local training CTF-style misc case. Decode the provided artifact and recover the flag-like answer.",
+  "target_url": "",
+  "target_host": "",
+  "attachments": ["attachments/puzzle.txt"],
+  "flag_format": "flag{...}",
+  "author_notes": "Training case for blind solve pipeline only. The evaluator directory is not readable by the solver.",
+  "allowed_actions": ["static_analysis"],
+  "time_budget_minutes": 20
+}

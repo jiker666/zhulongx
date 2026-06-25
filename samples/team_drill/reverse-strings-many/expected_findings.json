@@ -1,0 +1,6 @@
+{
+  "decoys": [
+    "flag{rev_decoy_old}"
+  ],
+  "manual_expected": false
+}

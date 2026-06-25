@@ -1,0 +1,13 @@
+{
+  "name": "pcap-http-demo",
+  "challenge_type": "pcap",
+  "description": "pcap mock HTTP 明文线索",
+  "target": "",
+  "attachment": "traffic.pcap",
+  "tags": [
+    "final-drill",
+    "pcap"
+  ],
+  "priority": "medium",
+  "assignee": ""
+}

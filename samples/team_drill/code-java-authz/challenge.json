@@ -1,0 +1,13 @@
+{
+  "name": "code-java-authz",
+  "challenge_type": "code",
+  "description": "Java 控制器含资源 ID 线索和一个假答案注释。",
+  "target": "",
+  "attachment": "",
+  "tags": [
+    "team-drill",
+    "code"
+  ],
+  "priority": "medium",
+  "assignee": "A"
+}

@@ -1,0 +1,8 @@
+{
+  "title": "Forensics Access Log Flag",
+  "category": "forensics",
+  "difficulty": "easy",
+  "description": "我们拿到一段 nginx access.log。在某次攻击请求的 URL 中藏着 admin 上传后留下的 flag。请定位并提取。",
+  "flag_format": "flag\\{[^}]+\\}",
+  "hint": "URL 编码的 query string 中"
+}

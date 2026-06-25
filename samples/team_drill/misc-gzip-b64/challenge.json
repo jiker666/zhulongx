@@ -1,0 +1,13 @@
+{
+  "name": "misc-gzip-b64",
+  "challenge_type": "misc",
+  "description": "gzip+base64 常见编码链。",
+  "target": "",
+  "attachment": "blob.txt",
+  "tags": [
+    "team-drill",
+    "misc"
+  ],
+  "priority": "medium",
+  "assignee": "A"
+}

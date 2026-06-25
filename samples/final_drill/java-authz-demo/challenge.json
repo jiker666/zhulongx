@@ -1,0 +1,13 @@
+{
+  "name": "java-authz-demo",
+  "challenge_type": "code",
+  "description": "Java Controller 与资源 ID 线索",
+  "target": "",
+  "attachment": "java-authz-demo.zip",
+  "tags": [
+    "final-drill",
+    "code"
+  ],
+  "priority": "medium",
+  "assignee": ""
+}

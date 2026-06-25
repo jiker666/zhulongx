@@ -1,0 +1,13 @@
+{
+  "name": "unknown-no-answer",
+  "challenge_type": "unknown",
+  "description": "题面缺少可机读候选，应该进入 need_human。",
+  "target": "",
+  "attachment": "hint.txt",
+  "tags": [
+    "team-drill",
+    "unknown"
+  ],
+  "priority": "medium",
+  "assignee": "C"
+}

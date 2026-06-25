@@ -1,0 +1,13 @@
+{
+  "name": "web-openapi-post-confirm",
+  "challenge_type": "web",
+  "description": "OpenAPI 中 GET 可读，POST 需要人工确认。",
+  "target": "",
+  "attachment": "openapi.json",
+  "tags": [
+    "team-drill",
+    "web"
+  ],
+  "priority": "high",
+  "assignee": "A"
+}

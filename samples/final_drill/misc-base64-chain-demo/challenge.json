@@ -1,0 +1,13 @@
+{
+  "name": "misc-base64-chain-demo",
+  "challenge_type": "misc",
+  "description": "Base64 编码链识别",
+  "target": "",
+  "attachment": "encoded.txt",
+  "tags": [
+    "final-drill",
+    "misc"
+  ],
+  "priority": "medium",
+  "assignee": ""
+}

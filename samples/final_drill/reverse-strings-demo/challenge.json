@@ -1,0 +1,13 @@
+{
+  "name": "reverse-strings-demo",
+  "challenge_type": "reverse",
+  "description": "逆向 strings 只读识别",
+  "target": "",
+  "attachment": "mock.bin",
+  "tags": [
+    "final-drill",
+    "reverse"
+  ],
+  "priority": "medium",
+  "assignee": ""
+}

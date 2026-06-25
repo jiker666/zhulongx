@@ -1,0 +1,98 @@
+{
+  "elapsed_seconds": 0.323,
+  "success": 10,
+  "failures": 0,
+  "candidate_count": 10,
+  "results": [
+    {
+      "sample": "crypto-simple-xor-demo",
+      "challenge_id": 1,
+      "success": true,
+      "status": "candidate_found",
+      "candidate_count": 1,
+      "evidence_count": 1,
+      "top_candidate": "flag{crypto_xor_demo}"
+    },
+    {
+      "sample": "java-authz-demo",
+      "challenge_id": 2,
+      "success": true,
+      "status": "candidate_found",
+      "candidate_count": 1,
+      "evidence_count": 1,
+      "top_candidate": "flag{java_authz_demo}"
+    },
+    {
+      "sample": "misc-base64-chain-demo",
+      "challenge_id": 3,
+      "success": true,
+      "status": "candidate_found",
+      "candidate_count": 1,
+      "evidence_count": 1,
+      "top_candidate": "flag{misc_base64_chain_demo}"
+    },
+    {
+      "sample": "mixed-project-demo",
+      "challenge_id": 4,
+      "success": true,
+      "status": "candidate_found",
+      "candidate_count": 1,
+      "evidence_count": 1,
+      "top_candidate": "flag{mixed_project_demo}"
+    },
+    {
+      "sample": "nginx-suspicious-path-demo",
+      "challenge_id": 5,
+      "success": true,
+      "status": "candidate_found",
+      "candidate_count": 1,
+      "evidence_count": 1,
+      "top_candidate": "flag{nginx_path_demo}"
+    },
+    {
+      "sample": "pcap-http-demo",
+      "challenge_id": 6,
+      "success": true,
+      "status": "candidate_found",
+      "candidate_count": 1,
+      "evidence_count": 1,
+      "top_candidate": "flag{pcap_http_demo}"
+    },
+    {
+      "sample": "reverse-strings-demo",
+      "challenge_id": 7,
+      "success": true,
+      "status": "candidate_found",
+      "candidate_count": 1,
+      "evidence_count": 1,
+      "top_candidate": "flag{reverse_strings_demo}"
+    },
+    {
+      "sample": "spring-log-incident-demo",
+      "challenge_id": 8,
+      "success": true,
+      "status": "candidate_found",
+      "candidate_count": 1,
+      "evidence_count": 1,
+      "top_candidate": "flag{spring_log_incident_demo}"
+    },
+    {
+      "sample": "web-js-api-demo",
+      "challenge_id": 9,
+      "success": true,
+      "status": "candidate_found",
+      "candidate_count": 1,
+      "evidence_count": 1,
+      "top_candidate": "flag{web_js_api_demo}"
+    },
+    {
+      "sample": "web-openapi-demo",
+      "challenge_id": 10,
+      "success": true,
+      "status": "candidate_found",
+      "candidate_count": 1,
+      "evidence_count": 1,
+      "top_candidate": "flag{web_openapi_demo}"
+    }
+  ]
+}

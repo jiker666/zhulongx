@@ -1,0 +1,13 @@
+{
+  "name": "misc-url-encoded",
+  "challenge_type": "misc",
+  "description": "URL encode 候选。",
+  "target": "",
+  "attachment": "payload.txt",
+  "tags": [
+    "team-drill",
+    "misc"
+  ],
+  "priority": "medium",
+  "assignee": "A"
+}

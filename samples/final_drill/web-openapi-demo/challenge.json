@@ -1,0 +1,13 @@
+{
+  "name": "web-openapi-demo",
+  "challenge_type": "web",
+  "description": "OpenAPI 路径识别和 GET 接口建议",
+  "target": "",
+  "attachment": "openapi.json",
+  "tags": [
+    "final-drill",
+    "web"
+  ],
+  "priority": "medium",
+  "assignee": ""
+}

@@ -1,0 +1,2 @@
+10.0.0.1 - - "GET /flag{log_false_positive} HTTP/1.1" 404 1 "-" "curl"
+10.0.0.2 - - "GET /incident/flag{team_log_incident} HTTP/1.1" 200 1 "-" "browser"

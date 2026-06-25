@@ -1,0 +1,8 @@
+{
+  "title": "Reverse Python Obfuscated",
+  "category": "reverse",
+  "difficulty": "medium",
+  "description": "我们拿到一段混淆的 Python 验证脚本 verify.py。它会读取用户输入并校验。请分析算法并求出能让校验通过的输入（即 flag）。",
+  "flag_format": "flag\\{[^}]+\\}",
+  "hint": "将字符串比较颠倒过来即可还原 flag"
+}

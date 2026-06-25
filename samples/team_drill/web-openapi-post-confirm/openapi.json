@@ -1,0 +1,1 @@
+{"openapi": "3.0.0", "paths": {"/api/status": {"get": {}}, "/api/submit": {"post": {"description": "requires confirmation flag{post_decoy}"}}}}

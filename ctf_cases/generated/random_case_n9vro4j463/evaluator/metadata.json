@@ -1,0 +1,9 @@
+{
+  "flag": "flag{o33vj3f1ozr1ldtr9dq}",
+  "chain": [
+    "xor_single_byte_0xde",
+    "hex",
+    "gzip",
+    "base64"
+  ]
+}

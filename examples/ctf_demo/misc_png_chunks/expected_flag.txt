@@ -1,0 +1,1 @@
+flag{png_custom_chunk_stego}

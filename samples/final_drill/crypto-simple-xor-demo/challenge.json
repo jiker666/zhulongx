@@ -1,0 +1,13 @@
+{
+  "name": "crypto-simple-xor-demo",
+  "challenge_type": "crypto",
+  "description": "简单编码/crypto 训练样例",
+  "target": "",
+  "attachment": "cipher.txt",
+  "tags": [
+    "final-drill",
+    "crypto"
+  ],
+  "priority": "medium",
+  "assignee": ""
+}

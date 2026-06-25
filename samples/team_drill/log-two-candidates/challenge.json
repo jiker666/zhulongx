@@ -1,0 +1,13 @@
+{
+  "name": "log-two-candidates",
+  "challenge_type": "log",
+  "description": "日志中既有误报路径，也有真实 incident answer。",
+  "target": "",
+  "attachment": "access.log",
+  "tags": [
+    "team-drill",
+    "log"
+  ],
+  "priority": "medium",
+  "assignee": "C"
+}

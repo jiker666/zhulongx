@@ -1,0 +1,7 @@
+{
+  "flag": "flag{vr8fs8zlr8g997uy55nia8}",
+  "chain": [
+    "zlib",
+    "base64"
+  ]
+}

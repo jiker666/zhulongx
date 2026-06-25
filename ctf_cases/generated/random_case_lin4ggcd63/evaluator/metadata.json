@@ -1,0 +1,7 @@
+{
+  "flag": "flag{a8uskuexgv379ckg}",
+  "chain": [
+    "gzip",
+    "base64"
+  ]
+}

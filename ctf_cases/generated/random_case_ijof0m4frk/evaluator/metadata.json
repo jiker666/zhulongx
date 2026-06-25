@@ -1,0 +1,10 @@
+{
+  "flag": "flag{46mhq8xai67enm3pv9yy4zc}",
+  "chain": [
+    "url",
+    "url",
+    "url",
+    "zlib",
+    "base64"
+  ]
+}

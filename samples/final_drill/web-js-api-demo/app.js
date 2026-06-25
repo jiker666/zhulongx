@@ -1,0 +1,1 @@
+fetch('/api/profile'); const answer='flag{web_js_api_demo}';

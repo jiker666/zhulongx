@@ -1,0 +1,9 @@
+{
+  "flag": "flag{ekdqztccp5ol6u2rcv801}",
+  "chain": [
+    "hex",
+    "hex",
+    "zlib",
+    "base64"
+  ]
+}

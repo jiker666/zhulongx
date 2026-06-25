@@ -1,0 +1,10 @@
+{
+  "flag": "flag{gvkrcrialycegy26ct7qjpz2}",
+  "chain": [
+    "xor_single_byte_0x2b",
+    "hex",
+    "zlib",
+    "base64",
+    "base64"
+  ]
+}

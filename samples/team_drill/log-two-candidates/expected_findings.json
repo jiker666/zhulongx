@@ -1,0 +1,6 @@
+{
+  "decoys": [
+    "flag{log_false_positive}"
+  ],
+  "manual_expected": false
+}

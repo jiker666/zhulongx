@@ -1,0 +1,10 @@
+{
+  "title": "Crypto RSA Small Exponent",
+  "category": "crypto",
+  "difficulty": "medium",
+  "description": "我们截获了一个 RSA 加密的密文 cipher.txt，公钥 (n, e) 也在文件里。e=3 非常小，明文 m < n^(1/3)，所以 c = m^3 mod n = m^3（没有取模）。请直接开立方还原明文找到 flag。",
+  "flag_format": "flag\\{[^}]+\\}",
+  "hint": "e=3 小指数攻击，直接整数开立方",
+  "needs_llm": true,
+  "est_time_sec": 15
+}

@@ -1,0 +1,59 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    volumes:
+      - ./data:/app/data
+      - ./backend/app/storage:/app/app/storage
+    environment:
+      - APP_NAME=${APP_NAME:-CyberPilot}
+      - APP_ENV=${APP_ENV:-dev}
+      - DATABASE_URL=sqlite:///./data/cyberpilot.db
+      - UPLOAD_DIR=./app/storage/uploads
+      - REPORT_DIR=./app/storage/reports
+      - LLM_ENABLED=${LLM_ENABLED:-false}
+      - LLM_PROVIDER=${LLM_PROVIDER:-openai_compatible}
+      - LLM_BASE_URL=${LLM_BASE_URL:-http://localhost:11434/v1}
+      - LLM_API_KEY=${LLM_API_KEY:-replace_me}
+      - LLM_MODEL=${LLM_MODEL:-qwen2.5-coder}
+      - LLM_TIMEOUT=${LLM_TIMEOUT:-60}
+      - LLM_MAX_RETRIES=${LLM_MAX_RETRIES:-2}
+      - COMPETITION_MODE=${COMPETITION_MODE:-false}
+      - SCOPE_CIDRS=${SCOPE_CIDRS:-}
+      - SCOPE_DOMAINS=${SCOPE_DOMAINS:-}
+      - SCOPE_PORTS=${SCOPE_PORTS:-}
+      - SCOPE_ALLOW_LOCALHOST=${SCOPE_ALLOW_LOCALHOST:-false}
+      - SCOPE_ALLOW_PRIVATE_IPS=${SCOPE_ALLOW_PRIVATE_IPS:-false}
+      - MAX_REQUESTS_PER_TASK=${MAX_REQUESTS_PER_TASK:-120}
+      - MAX_REQUESTS_PER_TARGET=${MAX_REQUESTS_PER_TARGET:-40}
+      - DEFAULT_HTTP_TIMEOUT=${DEFAULT_HTTP_TIMEOUT:-10}
+      - MAX_CONCURRENT_TASKS=${MAX_CONCURRENT_TASKS:-3}
+      - MAX_CONCURRENT_TASKS_PER_CHALLENGE=${MAX_CONCURRENT_TASKS_PER_CHALLENGE:-2}
+      - DEV_ALLOW_PRIVATE_TARGETS=${DEV_ALLOW_PRIVATE_TARGETS:-false}
+    networks:
+      - cyberpilot-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  frontend:
+    build:
+      context: ./frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    environment:
+      - VITE_API_URL=http://backend:8000
+    depends_on:
+      - backend
+    networks:
+      - cyberpilot-net
+
+networks:
+  cyberpilot-net:
+    driver: bridge

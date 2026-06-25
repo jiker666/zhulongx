@@ -1,0 +1,10 @@
+{
+  "title": "Crypto Base Chain Multi-Encoding",
+  "category": "crypto",
+  "difficulty": "medium",
+  "description": "我们截获了一段多层编码的字符串 encoded.txt。它依次经过了：rot13 → hex → base32 → base64。请反向解码还原出原始 flag。",
+  "flag_format": "flag\\{[^}]+\\}",
+  "hint": "解码顺序：base64 → base32 → hex → rot13",
+  "needs_llm": true,
+  "est_time_sec": 10
+}

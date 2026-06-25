@@ -1,0 +1,70 @@
+# =========================================================
+# 烛龙·玄枢 ZHULONG-X .gitignore
+# =========================================================
+
+# OS / editor
+.DS_Store
+__MACOSX/
+._*
+.idea/
+.vscode/
+.codeflicker/
+
+# env / secrets
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+coverage/
+
+# Node / frontend
+frontend/node_modules/
+frontend/dist/
+node_modules/
+dist/
+build/
+.vite/
+
+# local runtime data
+*.db
+*.sqlite
+*.sqlite3
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+backend/data/*.db
+backend/data/*.sqlite
+backend/data/*.sqlite3
+ctf_runs/
+data/ctf_runs/
+backend/data/ctf_runs/
+backups/
+
+# logs (runtime only; demo attachments in examples/samples are tracked separately)
+data/ctf_runs/**/*.log
+backend/data/ctf_runs/**/*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# generated reports / uploads
+backend/app/storage/reports/*.md
+backend/app/storage/reports/*.html
+backend/app/storage/uploads/*
+!backend/app/storage/uploads/.gitkeep
+
+# release packages (only at repo root, not demo attachments in samples/examples)
+/*.zip
+/*.tar.gz
+/*.tgz
+/SHA256SUMS

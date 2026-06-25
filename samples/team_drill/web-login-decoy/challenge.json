@@ -1,0 +1,13 @@
+{
+  "name": "web-login-decoy",
+  "challenge_type": "web",
+  "description": "JS 中有真实候选，也有旧 token 干扰。",
+  "target": "",
+  "attachment": "app.js",
+  "tags": [
+    "team-drill",
+    "web"
+  ],
+  "priority": "high",
+  "assignee": "A"
+}

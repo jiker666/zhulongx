@@ -1,0 +1,2 @@
+hex=666c61677b63727970746f5f786f725f64656d6f7d
+hint=xor key is in title

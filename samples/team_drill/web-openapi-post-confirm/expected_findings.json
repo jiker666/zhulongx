@@ -1,0 +1,6 @@
+{
+  "decoys": [
+    "flag{post_decoy}"
+  ],
+  "manual_expected": true
+}

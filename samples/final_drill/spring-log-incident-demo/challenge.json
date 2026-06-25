@@ -1,0 +1,13 @@
+{
+  "name": "spring-log-incident-demo",
+  "challenge_type": "log",
+  "description": "Spring 日志时间线与异常事件",
+  "target": "",
+  "attachment": "spring.log",
+  "tags": [
+    "final-drill",
+    "log"
+  ],
+  "priority": "medium",
+  "assignee": ""
+}

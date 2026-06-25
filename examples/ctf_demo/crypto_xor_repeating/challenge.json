@@ -1,0 +1,10 @@
+{
+  "title": "Crypto XOR Repeating Key",
+  "category": "crypto",
+  "difficulty": "medium",
+  "description": "我们截获了密文 cipher.bin，已知使用重复密钥 XOR（key 长度 5），再 base64 编码。请还原明文找到 flag。",
+  "flag_format": "flag\\{[^}]+\\}",
+  "hint": "key 是 5 字节重复，先 base64 解码再 XOR",
+  "needs_llm": true,
+  "est_time_sec": 10
+}

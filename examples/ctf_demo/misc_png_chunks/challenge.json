@@ -1,0 +1,10 @@
+{
+  "title": "Misc PNG Chunk Steganography",
+  "category": "misc",
+  "difficulty": "medium",
+  "description": "我们拿到一张 PNG 图片 flag.png。flag 被藏在某个自定义 PNG chunk 的数据字段里。请解析 PNG chunk 结构提取 flag。",
+  "flag_format": "flag\\{[^}]+\\}",
+  "hint": "PNG chunk 结构：[4B length][4B type][data][4B CRC]，找 type 不是 IHDR/IDAT/IEND 的自定义 chunk",
+  "needs_llm": true,
+  "est_time_sec": 10
+}

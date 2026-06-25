@@ -1,0 +1,13 @@
+{
+  "name": "pcap-needs-review",
+  "challenge_type": "pcap",
+  "description": "pcap mock 包含明文 HTTP 候选和噪声。",
+  "target": "",
+  "attachment": "traffic.pcap",
+  "tags": [
+    "team-drill",
+    "pcap"
+  ],
+  "priority": "high",
+  "assignee": "B"
+}

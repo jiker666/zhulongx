@@ -1,0 +1,8 @@
+{
+  "title": "Misc Hidden Flag in Text",
+  "category": "misc",
+  "difficulty": "easy",
+  "description": "我们截获了一份 server.log 日志。里面藏着一段 flag，但被人故意用多个上下文混淆。请通过文件分析提取出完整的 flag。",
+  "flag_format": "flag\\{[^}]+\\}",
+  "hint": "在日志中以 flag{ 开头的字符串"
+}

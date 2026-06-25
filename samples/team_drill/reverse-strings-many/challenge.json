@@ -1,0 +1,13 @@
+{
+  "name": "reverse-strings-many",
+  "challenge_type": "reverse",
+  "description": "二进制 strings 中有多个候选，需要人工看上下文。",
+  "target": "",
+  "attachment": "rev.bin",
+  "tags": [
+    "team-drill",
+    "reverse"
+  ],
+  "priority": "medium",
+  "assignee": "B"
+}

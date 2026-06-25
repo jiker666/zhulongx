@@ -1,0 +1,13 @@
+{
+  "name": "web-js-api-demo",
+  "challenge_type": "web",
+  "description": "HTML/JS 附件提取 API 路径和候选答案",
+  "target": "",
+  "attachment": "index.html",
+  "tags": [
+    "final-drill",
+    "web"
+  ],
+  "priority": "medium",
+  "assignee": ""
+}

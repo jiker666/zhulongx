@@ -1,0 +1,7 @@
+{
+  "flag": "flag{k4q4nbsoxdwtxmgc4}",
+  "chain": [
+    "xor_single_byte_0x36",
+    "hex"
+  ]
+}

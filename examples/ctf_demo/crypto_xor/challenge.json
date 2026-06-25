@@ -1,0 +1,8 @@
+{
+  "title": "Crypto XOR Base64",
+  "category": "crypto",
+  "difficulty": "easy",
+  "description": "我们截获了一段密文，已知它先经过 XOR（key=0x5A），再 base64 编码。请还原明文找到 flag。",
+  "flag_format": "flag\\{[^}]+\\}",
+  "hint": "key = 0x5A；编码顺序：XOR → base64"
+}

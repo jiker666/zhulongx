@@ -1,0 +1,6 @@
+{
+  "decoys": [
+    "flag{comment_decoy}"
+  ],
+  "manual_expected": false
+}

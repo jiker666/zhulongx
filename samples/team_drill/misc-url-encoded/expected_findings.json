@@ -1,0 +1,6 @@
+{
+  "decoys": [
+    "flag{url_decoy}"
+  ],
+  "manual_expected": false
+}

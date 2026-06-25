@@ -1,0 +1,13 @@
+{
+  "name": "crypto-hex-base64",
+  "challenge_type": "crypto",
+  "description": "hex 和 base64 混合，两个候选只有一个正确。",
+  "target": "",
+  "attachment": "cipher.txt",
+  "tags": [
+    "team-drill",
+    "crypto"
+  ],
+  "priority": "medium",
+  "assignee": "C"
+}

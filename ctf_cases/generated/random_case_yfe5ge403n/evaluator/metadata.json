@@ -1,0 +1,10 @@
+{
+  "flag": "flag{0owlkb1r0y2qf0drpyimt}",
+  "chain": [
+    "rot13",
+    "base64",
+    "xor_single_byte_0xe8",
+    "hex",
+    "hex"
+  ]
+}

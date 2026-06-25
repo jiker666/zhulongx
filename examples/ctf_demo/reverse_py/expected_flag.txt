@@ -1,0 +1,1 @@
+flag{reverse_python_obfuscation}
