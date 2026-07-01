@@ -31,6 +31,35 @@ class Settings(BaseSettings):
     LLM_MAX_TOKENS: int = 4096
     LLM_TEMPERATURE: float = 0.2
 
+    # ===== Cost-aware Model Router (v6) =====
+    LLM_ROUTER_ENABLED: bool = True
+    LLM_BUDGET_PER_TASK_USD: float = 0.05
+    LLM_BUDGET_DAILY_USD: float = 1.00
+    LLM_DEFAULT_MAX_CONTEXT_CHARS: int = 12000
+    LLM_COMPRESS_THRESHOLD_CHARS: int = 8000
+
+    # Cheap lane — daily classification / planning / simple fixes
+    LLM_CHEAP_PROVIDER: str = "deepseek"
+    LLM_CHEAP_BASE_URL: str = "https://api.deepseek.com/v1"
+    LLM_CHEAP_MODEL: str = "deepseek-v4-flash"
+    LLM_CHEAP_API_KEY: str = "replace_me"
+    LLM_CHEAP_MAX_TOKENS: int = 1800
+    LLM_CHEAP_TEMPERATURE: float = 0.2
+
+    # Expert lane — complex repairs / long context / stuck loops
+    LLM_EXPERT_PROVIDER: str = "glm"
+    LLM_EXPERT_BASE_URL: str = "https://api.z.ai/api/coding/paas/v4"
+    LLM_EXPERT_MODEL: str = "glm-5.2"
+    LLM_EXPERT_API_KEY: str = "replace_me"
+    LLM_EXPERT_MAX_TOKENS: int = 4096
+    LLM_EXPERT_TEMPERATURE: float = 0.2
+
+    # Fallback lane (optional)
+    LLM_FALLBACK_PROVIDER: str = "qwen"
+    LLM_FALLBACK_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    LLM_FALLBACK_MODEL: str = "qwen-coder-plus"
+    LLM_FALLBACK_API_KEY: str = "replace_me"
+
     MAX_UPLOAD_SIZE: int = 50 * 1024 * 1024  # 50MB
 
     COMPETITION_MODE: bool = False

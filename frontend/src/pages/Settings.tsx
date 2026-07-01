@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
-import { Shield, ExternalLink, Loader2, CheckCircle2, XCircle, Zap, Brain, AlertTriangle, Search } from 'lucide-react'
-import { getHealth, getLLMStatus, scopeCheck, testLLM, HealthStatus, LLMStatus, LLMTestResult, ScopeCheckResult } from '../api'
+import { Shield, ExternalLink, Loader2, CheckCircle2, XCircle, Zap, Brain, AlertTriangle, Search, Layers } from 'lucide-react'
+import { getHealth, getLLMStatus, scopeCheck, testLLM, ctfGetRouterStatus, HealthStatus, LLMStatus, LLMTestResult, ScopeCheckResult, RouterStatus } from '../api'
 
 const CONFIG_ITEMS = [
   { key: 'APP_NAME', value: 'CyberPilot', desc: '应用名称' },
@@ -20,12 +20,17 @@ export default function Settings() {
   const [scopeChecking, setScopeChecking] = useState(false)
   const [scopeResult, setScopeResult] = useState<ScopeCheckResult | null>(null)
   const [scopeError, setScopeError] = useState('')
+  const [routerStatus, setRouterStatus] = useState<RouterStatus | null>(null)
 
   useEffect(() => {
-    Promise.all([getLLMStatus(), getHealth()])
-      .then(([llm, h]) => {
+    Promise.all([getLLMStatus(), getHealth(), ctfGetRouterStatus()])
+      .then(([llm, h, router]) => {
         setLlmStatus(llm.data)
         setHealth(h.data)
+        setRouterStatus(router.data)
+      })
+      .catch(() => {
+        // router status 可能失败（后端未升级），忽略
       })
       .finally(() => setLlmLoading(false))
   }, [])
@@ -143,6 +148,54 @@ export default function Settings() {
           <div className="px-5 py-4 text-red-400 text-sm">获取 LLM 状态失败</div>
         )}
       </div>
+
+      {/* v6: Model Router Status */}
+      {routerStatus && (
+        <div className="bg-[#111827] border border-[#1f2937] rounded-xl overflow-hidden mb-5">
+          <div className="px-5 py-3 border-b border-[#1f2937] font-medium text-white text-sm flex items-center gap-2">
+            <Layers size={14} className="text-amber-400" /> v6 模型路由 ModelRouter
+          </div>
+          <div className="divide-y divide-[#1f2937]">
+            <LLMRow k="路由启用" v={routerStatus.router_enabled ? '已启用' : '已禁用'} highlight={routerStatus.router_enabled} />
+            <LLMRow k="单题预算" v={`${routerStatus.budget_per_task_usd.toFixed(4)}`} />
+            <LLMRow k="日预算" v={`${routerStatus.budget_daily_usd.toFixed(2)}`} />
+            <LLMRow k="今日已用" v={`${routerStatus.daily_total_cost_usd.toFixed(6)}`} warn={routerStatus.daily_total_cost_usd > routerStatus.budget_daily_usd * 0.8} />
+            <LLMRow k="压缩阈值" v={`${routerStatus.compress_threshold_chars} chars`} />
+            <div className="px-5 py-3">
+              <div className="text-[10px] text-blue-300 uppercase mb-2">Cheap Lane（日常分类/计划）</div>
+              <div className="grid grid-cols-2 gap-2 text-xs">
+                <div className="text-gray-500">Provider: <span className="text-gray-300 font-mono">{routerStatus.cheap.provider}</span></div>
+                <div className="text-gray-500">Model: <span className="text-gray-300 font-mono">{routerStatus.cheap.model}</span></div>
+                <div className="text-gray-500">Host: <span className="text-gray-300 font-mono">{routerStatus.cheap.base_url_host || '-'}</span></div>
+                <div className="text-gray-500">MaxTokens: <span className="text-gray-300 font-mono">{routerStatus.cheap.max_tokens}</span></div>
+                <div className="text-gray-500">Key: <span className={routerStatus.cheap.api_key_configured ? 'text-green-400' : 'text-yellow-400'}>{routerStatus.cheap.api_key_configured ? '已配置' : '未配置 (mock)'}</span></div>
+              </div>
+            </div>
+            <div className="px-5 py-3">
+              <div className="text-[10px] text-purple-300 uppercase mb-2">Expert Lane（复杂/卡住时升级 GLM-5.2）</div>
+              <div className="grid grid-cols-2 gap-2 text-xs">
+                <div className="text-gray-500">Provider: <span className="text-gray-300 font-mono">{routerStatus.expert.provider}</span></div>
+                <div className="text-gray-500">Model: <span className="text-gray-300 font-mono">{routerStatus.expert.model}</span></div>
+                <div className="text-gray-500">Host: <span className="text-gray-300 font-mono">{routerStatus.expert.base_url_host || '-'}</span></div>
+                <div className="text-gray-500">MaxTokens: <span className="text-gray-300 font-mono">{routerStatus.expert.max_tokens}</span></div>
+                <div className="text-gray-500">Key: <span className={routerStatus.expert.api_key_configured ? 'text-green-400' : 'text-yellow-400'}>{routerStatus.expert.api_key_configured ? '已配置' : '未配置'}</span></div>
+              </div>
+            </div>
+            <div className="px-5 py-3">
+              <div className="text-[10px] text-gray-300 uppercase mb-2">Fallback Lane（备用）</div>
+              <div className="grid grid-cols-2 gap-2 text-xs">
+                <div className="text-gray-500">Provider: <span className="text-gray-300 font-mono">{routerStatus.fallback.provider}</span></div>
+                <div className="text-gray-500">Model: <span className="text-gray-300 font-mono">{routerStatus.fallback.model}</span></div>
+                <div className="text-gray-500">Host: <span className="text-gray-300 font-mono">{routerStatus.fallback.base_url_host || '-'}</span></div>
+                <div className="text-gray-500">Key: <span className={routerStatus.fallback.api_key_configured ? 'text-green-400' : 'text-gray-500'}>{routerStatus.fallback.api_key_configured ? '已配置' : '未配置'}</span></div>
+              </div>
+            </div>
+            <div className="px-5 py-3 text-[10px] text-gray-600">
+              分级规则：静态命中 → 不调 LLM；日常 → cheap；连续失败/循环/长上下文 → 升级 expert；超预算 → 转人工
+            </div>
+          </div>
+        </div>
+      )}
 
       {health?.scope_config_summary && (
         <div className="bg-[#111827] border border-[#1f2937] rounded-xl overflow-hidden mb-5">

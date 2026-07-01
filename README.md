@@ -40,6 +40,73 @@
 
 ---
 
+## Cost-aware Multi-Agent Solve Loop
+
+ZHULONG-X v6 引入低成本多角色解题闭环：
+
+- **Manager**：保留原有 Orchestrator 状态机，负责全局推进。
+- **Blackboard**：沉淀 Fact / Intent / Hint，避免上下文污染。
+- **Observer**：旁路监督循环、跑偏、提前终止和预算浪费。
+- **ModelRouter**：先静态分析，再便宜模型，最后才升级 GLM-5.2。
+- **CostAccounting**：记录每题 token 与成本，支持挑战杯答辩展示。
+- **FailureAttributor**：失败归因 L1-L4，L4 信息不足直接转人工，不浪费 token。
+
+默认 mock 模式无需 API key；接入国内 API 后，可使用 DeepSeek / Qwen / GLM / OneAPI 等 OpenAI-compatible 服务。
+
+### v6 新增 API
+
+| 接口 | 用途 |
+|------|------|
+| `GET /api/ctf/tasks/{task_id}/blackboard` | 获取事实黑板 / 意图 / 提示 |
+| `POST /api/ctf/tasks/{task_id}/hints` | 添加人工 / Observer 提示 |
+| `PATCH /api/ctf/tasks/{task_id}/intents/{intent_id}` | 更新意图状态 |
+| `GET /api/ctf/tasks/{task_id}/cost` | 获取 LLM 调用成本汇总 |
+| `GET /api/ctf/tasks/{task_id}/cost/records` | 获取调用明细（脱敏） |
+| `GET /api/ctf/llm/router/status` | 获取模型路由状态（脱敏） |
+
+### v6 新增模块
+
+| 模块 | 职责 |
+|------|------|
+| `backend/app/core/context_compressor.py` | 压缩工具输出 / evidence / 文件分析 |
+| `backend/app/core/cost_accounting.py` | LLM 调用成本核算 + prompt 缓存 |
+| `backend/app/core/model_router.py` | 模型路由 STATIC_ONLY / CHEAP / EXPERT / STOP |
+| `backend/app/core/blackboard.py` | Fact / Intent / Hint 三元组黑板 |
+| `backend/app/core/observer.py` | 旁路监督循环 / drift / 预算 |
+| `backend/app/core/failure_attributor.py` | 失败归因 L1-L4 |
+| `backend/app/skills/` | 题型 Skill 提示词（ctf/web/crypto/reverse/misc/forensics/cost_control） |
+
+### 模型路由配置
+
+在 `.env` 中配置 cheap / expert / fallback 三条 lane：
+
+```dotenv
+LLM_ROUTER_ENABLED=true
+LLM_BUDGET_PER_TASK_USD=0.05
+LLM_BUDGET_DAILY_USD=1.00
+
+# Cheap: 日常分类/计划/短修复
+LLM_CHEAP_PROVIDER=deepseek
+LLM_CHEAP_BASE_URL=https://api.deepseek.com/v1
+LLM_CHEAP_MODEL=deepseek-v4-flash
+LLM_CHEAP_API_KEY=sk-your-deepseek-key
+
+# Expert: 复杂/卡住时升级
+LLM_EXPERT_PROVIDER=glm
+LLM_EXPERT_BASE_URL=https://api.z.ai/api/coding/paas/v4
+LLM_EXPERT_MODEL=glm-5.2
+LLM_EXPERT_API_KEY=sk-your-glm-key
+```
+
+升级 expert 的条件（满足任一）：
+- 连续 3 轮无候选 flag
+- 同一错误类型重复 2 次
+- 附件分析摘要 > 8000 字符（长上下文）
+- Observer 判断陷入循环
+- 用户手动 `force_expert=true`
+
+---
+
 ## 2. 快速启动
 
 ### 方式 A：后端单独启动
@@ -250,8 +317,8 @@ curl http://localhost:8000/api/ctf/tasks/ctf_xxxx/writeup
 ## 7. 验收命令
 
 ```bash
-# 后端测试（94 个，含 CTF 模块测试）
-c backend && python3 -m pytest -q
+# 后端测试（198 个，含 v6 多角色闭环测试）
+cd backend && python3 -m pytest -q
 
 # 前端构建
 cd frontend && npm ci && npm run build
@@ -272,7 +339,7 @@ make ctf-llm-smoke
 make safety-audit
 ```
 
-预期输出：`94 passed` / `built in 1.5s` / `7 passed` / `10/11 demo passed`。
+预期输出：`198 passed` / `built in 1.6s` / `7 passed` / `10/11 demo passed`。
 
 ---
 

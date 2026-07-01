@@ -43,6 +43,15 @@ from app.core.ctf_persistence import (
 from app.core.flag_verifier import FlagVerifier
 from app.core.llm_adapter import LLMAdapter, get_adapter
 from app.core.writeup_generator import WriteupGenerator
+from app.core.blackboard import Blackboard, get_blackboard
+from app.core.cost_accounting import CostAccounting, get_cost_accounting
+from app.core.model_router import ModelRouter, get_model_router, RouteDecision
+from app.core.observer import Observer, get_observer, ObserverAdvice
+from app.core.failure_attributor import attribute_failure, FailureAttribution
+from app.core.context_compressor import (
+    compress_tool_output, compress_file_analysis, compress_evidence_chain,
+    build_llm_context_snippet,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -167,12 +176,23 @@ class CtfOrchestrator:
         sandbox: Optional[CodeExecutionSandbox] = None,
         verifier: Optional[FlagVerifier] = None,
         writeup: Optional[WriteupGenerator] = None,
+        blackboard: Optional[Blackboard] = None,
+        observer: Optional[Observer] = None,
+        router: Optional[ModelRouter] = None,
+        cost_accounting: Optional[CostAccounting] = None,
     ) -> None:
         self.llm = llm or get_adapter()
         self.analyzer = analyzer or get_analyzer()
         self.sandbox = sandbox or get_sandbox(allow_network=False)
         self.verifier = verifier or FlagVerifier()
         self.writeup = writeup or WriteupGenerator()
+        # v6 旁路模块
+        self.blackboard = blackboard or get_blackboard()
+        self.observer = observer or get_observer()
+        self.router = router or get_model_router()
+        self.cost_accounting = cost_accounting or get_cost_accounting()
+        self._last_observer_advice: Dict[str, ObserverAdvice] = {}
+        self._repeated_error_counts: Dict[str, int] = {}
 
     # ---------- public API ----------
 
@@ -264,9 +284,21 @@ class CtfOrchestrator:
                     task.state = CtfState.HUMAN_REQUIRED
                     task.error = f"达到最大轮次 {rounds_cap}，请人工接管"
                     break
+                # v6: 预算检查
+                if self.cost_accounting.is_budget_exceeded(task.task_id):
+                    task.state = CtfState.HUMAN_REQUIRED
+                    task.error = "LLM 预算超支，请人工接管"
+                    self._record_evidence(task, "budget_stop", "预算超支，转入人工接管", success=False)
+                    break
+                # v6: Observer 旁路检查（每步前）
+                self._run_observer_pre_check(task, rounds_cap)
+                if task.state in (CtfState.DONE, CtfState.FAILED, CtfState.HUMAN_REQUIRED):
+                    break
                 task.rounds_used += 1
                 self._step(task)
                 task.updated_at = time.time()
+                # v6: 每步后写黑板事实
+                self._post_step_blackboard(task)
                 # 每步同步 DB
                 try:
                     save_task(task.to_dict())
@@ -348,6 +380,8 @@ class CtfOrchestrator:
             system_prompt=sys,
             max_tokens=400,
         )
+        # v6: 记录分类成本（mock 模式 0 成本）
+        self._record_llm_cost_simple(task, "classify", prompt, resp)
         if not ok or not data:
             # 兜底：根据附件类型猜
             cat = self._guess_category_from_attachments(task.attachments)
@@ -391,6 +425,8 @@ class CtfOrchestrator:
             system_prompt="你是 CTF 解题策略师。只输出 JSON。",
             max_tokens=400,
         )
+        # v6: 记录计划成本
+        self._record_llm_cost_simple(task, "plan", prompt, resp)
         if ok and data:
             task.plan.script_plan = list(data.get("plan", []))
             task.plan.risks = list(data.get("risks", []))
@@ -430,6 +466,8 @@ class CtfOrchestrator:
                                 "confidence": 0.7,
                             })
             task.analysis = summary
+            # v6: 写文件 fact 到黑板
+            self._write_file_facts_to_blackboard(task, summary)
             self._record_evidence(
                 task, "analyze_files",
                 f"分析 {len(task.attachments)} 个附件，发现 {len(task.candidate_flags)} 个候选 flag",
@@ -443,6 +481,34 @@ class CtfOrchestrator:
             )
             task.analysis = {"error": str(e)}
         task.state = CtfState.GENERATE_SCRIPT
+
+    def _write_file_facts_to_blackboard(self, task: CtfTask, summary: Dict[str, Any]) -> None:
+        """把文件分析结果写入黑板 fact（失败容错）。"""
+        try:
+            for f in (summary.get("files") or [])[:10]:
+                content = f"file={f.get('relative_path')} type={f.get('type')} size={f.get('size')}"
+                self.blackboard.add_fact(
+                    task_id=task.task_id, kind="file",
+                    content=content, confidence=0.7,
+                    source_step="analyze_files",
+                )
+                # 可疑 strings
+                for s in (f.get("suspicious_strings") or [])[:5]:
+                    self.blackboard.add_fact(
+                        task_id=task.task_id, kind="clue",
+                        content=f"suspicious: {s}", confidence=0.6,
+                        source_step="analyze_files",
+                    )
+            # 候选 flag 写 candidate fact
+            for c in task.candidate_flags:
+                self.blackboard.add_fact(
+                    task_id=task.task_id, kind="candidate",
+                    content=c["flag"], confidence=c.get("confidence", 0.7),
+                    source_step="analyze_files",
+                    evidence_ref=c.get("source"),
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("write file facts to blackboard failed: %s", e)
 
     def _generate_script(self, task: CtfTask) -> None:
         # 构造 prompt
@@ -459,6 +525,29 @@ class CtfOrchestrator:
                 if f.get("flags_found"):
                     file_clues += f" 已发现 flag: {f['flags_found'][:3]}"
 
+        # v6: 静态命中 → 不调 LLM
+        if task.candidate_flags and any(c.get("confidence", 0) >= 0.7 for c in task.candidate_flags):
+            self.cost_accounting.record_static_only(
+                task_id=task.task_id, step="generate_script",
+                reason="static_candidate_high_confidence",
+            )
+            # 用兜底脚本提取
+            task.current_script = self._fallback_script(task)
+            self._record_evidence(
+                task, "generate_script",
+                f"静态分析已发现高置信候选 flag {len(task.candidate_flags)} 个，跳过 LLM",
+                artifacts={"static_only": True},
+            )
+            task.state = CtfState.RUN_SCRIPT
+            return
+
+        # v6: 查 ModelRouter 决定 max_tokens
+        route = self._route_decision(task, "generate_script")
+        if route.lane == "stop":
+            task.state = CtfState.HUMAN_REQUIRED
+            task.error = "预算耗尽，转入人工接管"
+            return
+
         prompt = (
             f"题型: {task.plan.category if task.plan else 'unknown'}\n"
             f"题面: {task.description[:400]}\n"
@@ -473,12 +562,14 @@ class CtfOrchestrator:
             "你是 CTF 解题脚本专家。输出纯 Python 代码，不要解释，不要 markdown 围栏。"
             "脚本必须能直接 python3 solve.py 运行。"
         )
+        messages = [{"role": "user", "content": prompt}]
         resp = self.llm.chat(
-            [{"role": "user", "content": prompt}],
+            messages,
             system_prompt=sys,
-            max_tokens=1500,
-            temperature=0.1,
+            max_tokens=route.max_tokens,
+            temperature=route.temperature,
         )
+        self._record_llm_cost(task, "generate_script", resp, route, messages)
         if not resp.success or not resp.content:
             # 兜底脚本
             script = self._fallback_script(task)
@@ -501,8 +592,8 @@ class CtfOrchestrator:
             task.current_script = content
             self._record_evidence(
                 task, "generate_script",
-                f"LLM 生成脚本 {len(content)} 字符",
-                artifacts={"script_lines": len(content.splitlines())},
+                f"LLM 生成脚本 {len(content)} 字符 (lane={route.lane}, model={route.model})",
+                artifacts={"script_lines": len(content.splitlines()), "route": route.to_dict()},
                 success=resp.success,
             )
         task.state = CtfState.RUN_SCRIPT
@@ -570,19 +661,78 @@ class CtfOrchestrator:
         last = task.script_runs[-1]
         stderr = (last.get("stderr") or "")[:800]
         stdout = (last.get("stdout") or "")[:400]
+
+        # v6: 先用 failure_attributor 做失败归因
+        error_facts = [
+            {"kind": "error", "content": f.content}
+            for f in self.blackboard.list_facts(task.task_id, kind="error", limit=20)
+        ]
+        attribution = attribute_failure(
+            script=task.current_script,
+            stdout=stdout, stderr=stderr,
+            facts=error_facts,
+            round_index=task.rounds_used,
+        )
+        # 累计同类错误次数
+        sig_key = attribution.root_cause[:50]
+        if "ValueError" in stderr or "Error" in stderr:
+            self._repeated_error_counts[task.task_id] = self._repeated_error_counts.get(task.task_id, 0) + 1
+        # 写归因 fact 到黑板
+        try:
+            self.blackboard.add_fact(
+                task_id=task.task_id, kind="error",
+                content=f"[{attribution.level}] {attribution.root_cause}",
+                confidence=0.7, source_step="reflect_error",
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("write attribution fact failed: %s", e)
+
+        # v6: L4 → 直接人工接管，不浪费 token
+        if attribution.level == "L4":
+            task.state = CtfState.HUMAN_REQUIRED
+            task.error = f"失败归因 L4: {attribution.root_cause}，需人工介入"
+            self._record_evidence(
+                task, "reflect_error",
+                f"L4 归因: {attribution.root_cause}，停止重试",
+                artifacts=attribution.to_dict(),
+                success=False,
+            )
+            return
+
+        # v6: 查路由，归因建议升级 expert 时传入 force_expert
+        route = self._route_decision(task, "reflect_error")
+        if attribution.need_expert_model:
+            route = self.router.decide(
+                task_id=task.task_id, step="reflect_error",
+                force_expert=True,
+            )
+        if route.lane == "stop":
+            task.state = CtfState.HUMAN_REQUIRED
+            task.error = "预算耗尽，转入人工接管"
+            return
+
+        # v6: 压缩 stderr 给 LLM（只传尾部 + 关键异常）
+        compressed_stderr = compress_tool_output(stderr, max_chars=1000)
+        stderr_snippet = "\n".join(compressed_stderr.facts[:20]) or stderr[:500]
+
         prompt = (
-            f"上次执行失败：\n"
-            f"stderr:\n{stderr}\n"
-            f"stdout:\n{stdout}\n"
-            f"当前脚本:\n{task.current_script[:1500]}\n"
+            f"上次执行失败（归因 {attribution.level}）：\n"
+            f"失败原因: {attribution.root_cause}\n"
+            f"修复策略: {attribution.fix_strategy}\n"
+            f"最小修复点: {attribution.minimal_patch_hint}\n"
+            f"stderr:\n{stderr_snippet}\n"
+            f"stdout:\n{stdout[:200]}\n"
+            f"当前脚本:\n{task.current_script[:1200]}\n"
             "请修复脚本中的错误，输出修正后的完整脚本（纯 Python，不要 markdown 围栏）。"
         )
+        messages = [{"role": "user", "content": prompt}]
         resp = self.llm.chat(
-            [{"role": "user", "content": prompt}],
+            messages,
             system_prompt="你是 Python 调试专家。修复错误，只输出完整修复后的代码。",
-            max_tokens=1500,
-            temperature=0.2,
+            max_tokens=route.max_tokens,
+            temperature=route.temperature,
         )
+        self._record_llm_cost(task, "reflect_error", resp, route, messages)
         if resp.success and resp.content:
             content = resp.content.strip()
             if content.startswith("```"):
@@ -595,7 +745,8 @@ class CtfOrchestrator:
             task.current_script = content
             self._record_evidence(
                 task, "reflect_error",
-                f"LLM 修复脚本，准备重试",
+                f"LLM 修复脚本 (lane={route.lane}, level={attribution.level})",
+                artifacts={"attribution": attribution.to_dict(), "route": route.to_dict()},
                 success=True,
             )
             task.state = CtfState.RUN_SCRIPT
@@ -603,6 +754,7 @@ class CtfOrchestrator:
             self._record_evidence(
                 task, "reflect_error",
                 f"LLM 修复失败: {resp.error}",
+                artifacts={"attribution": attribution.to_dict()},
                 success=False,
             )
             task.state = CtfState.VERIFY_FLAG  # 还是尝试验证已有候选
@@ -638,6 +790,15 @@ class CtfOrchestrator:
                     upsert_flag(task.task_id, cd)
                 except Exception as e:  # noqa: BLE001
                     logger.warning("persist flag failed: %s", e)
+                # v6: 写 candidate fact 到黑板
+                try:
+                    self.blackboard.add_fact(
+                        task_id=task.task_id, kind="candidate",
+                        content=c.flag, confidence=c.confidence,
+                        source_step="verify_flag",
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("write candidate fact failed: %s", e)
         # 排序选 best
         task.candidate_flags.sort(key=lambda c: -c.get("confidence", 0.5))
         task.best_flag = task.candidate_flags[0]["flag"] if task.candidate_flags else None
@@ -681,6 +842,136 @@ class CtfOrchestrator:
         else:
             task.state = CtfState.HUMAN_REQUIRED
             task.error = "未能自动确定 flag，请人工接管"
+
+    # ---------- v6 helpers ----------
+
+    def _run_observer_pre_check(self, task: CtfTask, rounds_cap: int) -> None:
+        """每步前让 Observer 旁路检查，决定是否提前停止/重规划。"""
+        try:
+            advice = self.observer.observe(
+                task_id=task.task_id,
+                rounds_used=task.rounds_used,
+                max_rounds=rounds_cap,
+                script_runs=task.script_runs,
+                current_script=task.current_script,
+                candidate_flags=task.candidate_flags,
+                state=task.state.value,
+            )
+            self._last_observer_advice[task.task_id] = advice
+            # 写 Observer 建议到黑板 hint
+            if advice.advice and advice.advice != "状态正常，继续推进":
+                self.blackboard.add_hint(
+                    task_id=task.task_id,
+                    content=advice.advice,
+                    source="observer",
+                )
+            # should_stop → HUMAN_REQUIRED
+            if advice.should_stop and not task.candidate_flags:
+                task.state = CtfState.HUMAN_REQUIRED
+                task.error = f"Observer 建议停止: {advice.advice}"
+                return
+        except Exception as e:  # noqa: BLE001
+            logger.warning("observer pre-check failed: %s", e)
+
+    def _post_step_blackboard(self, task: CtfTask) -> None:
+        """每步后把关键产出写入黑板事实。失败容错，不影响主流程。"""
+        try:
+            # 已经在 _analyze_files / _verify_flag / _run_script 中写了，
+            # 这里只做兜底：记录最近 evidence 摘要
+            if task.evidence:
+                last = task.evidence[-1]
+                # 仅记录失败的 evidence 作为 error fact（去重）
+                if not last.success and last.step not in ("init", "scope_check"):
+                    existing = {f.content for f in self.blackboard.list_facts(task.task_id, kind="error", limit=50)}
+                    sig = (last.output_summary or last.input_summary or "")[:200]
+                    if sig and sig not in existing:
+                        self.blackboard.add_fact(
+                            task_id=task.task_id,
+                            kind="error",
+                            content=sig,
+                            confidence=0.6,
+                            source_step=last.step,
+                        )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("post_step_blackboard failed: %s", e)
+
+    def _route_decision(self, task: CtfTask, step: str) -> RouteDecision:
+        """查询 ModelRouter 决定本轮 step 的 lane。"""
+        repeated = self._repeated_error_counts.get(task.task_id, 0)
+        analysis_chars = len(str(task.analysis or "")) if task.analysis else 0
+        return self.router.decide(
+            task_id=task.task_id,
+            step=step,
+            rounds_used=task.rounds_used,
+            max_rounds=task.max_rounds,
+            candidate_flags=task.candidate_flags,
+            repeated_error_count=repeated,
+            analysis_summary_chars=analysis_chars,
+            observer_loop_detected=self._last_observer_advice.get(task.task_id) is not None
+                and self._last_observer_advice[task.task_id].loop_detected,
+        )
+
+    def _record_llm_cost(
+        self,
+        task: CtfTask,
+        step: str,
+        resp,
+        route: RouteDecision,
+        messages: List[Dict[str, str]],
+    ) -> None:
+        """记录一次 LLM 调用的成本（mock 模式下成本为 0）。"""
+        try:
+            # mock 模式：用 model="mock" 记录（0 成本）
+            model = route.model
+            provider = route.provider
+            if getattr(self.llm, "mock_mode", False):
+                model = "mock"
+                provider = "mock"
+            self.cost_accounting.record(
+                task_id=task.task_id,
+                step=step,
+                provider=provider,
+                model=model,
+                input_text=" ".join(m.get("content", "") for m in messages),
+                output_text=getattr(resp, "content", "") or "",
+                success=getattr(resp, "success", True),
+                route_reason=route.reason,
+                messages=messages,
+                use_cache=True,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("record llm cost failed: %s", e)
+
+    def _record_llm_cost_simple(
+        self,
+        task: CtfTask,
+        step: str,
+        prompt: str,
+        resp,
+    ) -> None:
+        """简化的成本记录（用于 classify / plan 等直接调用）。mock 模式 0 成本。"""
+        try:
+            model = self.llm.model
+            provider = self.llm.provider
+            if getattr(self.llm, "mock_mode", False):
+                model = "mock"
+                provider = "mock"
+            self.cost_accounting.record(
+                task_id=task.task_id, step=step,
+                provider=provider, model=model,
+                input_text=prompt,
+                output_text=str(getattr(resp, "content", "") or "")[:200],
+                success=getattr(resp, "success", True),
+                route_reason="cheap_default",
+                messages=[{"role": "user", "content": prompt}],
+                use_cache=True,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("record llm cost simple failed: %s", e)
+
+    def get_last_observer_advice(self, task_id: str) -> Optional[ObserverAdvice]:
+        """供 API / 前端查询最近一次 Observer 建议。"""
+        return self._last_observer_advice.get(task_id)
 
     # ---------- helpers ----------
 

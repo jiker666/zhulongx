@@ -382,6 +382,113 @@ export interface LlmStatus {
 }
 export const ctfLlmStatus = () => api.get<LlmStatus>('/ctf/llm/status')
 
+// ============== v6: Blackboard / Cost / Router ==============
+
+export interface BlackboardFact {
+  fact_id: string
+  task_id: string
+  kind: string // file|clue|candidate|error|tool_result|constraint
+  content: string
+  confidence: number
+  source_step: string
+  evidence_ref?: string | null
+  created_at: number
+}
+
+export interface BlackboardIntent {
+  intent_id: string
+  task_id: string
+  title: string
+  rationale: string
+  status: string // pending|in_progress|completed|failed|deprecated
+  priority: number
+  depends_on: string[]
+  result_fact_ids: string[]
+  created_at: number
+  updated_at: number
+}
+
+export interface BlackboardHint {
+  hint_id: string
+  task_id: string
+  content: string
+  source: string // human|observer|system
+  consumed: boolean
+  created_at: number
+}
+
+export interface BlackboardSnapshot {
+  task_id: string
+  facts: BlackboardFact[]
+  intents: BlackboardIntent[]
+  hints: BlackboardHint[]
+  fact_count: number
+  candidate_count: number
+}
+
+export interface TaskCostSummary {
+  task_id: string
+  total_calls: number
+  successful_calls: number
+  failed_calls: number
+  cheap_calls: number
+  expert_calls: number
+  fallback_calls: number
+  static_only_calls: number
+  total_input_tokens: number
+  total_output_tokens: number
+  total_cost_usd: number
+  budget_per_task_usd: number
+  budget_exceeded: boolean
+  cache_hits: number
+  by_step: Record<string, number>
+  by_model: Record<string, number>
+}
+
+export interface RouterStatus {
+  router_enabled: boolean
+  budget_per_task_usd: number
+  budget_daily_usd: number
+  compress_threshold_chars: number
+  cheap: {
+    provider: string
+    model: string
+    base_url_host: string
+    api_key_configured: boolean
+    max_tokens: number
+  }
+  expert: {
+    provider: string
+    model: string
+    base_url_host: string
+    api_key_configured: boolean
+    max_tokens: number
+  }
+  fallback: {
+    provider: string
+    model: string
+    base_url_host: string
+    api_key_configured: boolean
+  }
+  daily_total_cost_usd: number
+}
+
+export const ctfGetBlackboard = (taskId: string) =>
+  api.get<BlackboardSnapshot>(`/ctf/tasks/${taskId}/blackboard`)
+export const ctfAddHint = (taskId: string, data: { content: string; source?: string }) =>
+  api.post<BlackboardHint>(`/ctf/tasks/${taskId}/hints`, data)
+export const ctfUpdateIntent = (taskId: string, intentId: string, data: Partial<{
+  status: string
+  title: string
+  rationale: string
+  priority: number
+  result_fact_ids: string[]
+}>) => api.patch<BlackboardIntent>(`/ctf/tasks/${taskId}/intents/${intentId}`, data)
+export const ctfGetTaskCost = (taskId: string) =>
+  api.get<TaskCostSummary>(`/ctf/tasks/${taskId}/cost`)
+export const ctfGetRouterStatus = () =>
+  api.get<RouterStatus>('/ctf/llm/router/status')
+
 // 全局错误处理：网络断开时给统一提示
 api.interceptors.response.use(
   (response) => response,

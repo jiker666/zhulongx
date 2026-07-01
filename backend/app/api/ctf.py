@@ -39,6 +39,10 @@ from app.core.ctf_persistence import (
     load_task_view,
 )
 from app.core.llm_adapter import get_adapter
+from app.core.blackboard import get_blackboard
+from app.core.cost_accounting import get_cost_accounting
+from app.core.model_router import get_model_router
+from app.schemas.blackboard import HintIn, IntentUpdateIn
 
 
 router = APIRouter(prefix="/ctf", tags=["ctf"])
@@ -444,3 +448,61 @@ def benchmark():
 @router.get("/llm/status")
 def llm_status():
     return _llm_status()
+
+
+# ---------- v6: Blackboard / Cost / Router ----------
+
+
+@router.get("/tasks/{task_id}/blackboard")
+def get_blackboard_endpoint(task_id: str):
+    """获取任务的事实黑板 / 意图队列 / 提示。"""
+    bb = get_blackboard()
+    return bb.snapshot(task_id)
+
+
+@router.post("/tasks/{task_id}/hints")
+def add_hint_endpoint(task_id: str, payload: HintIn):
+    """添加人工 / Observer 提示。"""
+    bb = get_blackboard()
+    hint = bb.add_hint(task_id=task_id, content=payload.content, source=payload.source)
+    return hint.to_dict()
+
+
+@router.patch("/tasks/{task_id}/intents/{intent_id}")
+def update_intent_endpoint(task_id: str, intent_id: str, payload: IntentUpdateIn):
+    """更新意图状态。"""
+    bb = get_blackboard()
+    updated = bb.update_intent(
+        task_id, intent_id,
+        status=payload.status,
+        title=payload.title,
+        rationale=payload.rationale,
+        priority=payload.priority,
+        result_fact_ids=payload.result_fact_ids,
+    )
+    if not updated:
+        raise HTTPException(404, f"intent not found: {intent_id}")
+    return updated.to_dict()
+
+
+@router.get("/tasks/{task_id}/cost")
+def get_task_cost_endpoint(task_id: str):
+    """获取任务的 LLM 调用成本汇总。"""
+    acc = get_cost_accounting()
+    summary = acc.get_task_summary(task_id)
+    return summary.to_dict()
+
+
+@router.get("/tasks/{task_id}/cost/records")
+def get_task_cost_records_endpoint(task_id: str, limit: int = 100):
+    """获取任务的 LLM 调用明细（脱敏）。"""
+    acc = get_cost_accounting()
+    records = acc.get_task_records(task_id)[-limit:]
+    return {"task_id": task_id, "records": [r.to_dict() for r in records]}
+
+
+@router.get("/llm/router/status")
+def llm_router_status():
+    """获取模型路由状态（脱敏，不泄露 key）。"""
+    router = get_model_router()
+    return router.status()

@@ -68,3 +68,7 @@ backend/app/storage/uploads/*
 /*.tar.gz
 /*.tgz
 /SHA256SUMS
+
+# generated random CTF cases (runtime artifacts, not source)
+ctf_cases/generated/random_case_*/
+ctf_cases/generated/latest

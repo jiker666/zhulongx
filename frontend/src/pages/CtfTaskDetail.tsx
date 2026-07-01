@@ -15,13 +15,21 @@ import {
   Download,
   RefreshCw,
   AlertCircle,
+  Brain,
+  DollarSign,
+  Eye,
 } from 'lucide-react'
 import {
   ctfGetTask,
   ctfGetEvents,
   ctfGetWriteup,
   ctfSolveTask,
+  ctfGetBlackboard,
+  ctfAddHint,
+  ctfGetTaskCost,
   type CtfTask,
+  type BlackboardSnapshot,
+  type TaskCostSummary,
 } from '../api'
 
 const STATE_LABELS: Record<string, string> = {
@@ -67,6 +75,12 @@ export default function CtfTaskDetail() {
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [solving, setSolving] = useState(false)
+  // v6 state
+  const [blackboard, setBlackboard] = useState<BlackboardSnapshot | null>(null)
+  const [costSummary, setCostSummary] = useState<TaskCostSummary | null>(null)
+  const [hintInput, setHintInput] = useState('')
+  const [hintSubmitting, setHintSubmitting] = useState(false)
+  const [v6Error, setV6Error] = useState<string | null>(null)
 
   const refresh = useCallback(() => {
     if (!taskId) return
@@ -83,6 +97,13 @@ export default function CtfTaskDetail() {
         setLoading(false)
         setRefreshing(false)
       })
+    // v6: 并行拉取黑板 + 成本（容错，后端未升级时不报错）
+    ctfGetBlackboard(taskId)
+      .then((r) => setBlackboard(r.data))
+      .catch(() => setBlackboard(null))
+    ctfGetTaskCost(taskId)
+      .then((r) => setCostSummary(r.data))
+      .catch(() => setCostSummary(null))
   }, [taskId])
 
   useEffect(() => {
@@ -109,6 +130,20 @@ export default function CtfTaskDetail() {
         setError(`启动解题失败: ${e?.response?.data?.detail || e.message}`)
       })
       .finally(() => setSolving(false))
+  }
+
+  const handleAddHint = () => {
+    if (!taskId || !hintInput.trim()) return
+    setHintSubmitting(true)
+    setV6Error(null)
+    ctfAddHint(taskId, { content: hintInput.trim(), source: 'human' })
+      .then(() => {
+        setHintInput('')
+        // 刷新黑板
+        ctfGetBlackboard(taskId).then((r) => setBlackboard(r.data))
+      })
+      .catch((e) => setV6Error(e?.response?.data?.detail || e.message))
+      .finally(() => setHintSubmitting(false))
   }
 
   const fetchWriteup = () => {
@@ -426,6 +461,190 @@ export default function CtfTaskDetail() {
               </p>
             </div>
           )}
+        </div>
+      </div>
+
+      {/* v6: Blackboard / Cost / Observer 三联面板 */}
+      <div className="grid grid-cols-12 gap-3 mt-4">
+        {/* Blackboard */}
+        <div className="col-span-12 lg:col-span-5">
+          <Panel title="事实黑板 Blackboard" icon={<Brain size={14} />}
+            badge={blackboard ? `${blackboard.fact_count} facts / ${blackboard.candidate_count} 候选` : '未加载'}>
+            {!blackboard ? (
+              <div className="text-xs text-gray-500 text-center py-4">
+                黑板数据不可用（后端可能未升级到 v6）
+              </div>
+            ) : (
+              <div className="space-y-3 max-h-80 overflow-y-auto">
+                {/* Facts */}
+                {blackboard.facts.length > 0 && (
+                  <div>
+                    <div className="text-[10px] text-cyan-300 uppercase mb-1">事实 (Facts)</div>
+                    <div className="space-y-1">
+                      {blackboard.facts.slice(0, 20).map((f) => (
+                        <div key={f.fact_id} className="text-xs bg-black/40 rounded px-2 py-1">
+                          <span className={`inline-block px-1 py-0.5 text-[9px] rounded mr-1 ${
+                            f.kind === 'candidate' ? 'bg-green-500/20 text-green-300' :
+                            f.kind === 'error' ? 'bg-red-500/20 text-red-300' :
+                            f.kind === 'file' ? 'bg-blue-500/20 text-blue-300' :
+                            'bg-gray-500/20 text-gray-300'
+                          }`}>{f.kind}</span>
+                          <span className="text-gray-500 text-[10px]">{f.source_step}</span>
+                          <div className="text-gray-300 break-all mt-0.5">{f.content}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {/* Intents */}
+                {blackboard.intents.length > 0 && (
+                  <div>
+                    <div className="text-[10px] text-purple-300 uppercase mb-1">意图 (Intents)</div>
+                    <div className="space-y-1">
+                      {blackboard.intents.slice(0, 10).map((i) => (
+                        <div key={i.intent_id} className="text-xs bg-black/40 rounded px-2 py-1 flex items-center gap-2">
+                          <span className={`px-1 py-0.5 text-[9px] rounded ${
+                            i.status === 'completed' ? 'bg-green-500/20 text-green-300' :
+                            i.status === 'in_progress' ? 'bg-amber-500/20 text-amber-300' :
+                            i.status === 'failed' ? 'bg-red-500/20 text-red-300' :
+                            i.status === 'deprecated' ? 'bg-gray-500/20 text-gray-400' :
+                            'bg-blue-500/20 text-blue-300'
+                          }`}>{i.status}</span>
+                          <span className="text-gray-300">{i.title}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {/* Hints + Add */}
+                <div>
+                  <div className="text-[10px] text-yellow-300 uppercase mb-1">提示 (Hints)</div>
+                  {blackboard.hints.length > 0 && (
+                    <div className="space-y-1 mb-2">
+                      {blackboard.hints.slice(0, 10).map((h) => (
+                        <div key={h.hint_id} className={`text-xs rounded px-2 py-1 ${
+                          h.source === 'observer' ? 'bg-purple-500/10 text-purple-200' :
+                          h.source === 'human' ? 'bg-amber-500/10 text-amber-200' :
+                          'bg-black/40 text-gray-300'
+                        } ${h.consumed ? 'opacity-50 line-through' : ''}`}>
+                          <span className="text-[9px] text-gray-500 mr-1">[{h.source}]</span>
+                          {h.content}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  <div className="flex gap-1">
+                    <input
+                      type="text"
+                      value={hintInput}
+                      onChange={(e) => setHintInput(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && handleAddHint()}
+                      placeholder="添加人工提示..."
+                      className="flex-1 text-xs bg-black/40 border border-gray-700 rounded px-2 py-1 text-gray-200 placeholder-gray-600 focus:outline-none focus:border-amber-500/40"
+                    />
+                    <button
+                      onClick={handleAddHint}
+                      disabled={hintSubmitting || !hintInput.trim()}
+                      className="px-2 py-1 text-xs bg-amber-500/20 border border-amber-500/40 text-amber-200 rounded hover:bg-amber-500/30 disabled:opacity-40"
+                    >
+                      {hintSubmitting ? <Loader2 size={12} className="animate-spin" /> : '添加'}
+                    </button>
+                  </div>
+                  {v6Error && <div className="text-[10px] text-red-400 mt-1">{v6Error}</div>}
+                </div>
+              </div>
+            )}
+          </Panel>
+        </div>
+
+        {/* Cost Panel */}
+        <div className="col-span-12 lg:col-span-4">
+          <Panel title="模型成本 Cost" icon={<DollarSign size={14} />} badge={costSummary ? `${costSummary.total_calls} calls` : '未加载'}>
+            {!costSummary ? (
+              <div className="text-xs text-gray-500 text-center py-4">
+                成本数据不可用（后端可能未升级到 v6）
+              </div>
+            ) : (
+              <div className="text-xs space-y-2">
+                <div className="flex items-center justify-between px-2 py-2 bg-black/40 rounded">
+                  <span className="text-gray-400">本题估算成本</span>
+                  <span className={`font-mono font-bold ${costSummary.budget_exceeded ? 'text-red-300' : 'text-green-300'}`}>
+                    ${costSummary.total_cost_usd.toFixed(6)}
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="px-2 py-1 bg-black/40 rounded">
+                    <div className="text-[10px] text-gray-500">预算上限</div>
+                    <div className="text-gray-300 font-mono">${costSummary.budget_per_task_usd.toFixed(4)}</div>
+                  </div>
+                  <div className={`px-2 py-1 rounded ${costSummary.budget_exceeded ? 'bg-red-500/10' : 'bg-black/40'}`}>
+                    <div className="text-[10px] text-gray-500">预算状态</div>
+                    <div className={costSummary.budget_exceeded ? 'text-red-300 font-bold' : 'text-green-300'}>
+                      {costSummary.budget_exceeded ? '⚠ 超支' : '✓ 正常'}
+                    </div>
+                  </div>
+                </div>
+                <div className="grid grid-cols-3 gap-1 text-center">
+                  <div className="px-1 py-1 bg-blue-500/10 rounded">
+                    <div className="text-[9px] text-blue-300">cheap</div>
+                    <div className="text-blue-200 font-mono">{costSummary.cheap_calls}</div>
+                  </div>
+                  <div className="px-1 py-1 bg-purple-500/10 rounded">
+                    <div className="text-[9px] text-purple-300">expert</div>
+                    <div className="text-purple-200 font-mono">{costSummary.expert_calls}</div>
+                  </div>
+                  <div className="px-1 py-1 bg-gray-500/10 rounded">
+                    <div className="text-[9px] text-gray-300">static</div>
+                    <div className="text-gray-200 font-mono">{costSummary.static_only_calls}</div>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-2 text-[11px]">
+                  <div className="text-gray-400">输入 tokens: <span className="text-gray-200 font-mono">{costSummary.total_input_tokens}</span></div>
+                  <div className="text-gray-400">输出 tokens: <span className="text-gray-200 font-mono">{costSummary.total_output_tokens}</span></div>
+                  <div className="text-gray-400">成功: <span className="text-green-300 font-mono">{costSummary.successful_calls}</span></div>
+                  <div className="text-gray-400">失败: <span className="text-red-300 font-mono">{costSummary.failed_calls}</span></div>
+                  <div className="text-gray-400">缓存命中: <span className="text-amber-300 font-mono">{costSummary.cache_hits}</span></div>
+                </div>
+                {Object.keys(costSummary.by_model).length > 0 && (
+                  <div className="pt-1 border-t border-gray-800">
+                    <div className="text-[10px] text-gray-500 uppercase mb-1">按模型</div>
+                    {Object.entries(costSummary.by_model).map(([m, n]) => (
+                      <div key={m} className="flex justify-between text-[11px]">
+                        <span className="text-gray-400 font-mono">{m}</span>
+                        <span className="text-gray-200 font-mono">{n}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </Panel>
+        </div>
+
+        {/* Observer Panel */}
+        <div className="col-span-12 lg:col-span-3">
+          <Panel title="Observer 旁路监督" icon={<Eye size={14} />}>
+            {!blackboard || blackboard.hints.filter((h) => h.source === 'observer').length === 0 ? (
+              <div className="text-xs text-gray-500 text-center py-4">
+                Observer 暂无建议
+              </div>
+            ) : (
+              <div className="space-y-2 max-h-80 overflow-y-auto">
+                {blackboard.hints
+                  .filter((h) => h.source === 'observer')
+                  .slice(0, 15)
+                  .map((h) => (
+                    <div key={h.hint_id} className={`text-xs bg-purple-500/10 border border-purple-500/20 rounded px-2 py-1.5 ${h.consumed ? 'opacity-50' : ''}`}>
+                      <div className="text-[10px] text-purple-400 mb-0.5">{formatTime(h.created_at)}</div>
+                      <div className="text-purple-100 break-all">{h.content}</div>
+                    </div>
+                  ))}
+              </div>
+            )}
+            <div className="mt-2 text-[10px] text-gray-500">
+              Observer 旁路监督循环、跑偏、预算浪费，不直接执行工具
+            </div>
+          </Panel>
         </div>
       </div>
 
