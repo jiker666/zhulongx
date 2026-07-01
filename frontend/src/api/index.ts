@@ -489,6 +489,72 @@ export const ctfGetTaskCost = (taskId: string) =>
 export const ctfGetRouterStatus = () =>
   api.get<RouterStatus>('/ctf/llm/router/status')
 
+// ============== v6.1: Runtime Settings API ==============
+
+export interface LlmSettingsSnapshot {
+  router: Record<string, string | number | boolean>
+  global: Record<string, string | number | boolean>
+  cheap: Record<string, string | number | boolean>
+  expert: Record<string, string | number | boolean>
+  fallback: Record<string, string | number | boolean>
+}
+
+export interface LlmSettingsUpdate {
+  // Router
+  LLM_ROUTER_ENABLED?: boolean
+  LLM_BUDGET_PER_TASK_USD?: number
+  LLM_BUDGET_DAILY_USD?: number
+  LLM_COMPRESS_THRESHOLD_CHARS?: number
+  // Global
+  LLM_ENABLED?: boolean
+  LLM_TIMEOUT?: number
+  LLM_MAX_RETRIES?: number
+  // Cheap
+  LLM_CHEAP_PROVIDER?: string
+  LLM_CHEAP_BASE_URL?: string
+  LLM_CHEAP_MODEL?: string
+  LLM_CHEAP_API_KEY?: string
+  LLM_CHEAP_MAX_TOKENS?: number
+  LLM_CHEAP_TEMPERATURE?: number
+  // Expert
+  LLM_EXPERT_PROVIDER?: string
+  LLM_EXPERT_BASE_URL?: string
+  LLM_EXPERT_MODEL?: string
+  LLM_EXPERT_API_KEY?: string
+  LLM_EXPERT_MAX_TOKENS?: number
+  LLM_EXPERT_TEMPERATURE?: number
+  // Fallback
+  LLM_FALLBACK_PROVIDER?: string
+  LLM_FALLBACK_BASE_URL?: string
+  LLM_FALLBACK_MODEL?: string
+  LLM_FALLBACK_API_KEY?: string
+}
+
+export interface LlmSettingsUpdateResult {
+  ok: boolean
+  applied: Record<string, string>
+  skipped: string[]
+  note: string
+}
+
+export interface AuditEntry {
+  ts: number
+  actor: string
+  field: string
+  old: string
+  new: string
+}
+
+export const getLlmSettings = () => api.get<LlmSettingsSnapshot>('/settings/llm')
+export const updateLlmSettings = (data: LlmSettingsUpdate, confirmDangerous = false) =>
+  api.put<LlmSettingsUpdateResult>('/settings/llm', data, {
+    headers: confirmDangerous ? { 'X-Confirm-Dangerous': 'yes' } : {},
+  })
+export const getSettingsAudit = (limit = 50) =>
+  api.get<{ entries: AuditEntry[] }>(`/settings/audit?limit=${limit}`)
+export const resetRuntimeConfig = () =>
+  api.post('/settings/reset', {}, { headers: { 'X-Confirm-Dangerous': 'yes' } })
+
 // 全局错误处理：网络断开时给统一提示
 api.interceptors.response.use(
   (response) => response,

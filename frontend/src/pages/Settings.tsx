@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Shield, ExternalLink, Loader2, CheckCircle2, XCircle, Zap, Brain, AlertTriangle, Search, Layers } from 'lucide-react'
-import { getHealth, getLLMStatus, scopeCheck, testLLM, ctfGetRouterStatus, HealthStatus, LLMStatus, LLMTestResult, ScopeCheckResult, RouterStatus } from '../api'
+import { getHealth, getLLMStatus, scopeCheck, testLLM, ctfGetRouterStatus, getLlmSettings, updateLlmSettings, getSettingsAudit, resetRuntimeConfig, HealthStatus, LLMStatus, LLMTestResult, ScopeCheckResult, RouterStatus, LlmSettingsSnapshot, LlmSettingsUpdate, AuditEntry } from '../api'
 
 const CONFIG_ITEMS = [
   { key: 'APP_NAME', value: 'CyberPilot', desc: '应用名称' },
@@ -21,19 +21,66 @@ export default function Settings() {
   const [scopeResult, setScopeResult] = useState<ScopeCheckResult | null>(null)
   const [scopeError, setScopeError] = useState('')
   const [routerStatus, setRouterStatus] = useState<RouterStatus | null>(null)
+  const [llmSettings, setLlmSettings] = useState<LlmSettingsSnapshot | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [saveResult, setSaveResult] = useState<string | null>(null)
+  const [saveError, setSaveError] = useState<string | null>(null)
+  const [auditEntries, setAuditEntries] = useState<AuditEntry[]>([])
+  const [editForm, setEditForm] = useState<LlmSettingsUpdate>({})
 
   useEffect(() => {
-    Promise.all([getLLMStatus(), getHealth(), ctfGetRouterStatus()])
-      .then(([llm, h, router]) => {
+    Promise.all([getLLMStatus(), getHealth(), ctfGetRouterStatus(), getLlmSettings()])
+      .then(([llm, h, router, settings]) => {
         setLlmStatus(llm.data)
         setHealth(h.data)
         setRouterStatus(router.data)
+        setLlmSettings(settings.data)
       })
-      .catch(() => {
-        // router status 可能失败（后端未升级），忽略
-      })
+      .catch(() => {})
       .finally(() => setLlmLoading(false))
+    getSettingsAudit(20).then((r) => setAuditEntries(r.data.entries)).catch(() => {})
   }, [])
+
+  const refreshSettings = () => {
+    getLlmSettings().then((r) => setLlmSettings(r.data)).catch(() => {})
+    ctfGetRouterStatus().then((r) => setRouterStatus(r.data)).catch(() => {})
+    getSettingsAudit(20).then((r) => setAuditEntries(r.data.entries)).catch(() => {})
+    setEditForm({})
+  }
+
+  const handleSave = async () => {
+    setSaving(true)
+    setSaveResult(null)
+    setSaveError(null)
+    try {
+      const isDangerous = editForm.LLM_ROUTER_ENABLED === false
+      const r = await updateLlmSettings(editForm, isDangerous)
+      setSaveResult(`已更新 ${Object.keys(r.data.applied).length} 项：${Object.keys(r.data.applied).join(', ')}`)
+      refreshSettings()
+    } catch (e: any) {
+      setSaveError(e?.response?.data?.detail || e.message || '保存失败')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleReset = async () => {
+    if (!confirm('确定要清空 runtime_config 并恢复 .env 默认吗？')) return
+    setSaving(true)
+    try {
+      await resetRuntimeConfig()
+      setSaveResult('runtime_config 已清空，请重启后端恢复 .env 默认')
+      refreshSettings()
+    } catch (e: any) {
+      setSaveError(e?.response?.data?.detail || e.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const updateField = (key: keyof LlmSettingsUpdate, value: string | number | boolean) => {
+    setEditForm((prev) => ({ ...prev, [key]: value }))
+  }
 
   const handleTest = async () => {
     setTesting(true)
@@ -149,50 +196,166 @@ export default function Settings() {
         )}
       </div>
 
-      {/* v6: Model Router Status */}
-      {routerStatus && (
+      {/* v6.1: 可编辑 LLM 配置 */}
+      {llmSettings && (
         <div className="bg-[#111827] border border-[#1f2937] rounded-xl overflow-hidden mb-5">
-          <div className="px-5 py-3 border-b border-[#1f2937] font-medium text-white text-sm flex items-center gap-2">
-            <Layers size={14} className="text-amber-400" /> v6 模型路由 ModelRouter
+          <div className="px-5 py-3 border-b border-[#1f2937] font-medium text-white text-sm flex items-center gap-2 justify-between">
+            <span className="flex items-center gap-2">
+              <Layers size={14} className="text-amber-400" /> v6 模型路由配置（可编辑）
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleReset}
+                disabled={saving}
+                className="flex items-center gap-1 px-2 py-1 text-[11px] border border-red-500/30 text-red-300 rounded hover:bg-red-500/10 disabled:opacity-50"
+              >
+                恢复默认
+              </button>
+              <button
+                onClick={handleSave}
+                disabled={saving || Object.keys(editForm).length === 0}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 text-white text-xs rounded-lg hover:bg-amber-500 disabled:opacity-50"
+              >
+                {saving ? <Loader2 size={12} className="animate-spin" /> : <CheckCircle2 size={12} />}
+                保存 ({Object.keys(editForm).length})
+              </button>
+            </div>
           </div>
-          <div className="divide-y divide-[#1f2937]">
-            <LLMRow k="路由启用" v={routerStatus.router_enabled ? '已启用' : '已禁用'} highlight={routerStatus.router_enabled} />
-            <LLMRow k="单题预算" v={`${routerStatus.budget_per_task_usd.toFixed(4)}`} />
-            <LLMRow k="日预算" v={`${routerStatus.budget_daily_usd.toFixed(2)}`} />
-            <LLMRow k="今日已用" v={`${routerStatus.daily_total_cost_usd.toFixed(6)}`} warn={routerStatus.daily_total_cost_usd > routerStatus.budget_daily_usd * 0.8} />
-            <LLMRow k="压缩阈值" v={`${routerStatus.compress_threshold_chars} chars`} />
-            <div className="px-5 py-3">
-              <div className="text-[10px] text-blue-300 uppercase mb-2">Cheap Lane（日常分类/计划）</div>
-              <div className="grid grid-cols-2 gap-2 text-xs">
-                <div className="text-gray-500">Provider: <span className="text-gray-300 font-mono">{routerStatus.cheap.provider}</span></div>
-                <div className="text-gray-500">Model: <span className="text-gray-300 font-mono">{routerStatus.cheap.model}</span></div>
-                <div className="text-gray-500">Host: <span className="text-gray-300 font-mono">{routerStatus.cheap.base_url_host || '-'}</span></div>
-                <div className="text-gray-500">MaxTokens: <span className="text-gray-300 font-mono">{routerStatus.cheap.max_tokens}</span></div>
-                <div className="text-gray-500">Key: <span className={routerStatus.cheap.api_key_configured ? 'text-green-400' : 'text-yellow-400'}>{routerStatus.cheap.api_key_configured ? '已配置' : '未配置 (mock)'}</span></div>
+          {saveResult && (
+            <div className="px-5 py-2 bg-green-500/10 border-b border-green-500/20 text-xs text-green-300">{saveResult}</div>
+          )}
+          {saveError && (
+            <div className="px-5 py-2 bg-red-500/10 border-b border-red-500/20 text-xs text-red-300">{saveError}</div>
+          )}
+
+          {/* Router 全局 */}
+          <div className="px-5 py-3 border-b border-[#1f2937]">
+            <div className="text-[10px] text-amber-300 uppercase mb-2 font-bold">Router 全局</div>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+              <SettingField
+                label="路由启用" type="bool"
+                current={llmSettings.router.LLM_ROUTER_ENABLED as boolean}
+                edited={editForm.LLM_ROUTER_ENABLED as boolean | undefined}
+                onChange={(v) => updateField('LLM_ROUTER_ENABLED', v)}
+                warn={editForm.LLM_ROUTER_ENABLED === false}
+              />
+              <SettingField
+                label="单题预算 (USD)" type="number" step="0.01"
+                current={llmSettings.router.LLM_BUDGET_PER_TASK_USD as number}
+                edited={editForm.LLM_BUDGET_PER_TASK_USD as number | undefined}
+                onChange={(v) => updateField('LLM_BUDGET_PER_TASK_USD', Number(v))}
+              />
+              <SettingField
+                label="日预算 (USD)" type="number" step="0.10"
+                current={llmSettings.router.LLM_BUDGET_DAILY_USD as number}
+                edited={editForm.LLM_BUDGET_DAILY_USD as number | undefined}
+                onChange={(v) => updateField('LLM_BUDGET_DAILY_USD', Number(v))}
+              />
+              <SettingField
+                label="压缩阈值 (chars)" type="number"
+                current={llmSettings.router.LLM_COMPRESS_THRESHOLD_CHARS as number}
+                edited={editForm.LLM_COMPRESS_THRESHOLD_CHARS as number | undefined}
+                onChange={(v) => updateField('LLM_COMPRESS_THRESHOLD_CHARS', Number(v))}
+              />
+            </div>
+          </div>
+
+          {/* Cheap Lane */}
+          <div className="px-5 py-3 border-b border-[#1f2937]">
+            <div className="text-[10px] text-blue-300 uppercase mb-2 font-bold">Cheap Lane（日常分类/计划，推荐 DeepSeek-V4-Flash）</div>
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-3 text-xs">
+              <SettingField label="Provider" current={llmSettings.cheap.LLM_CHEAP_PROVIDER as string} edited={editForm.LLM_CHEAP_PROVIDER} onChange={(v) => updateField('LLM_CHEAP_PROVIDER', v)} />
+              <SettingField label="Model" current={llmSettings.cheap.LLM_CHEAP_MODEL as string} edited={editForm.LLM_CHEAP_MODEL} onChange={(v) => updateField('LLM_CHEAP_MODEL', v)} />
+              <SettingField label="Base URL" current={llmSettings.cheap.LLM_CHEAP_BASE_URL as string} edited={editForm.LLM_CHEAP_BASE_URL} onChange={(v) => updateField('LLM_CHEAP_BASE_URL', v)} />
+              <SettingField label="Max Tokens" type="number" current={llmSettings.cheap.LLM_CHEAP_MAX_TOKENS as number} edited={editForm.LLM_CHEAP_MAX_TOKENS as number | undefined} onChange={(v) => updateField('LLM_CHEAP_MAX_TOKENS', Number(v))} />
+              <SettingField label="Temperature" type="number" step="0.1" current={llmSettings.cheap.LLM_CHEAP_TEMPERATURE as number} edited={editForm.LLM_CHEAP_TEMPERATURE as number | undefined} onChange={(v) => updateField('LLM_CHEAP_TEMPERATURE', Number(v))} />
+              <SettingField
+                label="API Key" type="password" sensitive
+                current={llmSettings.cheap.LLM_CHEAP_API_KEY as string}
+                edited={editForm.LLM_CHEAP_API_KEY}
+                onChange={(v) => updateField('LLM_CHEAP_API_KEY', v)}
+                placeholder="留空=保持不变，输入新值=更新"
+              />
+            </div>
+          </div>
+
+          {/* Expert Lane */}
+          <div className="px-5 py-3 border-b border-[#1f2937]">
+            <div className="text-[10px] text-purple-300 uppercase mb-2 font-bold">Expert Lane（复杂/卡住时升级，推荐 GLM-5.2）</div>
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-3 text-xs">
+              <SettingField label="Provider" current={llmSettings.expert.LLM_EXPERT_PROVIDER as string} edited={editForm.LLM_EXPERT_PROVIDER} onChange={(v) => updateField('LLM_EXPERT_PROVIDER', v)} />
+              <SettingField label="Model" current={llmSettings.expert.LLM_EXPERT_MODEL as string} edited={editForm.LLM_EXPERT_MODEL} onChange={(v) => updateField('LLM_EXPERT_MODEL', v)} />
+              <SettingField label="Base URL" current={llmSettings.expert.LLM_EXPERT_BASE_URL as string} edited={editForm.LLM_EXPERT_BASE_URL} onChange={(v) => updateField('LLM_EXPERT_BASE_URL', v)} />
+              <SettingField label="Max Tokens" type="number" current={llmSettings.expert.LLM_EXPERT_MAX_TOKENS as number} edited={editForm.LLM_EXPERT_MAX_TOKENS as number | undefined} onChange={(v) => updateField('LLM_EXPERT_MAX_TOKENS', Number(v))} />
+              <SettingField label="Temperature" type="number" step="0.1" current={llmSettings.expert.LLM_EXPERT_TEMPERATURE as number} edited={editForm.LLM_EXPERT_TEMPERATURE as number | undefined} onChange={(v) => updateField('LLM_EXPERT_TEMPERATURE', Number(v))} />
+              <SettingField
+                label="API Key" type="password" sensitive
+                current={llmSettings.expert.LLM_EXPERT_API_KEY as string}
+                edited={editForm.LLM_EXPERT_API_KEY}
+                onChange={(v) => updateField('LLM_EXPERT_API_KEY', v)}
+                placeholder="留空=保持不变，输入新值=更新"
+              />
+            </div>
+          </div>
+
+          {/* Fallback Lane */}
+          <div className="px-5 py-3 border-b border-[#1f2937]">
+            <div className="text-[10px] text-gray-300 uppercase mb-2 font-bold">Fallback Lane（备用，可选）</div>
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-3 text-xs">
+              <SettingField label="Provider" current={llmSettings.fallback.LLM_FALLBACK_PROVIDER as string} edited={editForm.LLM_FALLBACK_PROVIDER} onChange={(v) => updateField('LLM_FALLBACK_PROVIDER', v)} />
+              <SettingField label="Model" current={llmSettings.fallback.LLM_FALLBACK_MODEL as string} edited={editForm.LLM_FALLBACK_MODEL} onChange={(v) => updateField('LLM_FALLBACK_MODEL', v)} />
+              <SettingField label="Base URL" current={llmSettings.fallback.LLM_FALLBACK_BASE_URL as string} edited={editForm.LLM_FALLBACK_BASE_URL} onChange={(v) => updateField('LLM_FALLBACK_BASE_URL', v)} />
+              <SettingField
+                label="API Key" type="password" sensitive
+                current={llmSettings.fallback.LLM_FALLBACK_API_KEY as string}
+                edited={editForm.LLM_FALLBACK_API_KEY}
+                onChange={(v) => updateField('LLM_FALLBACK_API_KEY', v)}
+                placeholder="留空=保持不变"
+              />
+            </div>
+          </div>
+
+          {/* 今日成本 + 审计 */}
+          {routerStatus && (
+            <div className="px-5 py-3 border-b border-[#1f2937] grid grid-cols-2 gap-3 text-xs">
+              <div>
+                <div className="text-gray-500 mb-1">今日已用成本</div>
+                <div className={`font-mono font-bold ${routerStatus.daily_total_cost_usd > routerStatus.budget_daily_usd * 0.8 ? 'text-red-300' : 'text-green-300'}`}>
+                  ${routerStatus.daily_total_cost_usd.toFixed(6)} / ${routerStatus.budget_daily_usd.toFixed(2)}
+                </div>
+              </div>
+              <div>
+                <div className="text-gray-500 mb-1">运行状态</div>
+                <div className="text-gray-300">
+                  {routerStatus.router_enabled ? '✓ 路由启用' : '✗ 路由禁用'} ·
+                  cheap:{routerStatus.cheap.api_key_configured ? '✓' : '✗'} ·
+                  expert:{routerStatus.expert.api_key_configured ? '✓' : '✗'}
+                </div>
               </div>
             </div>
+          )}
+
+          {auditEntries.length > 0 && (
             <div className="px-5 py-3">
-              <div className="text-[10px] text-purple-300 uppercase mb-2">Expert Lane（复杂/卡住时升级 GLM-5.2）</div>
-              <div className="grid grid-cols-2 gap-2 text-xs">
-                <div className="text-gray-500">Provider: <span className="text-gray-300 font-mono">{routerStatus.expert.provider}</span></div>
-                <div className="text-gray-500">Model: <span className="text-gray-300 font-mono">{routerStatus.expert.model}</span></div>
-                <div className="text-gray-500">Host: <span className="text-gray-300 font-mono">{routerStatus.expert.base_url_host || '-'}</span></div>
-                <div className="text-gray-500">MaxTokens: <span className="text-gray-300 font-mono">{routerStatus.expert.max_tokens}</span></div>
-                <div className="text-gray-500">Key: <span className={routerStatus.expert.api_key_configured ? 'text-green-400' : 'text-yellow-400'}>{routerStatus.expert.api_key_configured ? '已配置' : '未配置'}</span></div>
+              <div className="text-[10px] text-gray-500 uppercase mb-2">最近配置变更（审计日志）</div>
+              <div className="space-y-1 max-h-32 overflow-y-auto">
+                {auditEntries.slice(0, 10).map((e, i) => (
+                  <div key={i} className="text-[11px] font-mono text-gray-400 flex gap-2">
+                    <span className="text-gray-600">{new Date(e.ts * 1000).toLocaleString('zh-CN', { hour12: false })}</span>
+                    <span className="text-amber-300">{e.field}</span>
+                    <span className="text-gray-500">:</span>
+                    <span className="text-gray-500">{e.old}</span>
+                    <span className="text-gray-500">→</span>
+                    <span className="text-green-300">{e.new}</span>
+                  </div>
+                ))}
               </div>
             </div>
-            <div className="px-5 py-3">
-              <div className="text-[10px] text-gray-300 uppercase mb-2">Fallback Lane（备用）</div>
-              <div className="grid grid-cols-2 gap-2 text-xs">
-                <div className="text-gray-500">Provider: <span className="text-gray-300 font-mono">{routerStatus.fallback.provider}</span></div>
-                <div className="text-gray-500">Model: <span className="text-gray-300 font-mono">{routerStatus.fallback.model}</span></div>
-                <div className="text-gray-500">Host: <span className="text-gray-300 font-mono">{routerStatus.fallback.base_url_host || '-'}</span></div>
-                <div className="text-gray-500">Key: <span className={routerStatus.fallback.api_key_configured ? 'text-green-400' : 'text-gray-500'}>{routerStatus.fallback.api_key_configured ? '已配置' : '未配置'}</span></div>
-              </div>
-            </div>
-            <div className="px-5 py-3 text-[10px] text-gray-600">
-              分级规则：静态命中 → 不调 LLM；日常 → cheap；连续失败/循环/长上下文 → 升级 expert；超预算 → 转人工
-            </div>
+          )}
+
+          <div className="px-5 py-3 text-[10px] text-gray-600 border-t border-[#1f2937]">
+            分级规则：静态命中 → 不调 LLM；日常 → cheap；连续失败/循环/长上下文 → 升级 expert；超预算 → 转人工。
+            API key 永不明文显示，留空提交=保持不变，配置热重载无需重启。
           </div>
         </div>
       )}
@@ -303,6 +466,76 @@ function LLMRow({ k, v, highlight, warn }: { k: string; v: string; highlight?: b
     <div className="flex items-center justify-between px-5 py-3">
       <div className="text-xs text-gray-500">{k}</div>
       <div className={`text-xs font-mono ${highlight ? 'text-green-400' : warn ? 'text-yellow-400' : 'text-gray-300'}`}>{v}</div>
+    </div>
+  )
+}
+
+function SettingField({
+  label,
+  current,
+  edited,
+  onChange,
+  type = 'text',
+  step,
+  sensitive,
+  placeholder,
+  warn,
+}: {
+  label: string
+  current: string | number | boolean
+  edited?: string | number | boolean
+  onChange: (v: string | boolean) => void
+  type?: 'text' | 'number' | 'password' | 'bool'
+  step?: string
+  sensitive?: boolean
+  placeholder?: string
+  warn?: boolean
+}) {
+  const isDirty = edited !== undefined && edited !== ''
+  const displayValue = isDirty ? String(edited) : ''
+  // 当前值的脱敏显示
+  const currentDisplay = sensitive
+    ? (typeof current === 'string' && current.includes('configured') ? current : '(not configured)')
+    : String(current)
+
+  if (type === 'bool') {
+    return (
+      <div className="flex flex-col gap-1">
+        <label className="text-gray-500 flex items-center justify-between">
+          <span>{label}</span>
+          {warn && <span className="text-red-400 text-[9px]">⚠ 危险</span>}
+        </label>
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={() => onChange(true)}
+            className={`px-2 py-1 text-[10px] rounded ${(!isDirty && current === true) || edited === true ? 'bg-green-500/30 text-green-200 border border-green-500/40' : 'bg-gray-700/50 text-gray-400 border border-gray-700'}`}
+          >ON</button>
+          <button
+            type="button"
+            onClick={() => onChange(false)}
+            className={`px-2 py-1 text-[10px] rounded ${(isDirty && edited === false) || (!isDirty && current === false) ? 'bg-red-500/30 text-red-200 border border-red-500/40' : 'bg-gray-700/50 text-gray-400 border border-gray-700'}`}
+          >OFF</button>
+          {!isDirty && <span className="text-[9px] text-gray-600 ml-1">当前: {currentDisplay}</span>}
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex flex-col gap-1">
+      <label className="text-gray-500 flex items-center justify-between">
+        <span>{label}</span>
+        {!isDirty && <span className="text-[9px] text-gray-600 truncate max-w-[120px]" title={currentDisplay}>{currentDisplay}</span>}
+      </label>
+      <input
+        type={type}
+        step={step}
+        value={displayValue}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder || (isDirty ? '' : `当前: ${currentDisplay}`)}
+        className={`px-2 py-1 bg-black/40 border rounded text-gray-200 placeholder-gray-600 text-[11px] focus:outline-none ${isDirty ? 'border-amber-500/60 bg-amber-500/5' : 'border-gray-700'}`}
+      />
     </div>
   )
 }

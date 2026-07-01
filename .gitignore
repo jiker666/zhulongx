@@ -72,3 +72,7 @@ backend/app/storage/uploads/*
 # generated random CTF cases (runtime artifacts, not source)
 ctf_cases/generated/random_case_*/
 ctf_cases/generated/latest
+
+# v6.1 runtime config (frontend-edited LLM settings, may contain API keys)
+data/runtime_config.json
+data/runtime_config_audit.jsonl

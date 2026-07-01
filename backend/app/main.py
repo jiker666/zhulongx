@@ -19,6 +19,7 @@ from app.api.llm import router as llm_router
 from app.api.ws import router as ws_router
 from app.api.challenges import router as challenges_router
 from app.api.ctf import router as ctf_router
+from app.api.settings import router as settings_router
 from app.config import settings
 from app.core.scope_guard import scope_guard
 
@@ -28,6 +29,9 @@ async def lifespan(app: FastAPI):
     init_db()
     from app.core.tool_registry import tool_registry
     tool_registry.sync_to_db()
+    # v6.1: 加载 runtime_config 覆盖 settings（前端可编辑配置）
+    from app.core.runtime_config import load_runtime_config_on_startup
+    load_runtime_config_on_startup()
     yield
 
 
@@ -54,6 +58,7 @@ app.include_router(upload_router, prefix="/api")
 app.include_router(llm_router, prefix="/api")
 app.include_router(challenges_router, prefix="/api")
 app.include_router(ctf_router, prefix="/api")
+app.include_router(settings_router, prefix="/api")
 app.include_router(ws_router)   # WS route already has /ws prefix
 
 
