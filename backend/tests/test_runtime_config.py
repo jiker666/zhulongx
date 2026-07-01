@@ -314,3 +314,46 @@ def test_api_put_only_reports_changed_fields(client):
     r = client.put("/api/settings/llm", json={"LLM_BUDGET_PER_TASK_USD": 0.07})
     data = r.json()
     assert list(data["applied"].keys()) == ["LLM_BUDGET_PER_TASK_USD"]
+
+
+def test_update_main_llm_config_syncs_to_cheap_lane():
+    """更新主 LLM_PROVIDER 时，自动同步到 LLM_CHEAP_PROVIDER。"""
+    rc = get_runtime_config()
+    from app.config import settings
+    original_main = settings.LLM_PROVIDER
+    original_cheap = settings.LLM_CHEAP_PROVIDER
+    try:
+        rc.update({"LLM_PROVIDER": "qwen", "LLM_BASE_URL": "https://dashscope.aliyuncs.com/compatible-mode/v1"}, actor="test")
+        # 主配置更新了
+        assert settings.LLM_PROVIDER == "qwen"
+        # cheap lane 自动同步
+        assert settings.LLM_CHEAP_PROVIDER == "qwen"
+        assert settings.LLM_CHEAP_BASE_URL == "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    finally:
+        settings.LLM_PROVIDER = original_main
+        settings.LLM_CHEAP_PROVIDER = original_cheap
+
+
+def test_update_main_api_key_syncs_to_cheap():
+    """更新主 LLM_API_KEY 时，自动同步到 LLM_CHEAP_API_KEY。"""
+    rc = get_runtime_config()
+    from app.config import settings
+    original_main = settings.LLM_API_KEY
+    original_cheap = settings.LLM_CHEAP_API_KEY
+    try:
+        rc.update({"LLM_API_KEY": "sk-mainkey12345"}, actor="test")
+        assert settings.LLM_API_KEY == "sk-mainkey12345"
+        # cheap lane 也同步了
+        assert settings.LLM_CHEAP_API_KEY == "sk-mainkey12345"
+    finally:
+        settings.LLM_API_KEY = original_main
+        settings.LLM_CHEAP_API_KEY = original_cheap
+
+
+def test_api_put_main_config_syncs_to_cheap(client):
+    """API 层：PUT 主 LLM_MODEL，GET 看到 cheap lane 也跟着变。"""
+    client.put("/api/settings/llm", json={"LLM_MODEL": "qwen-coder-plus"})
+    g = client.get("/api/settings/llm").json()
+    assert g["global"]["LLM_MODEL"] == "qwen-coder-plus"
+    # cheap lane 自动同步
+    assert g["cheap"]["LLM_CHEAP_MODEL"] == "qwen-coder-plus"

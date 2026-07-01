@@ -76,3 +76,5 @@ ctf_cases/generated/latest
 # v6.1 runtime config (frontend-edited LLM settings, may contain API keys)
 data/runtime_config.json
 data/runtime_config_audit.jsonl
+backend/data/runtime_config.json
+backend/data/runtime_config_audit.jsonl

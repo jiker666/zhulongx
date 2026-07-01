@@ -55,8 +55,12 @@ EDITABLE_FIELDS: Dict[str, Dict[str, Any]] = {
     "LLM_FALLBACK_BASE_URL": {"type": "str", "sensitive": False, "lane": "fallback"},
     "LLM_FALLBACK_MODEL": {"type": "str", "sensitive": False, "lane": "fallback"},
     "LLM_FALLBACK_API_KEY": {"type": "str", "sensitive": True, "lane": "fallback"},
-    # 全局 LLM 开关
+    # 全局 LLM 开关 + 主配置（前端简化版只暴露这几个）
     "LLM_ENABLED": {"type": "bool", "sensitive": False, "lane": "global"},
+    "LLM_PROVIDER": {"type": "str", "sensitive": False, "lane": "global"},
+    "LLM_BASE_URL": {"type": "str", "sensitive": False, "lane": "global"},
+    "LLM_MODEL": {"type": "str", "sensitive": False, "lane": "global"},
+    "LLM_API_KEY": {"type": "str", "sensitive": True, "lane": "global"},
     "LLM_TIMEOUT": {"type": "int", "sensitive": False, "lane": "global"},
     "LLM_MAX_RETRIES": {"type": "int", "sensitive": False, "lane": "global"},
 }
@@ -182,9 +186,18 @@ class RuntimeConfig:
         - 敏感字段（API key）留空/None = 保持不变
         - 敏感字段填了新值 = 更新
         - 非敏感字段 None = 跳过
+        - 主 LLM_* 配置更新时自动同步到 cheap lane（让 ModelRouter 也能用）
         """
         applied: Dict[str, Any] = {}
         skipped: List[str] = []
+        # 主配置 → cheap lane 同步映射
+        sync_map = {
+            "LLM_PROVIDER": "LLM_CHEAP_PROVIDER",
+            "LLM_BASE_URL": "LLM_CHEAP_BASE_URL",
+            "LLM_MODEL": "LLM_CHEAP_MODEL",
+            "LLM_API_KEY": "LLM_CHEAP_API_KEY",
+        }
+        sync_updates: Dict[str, Any] = {}
         for field, new_value in updates.items():
             if field not in EDITABLE_FIELDS:
                 skipped.append(field)
@@ -204,11 +217,26 @@ class RuntimeConfig:
                 continue
             old_masked = _field_masked_value(field)
             setattr(settings, field, coerced)
-            # 持久化（敏感字段也存，但日志脱敏）
             self.save({field: coerced})
-            # 审计
             self._audit(actor, field, old_masked, _field_masked_value(field))
             applied[field] = _field_masked_value(field)
+            # 收集同步到 cheap lane 的更新
+            if field in sync_map:
+                sync_updates[sync_map[field]] = coerced
+        # 同步主配置到 cheap lane（让 ModelRouter 的 cheap lane 也能用用户配的 key）
+        for cheap_field, cheap_value in sync_updates.items():
+            if cheap_field not in EDITABLE_FIELDS:
+                continue
+            meta = EDITABLE_FIELDS[cheap_field]
+            try:
+                coerced = _coerce(cheap_value, meta["type"])
+                if coerced is not None:
+                    old_masked = _field_masked_value(cheap_field)
+                    setattr(settings, cheap_field, coerced)
+                    self.save({cheap_field: coerced})
+                    self._audit(actor, f"{cheap_field}(synced)", old_masked, _field_masked_value(cheap_field))
+            except (ValueError, TypeError):
+                pass
         return {"applied": applied, "skipped": skipped}
 
     # ---------- query ----------

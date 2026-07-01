@@ -31,30 +31,32 @@ router = APIRouter(prefix="/settings", tags=["settings"])
 
 class LlmSettingsUpdate(BaseModel):
     """LLM 配置更新请求。敏感字段（API key）留空=保持不变。"""
-    # Router
+    # 主配置（前端简化版只暴露这几个）
+    LLM_ENABLED: Optional[bool] = None
+    LLM_PROVIDER: Optional[str] = None
+    LLM_BASE_URL: Optional[str] = None
+    LLM_MODEL: Optional[str] = None
+    LLM_API_KEY: Optional[str] = Field(None, description="留空=保持不变；填了=更新")
+    # Router（高级，前端不默认暴露）
     LLM_ROUTER_ENABLED: Optional[bool] = None
     LLM_BUDGET_PER_TASK_USD: Optional[float] = None
     LLM_BUDGET_DAILY_USD: Optional[float] = None
     LLM_COMPRESS_THRESHOLD_CHARS: Optional[int] = None
-    # Global
-    LLM_ENABLED: Optional[bool] = None
-    LLM_TIMEOUT: Optional[int] = None
-    LLM_MAX_RETRIES: Optional[int] = None
-    # Cheap lane
+    # Cheap lane（高级，主配置更新会自动同步过来）
     LLM_CHEAP_PROVIDER: Optional[str] = None
     LLM_CHEAP_BASE_URL: Optional[str] = None
     LLM_CHEAP_MODEL: Optional[str] = None
     LLM_CHEAP_API_KEY: Optional[str] = Field(None, description="留空=保持不变；填了=更新")
     LLM_CHEAP_MAX_TOKENS: Optional[int] = None
     LLM_CHEAP_TEMPERATURE: Optional[float] = None
-    # Expert lane
+    # Expert lane（高级）
     LLM_EXPERT_PROVIDER: Optional[str] = None
     LLM_EXPERT_BASE_URL: Optional[str] = None
     LLM_EXPERT_MODEL: Optional[str] = None
     LLM_EXPERT_API_KEY: Optional[str] = Field(None, description="留空=保持不变；填了=更新")
     LLM_EXPERT_MAX_TOKENS: Optional[int] = None
     LLM_EXPERT_TEMPERATURE: Optional[float] = None
-    # Fallback lane
+    # Fallback lane（高级）
     LLM_FALLBACK_PROVIDER: Optional[str] = None
     LLM_FALLBACK_BASE_URL: Optional[str] = None
     LLM_FALLBACK_MODEL: Optional[str] = None

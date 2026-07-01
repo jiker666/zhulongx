@@ -500,30 +500,32 @@ export interface LlmSettingsSnapshot {
 }
 
 export interface LlmSettingsUpdate {
-  // Router
+  // 主配置（前端简化版只暴露这几个）
+  LLM_ENABLED?: boolean
+  LLM_PROVIDER?: string
+  LLM_BASE_URL?: string
+  LLM_MODEL?: string
+  LLM_API_KEY?: string
+  // Router（高级，前端不默认暴露）
   LLM_ROUTER_ENABLED?: boolean
   LLM_BUDGET_PER_TASK_USD?: number
   LLM_BUDGET_DAILY_USD?: number
   LLM_COMPRESS_THRESHOLD_CHARS?: number
-  // Global
-  LLM_ENABLED?: boolean
-  LLM_TIMEOUT?: number
-  LLM_MAX_RETRIES?: number
-  // Cheap
+  // Cheap lane（高级）
   LLM_CHEAP_PROVIDER?: string
   LLM_CHEAP_BASE_URL?: string
   LLM_CHEAP_MODEL?: string
   LLM_CHEAP_API_KEY?: string
   LLM_CHEAP_MAX_TOKENS?: number
   LLM_CHEAP_TEMPERATURE?: number
-  // Expert
+  // Expert lane（高级）
   LLM_EXPERT_PROVIDER?: string
   LLM_EXPERT_BASE_URL?: string
   LLM_EXPERT_MODEL?: string
   LLM_EXPERT_API_KEY?: string
   LLM_EXPERT_MAX_TOKENS?: number
   LLM_EXPERT_TEMPERATURE?: number
-  // Fallback
+  // Fallback lane（高级）
   LLM_FALLBACK_PROVIDER?: string
   LLM_FALLBACK_BASE_URL?: string
   LLM_FALLBACK_MODEL?: string
