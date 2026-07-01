@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import {
   Flame,
   Target,
@@ -11,12 +11,15 @@ import {
   ArrowRight,
   Cpu,
   AlertCircle,
+  Plus,
+  X,
 } from 'lucide-react'
 import {
   ctfListDemos,
   ctfRunDemo,
   ctfListTasks,
   ctfLlmStatus,
+  ctfCreateTask,
   type CtfDemo,
   type CtfTask,
   type LlmStatus,
@@ -55,6 +58,7 @@ interface DemoResult {
 }
 
 export default function CtfHub() {
+  const navigate = useNavigate()
   const [demos, setDemos] = useState<CtfDemo[]>([])
   const [tasks, setTasks] = useState<CtfTask[]>([])
   const [llm, setLlm] = useState<LlmStatus | null>(null)
@@ -62,6 +66,19 @@ export default function CtfHub() {
   const [results, setResults] = useState<Record<string, DemoResult>>({})
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+
+  // 新建题目 modal
+  const [showNew, setShowNew] = useState(false)
+  const [newForm, setNewForm] = useState({
+    title: '',
+    description: '',
+    category: 'auto',
+    flag_format: '',
+    authorized: false,
+    allow_network: false,
+  })
+  const [creating, setCreating] = useState(false)
+  const [createError, setCreateError] = useState('')
 
   const refresh = useCallback(() => {
     Promise.all([ctfListDemos(), ctfListTasks(), ctfLlmStatus()])
@@ -144,6 +161,38 @@ export default function CtfHub() {
     }
   }
 
+  const handleCreate = async () => {
+    if (!newForm.title.trim()) {
+      setCreateError('请填写题目标题')
+      return
+    }
+    if (!newForm.description.trim()) {
+      setCreateError('请填写题面描述（模型据此识别题型）')
+      return
+    }
+    setCreating(true)
+    setCreateError('')
+    try {
+      const res = await ctfCreateTask({
+        title: newForm.title.trim(),
+        description: newForm.description.trim(),
+        category: newForm.category,
+        flag_format: newForm.flag_format.trim() || null,
+        authorized: newForm.authorized,
+        allow_network: newForm.allow_network && newForm.authorized,
+        max_rounds: 8,
+      })
+      const taskId = res.data.task_id
+      setShowNew(false)
+      setNewForm({ title: '', description: '', category: 'auto', flag_format: '', authorized: false, allow_network: false })
+      navigate(`/ctf/${taskId}`)
+    } catch (e: any) {
+      setCreateError(e?.response?.data?.detail || e.message || '创建失败')
+    } finally {
+      setCreating(false)
+    }
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-b from-[#0a0e1a] via-[#0d1426] to-[#0a0e1a] p-6">
       <div className="mb-6 flex items-center justify-between">
@@ -152,17 +201,25 @@ export default function CtfHub() {
             <Target className="text-amber-400" size={24} /> CTF 作战中心
           </h1>
           <p className="text-sm text-gray-400 mt-1">
-            一键运行内置 demo 题，或查看历史任务
+            一键运行内置 demo 题，或自建题目让模型自动识别题型
           </p>
         </div>
-        {llm && (
-          <div className={`px-3 py-1.5 rounded-lg border text-xs flex items-center gap-2 ${LLM_MODE_COLORS[llm.mode] || LLM_MODE_COLORS.disabled}`}>
-            <Cpu size={14} />
-            <span className="font-mono uppercase">{llm.mode}</span>
-            <span className="opacity-60">·</span>
-            <span>{llm.model}</span>
-          </div>
-        )}
+        <div className="flex items-center gap-2">
+          {llm && (
+            <div className={`px-3 py-1.5 rounded-lg border text-xs flex items-center gap-2 ${LLM_MODE_COLORS[llm.mode] || LLM_MODE_COLORS.disabled}`}>
+              <Cpu size={14} />
+              <span className="font-mono uppercase">{llm.mode}</span>
+              <span className="opacity-60">·</span>
+              <span>{llm.model}</span>
+            </div>
+          )}
+          <button
+            onClick={() => setShowNew(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-500 hover:bg-amber-400 text-black text-xs font-medium rounded-lg transition-colors"
+          >
+            <Plus size={14} /> 新建题目
+          </button>
+        </div>
       </div>
 
       {error && (
@@ -348,6 +405,142 @@ export default function CtfHub() {
             </div>
           </div>
         </>
+      )}
+
+      {/* 新建题目 Modal */}
+      {showNew && (
+        <div
+          className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4"
+          onClick={() => setShowNew(false)}
+        >
+          <div
+            className="bg-[#0d1426] border border-amber-500/30 rounded-xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-5 py-3 border-b border-amber-500/20">
+              <h3 className="font-bold text-white flex items-center gap-2">
+                <Plus size={16} className="text-amber-400" /> 新建 CTF 题目
+              </h3>
+              <button
+                onClick={() => setShowNew(false)}
+                className="text-gray-400 hover:text-white"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4">
+              <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-[11px] text-amber-200/80">
+                只需填写标题和题面，模型会自动识别题型（web/crypto/reverse/pwn/misc/forensics）。
+                附件可在创建后到详情页上传，网址/靶场也不必现在填。
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-1.5">
+                  题目标题 <span className="text-red-400">*</span>
+                </label>
+                <input
+                  className="w-full bg-[#1f2937] border border-[#374151] rounded-lg px-3 py-2.5 text-gray-200 placeholder-gray-500 focus:outline-none focus:border-amber-500 text-sm"
+                  placeholder="例如：神秘流量包"
+                  value={newForm.title}
+                  onChange={(e) => setNewForm({ ...newForm, title: e.target.value })}
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-1.5">
+                  题面描述 <span className="text-red-400">*</span>
+                  <span className="text-gray-500 text-xs ml-2">（模型据此识别题型和思路）</span>
+                </label>
+                <textarea
+                  className="w-full bg-[#1f2937] border border-[#374151] rounded-lg px-3 py-2.5 text-gray-200 placeholder-gray-500 focus:outline-none focus:border-amber-500 text-sm min-h-[120px] resize-y font-mono"
+                  placeholder={`流量包里藏着 flag，请分析这段抓包数据找出隐藏的 flag。`}
+                  value={newForm.description}
+                  onChange={(e) => setNewForm({ ...newForm, description: e.target.value })}
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-sm font-medium text-gray-300 mb-1.5">
+                    题型 <span className="text-gray-500 text-xs ml-1">（auto = 模型识别）</span>
+                  </label>
+                  <select
+                    className="w-full bg-[#1f2937] border border-[#374151] rounded-lg px-3 py-2.5 text-gray-200 focus:outline-none focus:border-amber-500 text-sm"
+                    value={newForm.category}
+                    onChange={(e) => setNewForm({ ...newForm, category: e.target.value })}
+                  >
+                    <option value="auto">auto（模型识别）</option>
+                    <option value="web">web</option>
+                    <option value="crypto">crypto</option>
+                    <option value="reverse">reverse</option>
+                    <option value="pwn">pwn</option>
+                    <option value="misc">misc</option>
+                    <option value="forensics">forensics</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-300 mb-1.5">
+                    flag 格式 <span className="text-gray-500 text-xs">（可选）</span>
+                  </label>
+                  <input
+                    className="w-full bg-[#1f2937] border border-[#374151] rounded-lg px-3 py-2.5 text-gray-200 placeholder-gray-500 focus:outline-none focus:border-amber-500 text-sm font-mono"
+                    placeholder="例如 flag\\{.*\\}"
+                    value={newForm.flag_format}
+                    onChange={(e) => setNewForm({ ...newForm, flag_format: e.target.value })}
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={newForm.authorized}
+                    onChange={(e) => setNewForm({ ...newForm, authorized: e.target.checked })}
+                    className="rounded bg-[#1f2937] border-[#374151]"
+                  />
+                  <span>已获授权</span>
+                  <span className="text-gray-500 text-xs">（未授权将强制禁网）</span>
+                </label>
+                <label className={`flex items-center gap-2 text-sm cursor-pointer ${newForm.authorized ? 'text-gray-300' : 'text-gray-600'}`}>
+                  <input
+                    type="checkbox"
+                    checked={newForm.allow_network && newForm.authorized}
+                    disabled={!newForm.authorized}
+                    onChange={(e) => setNewForm({ ...newForm, allow_network: e.target.checked })}
+                    className="rounded bg-[#1f2937] border-[#374151]"
+                  />
+                  <span>允许联网</span>
+                  <span className="text-gray-500 text-xs">（需先勾选已授权）</span>
+                </label>
+              </div>
+
+              {createError && (
+                <div className="text-xs text-red-400 bg-red-400/10 border border-red-400/20 rounded-lg px-3 py-2">
+                  {createError}
+                </div>
+              )}
+
+              <div className="flex justify-end gap-2 pt-2 border-t border-amber-500/10">
+                <button
+                  onClick={() => setShowNew(false)}
+                  className="px-4 py-2 text-sm text-gray-400 hover:text-white"
+                >
+                  取消
+                </button>
+                <button
+                  onClick={handleCreate}
+                  disabled={creating || !newForm.title.trim() || !newForm.description.trim()}
+                  className="flex items-center gap-1.5 px-4 py-2 bg-amber-500 hover:bg-amber-400 text-black text-sm font-medium rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {creating ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle size={14} />}
+                  创建并开始
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )

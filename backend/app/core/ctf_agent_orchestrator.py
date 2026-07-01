@@ -375,6 +375,25 @@ class CtfOrchestrator:
             "category (web|crypto|reverse|pwn|misc|forensics), "
             "confidence (0-1), reason (简短中文), suggested_tools (数组)."
         )
+        # mock/disabled 模式下，LLM 分类不可靠（mock 会因 prompt 含所有题型名而误判），
+        # 直接用关键词识别，效果更好且 0 成本
+        is_mock = bool(getattr(self.llm, "mock_mode", False)) or not getattr(self.llm, "enabled", True)
+        if is_mock:
+            cat = self._guess_category_from_description(task)
+            plan = TaskPlan(
+                category=cat,
+                confidence=0.7,
+                initial_guess=f"关键词识别题型: {cat}（mock 模式，未调 LLM）",
+                tool_plan=self._default_tools_for(cat),
+            )
+            self._record_evidence(
+                task, "classify",
+                f"题型分类: {cat}（关键词识别，mock 模式）",
+                artifacts=plan.to_dict(),
+            )
+            task.plan = plan
+            task.state = CtfState.PLAN
+            return
         ok, data, resp = self.llm.chat_json(
             [{"role": "user", "content": prompt}],
             system_prompt=sys,
@@ -383,12 +402,18 @@ class CtfOrchestrator:
         # v6: 记录分类成本（mock 模式 0 成本）
         self._record_llm_cost_simple(task, "classify", prompt, resp)
         if not ok or not data:
-            # 兜底：根据附件类型猜
-            cat = self._guess_category_from_attachments(task.attachments)
+            # 兜底 1: 有附件 → 按附件类型猜
+            if task.attachments:
+                cat = self._guess_category_from_attachments(task.attachments)
+                source = "附件特征"
+            else:
+                # 兜底 2: 无附件 → 按题面关键词猜（让模型能自己识别题型）
+                cat = self._guess_category_from_description(task)
+                source = "题面关键词"
             plan = TaskPlan(
                 category=cat,
                 confidence=0.4,
-                initial_guess=f"LLM 分类失败({resp.error or 'parse_error'})，按附件特征猜测",
+                initial_guess=f"LLM 分类失败({resp.error or 'parse_error'})，按{source}猜测",
                 tool_plan=self._default_tools_for(cat),
             )
         else:
@@ -1036,6 +1061,62 @@ class CtfOrchestrator:
             if lower.endswith((".zip", ".tar", ".gz", ".7z")):
                 return "misc"
         return "misc"
+
+    # 题面关键词 → 题型映射（无 LLM / 无附件时的兜底识别）
+    _CATEGORY_KEYWORDS: Dict[str, List[str]] = {
+        "web": [
+            "web", "网站", "网页", "url", "http", "https", "登录", "注入", "sql",
+            "xss", "csrf", "ssrf", "session", "cookie", "token", "jwt", "api",
+            "后台", "admin", "上传", "越权", "idoc", "目录扫描", "爆破",
+        ],
+        "crypto": [
+            "crypto", "加密", "解密", "密码学", "cipher", "rsa", "aes", "des",
+            "异或", "xor", "base64", "base32", "hex", "哈希", "hash", "md5",
+            "sha", "椭圆曲线", "ecc", "离散对数", "lfsr", "分组密码", "流密码",
+        ],
+        "reverse": [
+            "reverse", "逆向", "反汇编", "反编译", "elf", "pe", "可执行",
+            "二进制", "ghidra", "ida", "汇编", "asm", "objdump", "upx",
+            "脱壳", "加壳", "混淆", "ollvm", "算法还原",
+        ],
+        "pwn": [
+            "pwn", "溢出", "栈溢出", "堆溢出", "格式化字符串", "format string",
+            "shellcode", "rop", "ret2", "canary", "nx", "aslr", "pie",
+            "checksec", "getshell", "one_gadget", "uaf", "use-after-free",
+        ],
+        "forensics": [
+            "forensic", "取证", "流量", "pcap", "wireshark", "tshark",
+            "内存", "memdump", "volatility", "磁盘", "镜像", "恢复",
+            "还原", "抓包", "网络包", "stego", "隐写",
+        ],
+        "misc": [
+            "misc", "杂项", "steg", "隐写", "图片", "png", "jpg", "jpeg",
+            "exif", "元数据", "二维码", "qrcode", "barcode", "编码",
+            "brainfuck", "esolang", "二维码", " LSB", "频域", "音频",
+        ],
+    }
+
+    def _guess_category_from_description(self, task: "CtfTask") -> str:
+        """无 LLM 且无附件时，按题面关键词识别题型。"""
+        # 合并标题 + 描述 + flag_format 作为关键词源
+        text = (
+            (task.title or "") + " " + (task.description or "") + " " + (task.flag_format or "")
+        ).lower()
+        if not text.strip():
+            return "misc"
+        scores: Dict[str, int] = {}
+        for cat, keywords in self._CATEGORY_KEYWORDS.items():
+            score = 0
+            for kw in keywords:
+                if kw.lower() in text:
+                    score += 1
+            if score > 0:
+                scores[cat] = score
+        if not scores:
+            return "misc"
+        # 取命中关键词最多的题型
+        best = max(scores.items(), key=lambda x: x[1])
+        return best[0]
 
     def _fallback_script(self, task: CtfTask) -> str:
         """LLM 失败时的兜底脚本：尝试从附件 strings 里搜 flag。"""
