@@ -40,14 +40,18 @@ logger = logging.getLogger(__name__)
 
 # 已知国产兼容模型映射（部分模型不认 developer 角色）
 PROVIDER_COMPAT: Dict[str, Dict[str, Any]] = {
-    "deepseek": {"supports_developer": True, "supports_json_mode": True},
-    "qwen": {"supports_developer": False, "supports_json_mode": True},
-    "glm": {"supports_developer": False, "supports_json_mode": True},
-    "moonshot": {"supports_developer": False, "supports_json_mode": True},
-    "kimi": {"supports_developer": False, "supports_json_mode": True},
-    "oneapi": {"supports_developer": True, "supports_json_mode": True},
-    "openai": {"supports_developer": True, "supports_json_mode": True},
-    "codex": {"supports_developer": True, "supports_json_mode": True},
+    "deepseek": {"supports_developer": True, "supports_json_mode": True, "api_style": "openai"},
+    "qwen": {"supports_developer": False, "supports_json_mode": True, "api_style": "openai"},
+    "glm": {"supports_developer": False, "supports_json_mode": True, "api_style": "openai"},
+    "moonshot": {"supports_developer": False, "supports_json_mode": True, "api_style": "openai"},
+    "kimi": {"supports_developer": False, "supports_json_mode": True, "api_style": "openai"},
+    "oneapi": {"supports_developer": True, "supports_json_mode": True, "api_style": "openai"},
+    "openai": {"supports_developer": True, "supports_json_mode": True, "api_style": "openai"},
+    "codex": {"supports_developer": True, "supports_json_mode": True, "api_style": "openai"},
+    # Anthropic Messages API（晚晴网关 / Claude 官方 / AWS Bedrock 等）
+    "wanqing": {"supports_developer": False, "supports_json_mode": False, "api_style": "anthropic"},
+    "anthropic": {"supports_developer": False, "supports_json_mode": False, "api_style": "anthropic"},
+    "claude": {"supports_developer": False, "supports_json_mode": False, "api_style": "anthropic"},
 }
 
 
@@ -177,6 +181,11 @@ class LLMAdapter:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
+
+    def _is_anthropic_style(self) -> bool:
+        """是否使用 Anthropic Messages API 协议。"""
+        compat = PROVIDER_COMPAT.get(self.provider, {})
+        return compat.get("api_style") == "anthropic"
 
     def _masked_key(self) -> str:
         return mask_secret(self.api_key)
@@ -407,6 +416,130 @@ class LLMAdapter:
             mode="mock",
         )
 
+    def _chat_anthropic(
+        self,
+        messages: List[Dict[str, str]],
+        *,
+        system_prompt: Optional[str] = None,
+        max_tokens: Optional[int] = None,
+        temperature: Optional[float] = None,
+        json_mode: bool = False,
+    ) -> LLMResponse:
+        """Anthropic Messages API 兼容协议（晚晴网关 / Claude 官方）。
+
+        请求:  POST {base_url}/messages
+               body: { model, max_tokens, system?, messages, temperature? }
+               header: Authorization: Bearer <key>
+        响应:  { content: [{type: "text"|"thinking", text|thinking: "..."}], stop_reason, usage }
+        """
+        # Anthropic 协议: system 是 top-level 字段，messages 只含 user/assistant
+        system_text = system_prompt or ""
+        clean: List[Dict[str, str]] = []
+        for m in messages:
+            role = m.get("role", "user")
+            content = (m.get("content") or "").strip()
+            if not content:
+                continue
+            if role == "system":
+                # 合并到 top-level system
+                system_text = (system_text + "\n\n" + content).strip() if system_text else content
+                continue
+            if role == "developer":
+                system_text = (system_text + "\n\n" + content).strip() if system_text else content
+                continue
+            clean.append({"role": role, "content": content})
+        if not clean:
+            clean.append({"role": "user", "content": "(empty)"})
+
+        # json_mode 提示注入（Anthropic 没有 response_format，靠 system 提示约束）
+        if json_mode and system_text:
+            system_text = system_text + "\n\n严格要求：只输出合法 JSON，不要任何额外文字、不要 markdown 代码块。"
+
+        payload: Dict[str, Any] = {
+            "model": self.model,
+            "max_tokens": max_tokens or self.max_tokens,
+            "messages": clean,
+        }
+        if system_text:
+            payload["system"] = system_text
+        if temperature is not None:
+            payload["temperature"] = temperature
+        elif self.temperature is not None:
+            payload["temperature"] = self.temperature
+
+        url = f"{self.base_url}/messages"
+        last_error: Optional[str] = None
+        start = time.time()
+        attempts = max(int(self.max_retries or 0), 0) + 1
+        for attempt in range(attempts):
+            try:
+                elapsed_ms = int((time.time() - start) * 1000)
+                with httpx.Client(timeout=self.timeout) as client:
+                    resp = client.post(url, headers=self._headers(), json=payload)
+                    resp.raise_for_status()
+                    data = resp.json()
+                # 解析 Anthropic 响应: content 是 block 数组，取 text block 拼接
+                content_blocks = data.get("content", []) or []
+                text_parts: List[str] = []
+                for block in content_blocks:
+                    if not isinstance(block, dict):
+                        continue
+                    btype = block.get("type", "")
+                    if btype == "text" and block.get("text"):
+                        text_parts.append(block["text"])
+                    # thinking 块不拼到 content（避免污染脚本）
+                content = "".join(text_parts)
+                usage = data.get("usage", {}) or {}
+                # 归一化 usage 字段（Anthropic 用 input_tokens/output_tokens）
+                if "input_tokens" in usage and "prompt_tokens" not in usage:
+                    usage = {
+                        "prompt_tokens": usage.get("input_tokens", 0),
+                        "completion_tokens": usage.get("output_tokens", 0),
+                        "total_tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
+                    }
+                model_name = data.get("model", self.model)
+                self.last_success = time.time()
+                self.last_error = ""
+                logger.info(
+                    "LLM(anthropic) call ok model=%s provider=%s attempt=%d elapsed=%dms",
+                    mask_sensitive_in_text(model_name),
+                    self.provider,
+                    attempt + 1,
+                    elapsed_ms,
+                )
+                return LLMResponse(
+                    success=True,
+                    content=content,
+                    model=model_name,
+                    usage=usage,
+                    attempts=attempt + 1,
+                    elapsed_ms=elapsed_ms,
+                    mode="live",
+                )
+            except httpx.TimeoutException:
+                last_error = f"LLM request timeout after {self.timeout}s"
+                logger.warning("LLM(anthropic) timeout model=%s attempt=%d", self.model, attempt + 1)
+            except httpx.HTTPStatusError as e:
+                body = mask_sensitive_in_text(e.response.text[:300])
+                last_error = f"LLM HTTP {e.response.status_code}: {body}"
+                logger.warning("LLM(anthropic) HTTP %d attempt=%d body=%s", e.response.status_code, attempt + 1, body)
+            except Exception as e:  # noqa: BLE001
+                last_error = f"LLM error: {type(e).__name__}: {str(e)[:200]}"
+                logger.warning("LLM(anthropic) fail %s attempt=%d", type(e).__name__, attempt + 1)
+            if attempt < attempts - 1:
+                time.sleep(min(0.5 * (attempt + 1), 2.0))
+
+        self.last_error = last_error or "LLM request failed"
+        return LLMResponse(
+            success=False,
+            content="",
+            model=self.model,
+            error=self.last_error,
+            attempts=attempts,
+            elapsed_ms=int((time.time() - start) * 1000),
+            mode="live",
+        )
+
     def chat(
         self,
         messages: List[Dict[str, str]],
@@ -435,6 +568,16 @@ class LLMAdapter:
                 model=self.model,
                 error="LLM disabled (LLM_ENABLED=false) and mock_mode auto-off",
                 mode="disabled",
+            )
+
+        # Anthropic Messages API 协议分支（晚晴网关 / Claude 官方）
+        if self._is_anthropic_style():
+            return self._chat_anthropic(
+                full_messages,
+                system_prompt=None,  # system 已在 full_messages 里，_chat_anthropic 会提取
+                max_tokens=max_tokens,
+                temperature=temperature,
+                json_mode=json_mode,
             )
 
         url = f"{self.base_url}/chat/completions"
