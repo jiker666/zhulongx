@@ -30,6 +30,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import httpx
 
@@ -189,6 +190,32 @@ class LLMAdapter:
 
     def _masked_key(self) -> str:
         return mask_secret(self.api_key)
+
+    @property
+    def mode(self) -> str:
+        """当前模式：live / mock / disabled。"""
+        if self.mock_mode:
+            return "mock"
+        if not self.enabled:
+            return "disabled"
+        return "live"
+
+    def get_status(self) -> Dict[str, Any]:
+        """返回当前 LLM 状态（脱敏，key 只返回 configured 状态）。"""
+        parsed = urlparse(self.base_url)
+        return {
+            "enabled": self.enabled,
+            "mode": self.mode,
+            "provider": self.provider,
+            "base_url": self.base_url,
+            "base_url_host": parsed.netloc or self.base_url,
+            "api_key_configured": bool(self.api_key and self.api_key != "replace_me"),
+            "model": self.model,
+            "timeout": self.timeout,
+            "max_retries": self.max_retries,
+            "last_success": self.last_success,
+            "last_error": self.last_error or "",
+        }
 
     def _build_payload(
         self,
@@ -473,7 +500,6 @@ class LLMAdapter:
         attempts = max(int(self.max_retries or 0), 0) + 1
         for attempt in range(attempts):
             try:
-                elapsed_ms = int((time.time() - start) * 1000)
                 with httpx.Client(timeout=self.timeout) as client:
                     resp = client.post(url, headers=self._headers(), json=payload)
                     resp.raise_for_status()
@@ -498,6 +524,7 @@ class LLMAdapter:
                         "total_tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
                     }
                 model_name = data.get("model", self.model)
+                elapsed_ms = int((time.time() - start) * 1000)
                 self.last_success = time.time()
                 self.last_error = ""
                 logger.info(
