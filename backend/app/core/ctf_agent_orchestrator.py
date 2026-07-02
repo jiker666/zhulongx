@@ -536,19 +536,56 @@ class CtfOrchestrator:
             logger.warning("write file facts to blackboard failed: %s", e)
 
     def _generate_script(self, task: CtfTask) -> None:
-        # 构造 prompt
+        # 构造 prompt — v6.4: 包含富文本内容预览
         file_clues = ""
         if task.analysis:
-            files = task.analysis.get("files", [])[:5]
+            files = task.analysis.get("files", [])[:8]
             for f in files:
+                # v6.4: 用 basename 作为文件名，LLM 脚本直接 open(basename) 即可
+                basename = os.path.basename(f.get('relative_path', ''))
                 file_clues += (
-                    f"\n- {f.get('relative_path')} ({f.get('type','')}, {f.get('size',0)}B)"
-                    f" strings_count={len(f.get('strings', []))}"
+                    f"\n=== {basename} ===\n"
+                    f"类型: {f.get('type','')} | 大小: {f.get('size',0)}B | MIME: {f.get('mime','')}\n"
                 )
+                # 可疑字符串
                 if f.get("suspicious_strings"):
-                    file_clues += f" 可疑: {f['suspicious_strings'][:3]}"
+                    file_clues += f"可疑字符串: {f['suspicious_strings'][:5]}\n"
+                # 已发现 flag
                 if f.get("flags_found"):
-                    file_clues += f" 已发现 flag: {f['flags_found'][:3]}"
+                    file_clues += f"已发现 flag 候选: {f['flags_found'][:5]}\n"
+                # ELF 信息
+                elf = f.get("elf_info") or {}
+                if elf:
+                    for k, v in elf.items():
+                        file_clues += f"[{k}] {str(v)[:200]}\n"
+                # binwalk 签名
+                if f.get("binwalk_signatures"):
+                    file_clues += f"binwalk: {f['binwalk_signatures'][:5]}\n"
+                # binwalk 提取的子文件
+                if f.get("extracted_files"):
+                    file_clues += f"binwalk 提取: {f['extracted_files'][:10]}\n"
+                # v6.4: 内容预览（关键！LLM 据此理解文件内容）
+                preview = f.get("content_preview", "")
+                if preview:
+                    # 截断到合理长度（避免超长 prompt）
+                    max_preview = 2000
+                    if len(preview) > max_preview:
+                        file_clues += f"\n--- 内容预览 (截断到 {max_preview} 字符) ---\n{preview[:max_preview]}\n--- 预览结束 ---\n"
+                    else:
+                        file_clues += f"\n--- 内容预览 ---\n{preview}\n--- 预览结束 ---\n"
+                else:
+                    file_clues += "（无内容预览）\n"
+                # exif 信息
+                if f.get("exif"):
+                    important_keys = ["Comment", "Artist", "Copyright", "Image Width", "Image Height",
+                                      "X Resolution", "Y Resolution", "Bit Depth", "Color Type",
+                                      "Modify Date", "Create Date", "File Size"]
+                    exif_strs = []
+                    for k, v in f["exif"].items():
+                        if k in important_keys or "flag" in v.lower() or "ctf" in v.lower():
+                            exif_strs.append(f"{k}: {v}")
+                    if exif_strs:
+                        file_clues += f"EXIF: {exif_strs[:10]}\n"
 
         # v6: 静态命中 → 不调 LLM
         if task.candidate_flags and any(c.get("confidence", 0) >= 0.7 for c in task.candidate_flags):
@@ -575,17 +612,26 @@ class CtfOrchestrator:
 
         prompt = (
             f"题型: {task.plan.category if task.plan else 'unknown'}\n"
-            f"题面: {task.description[:400]}\n"
+            f"题面: {task.description[:800]}\n"
             f"附件分析:\n{file_clues}\n"
             "请生成一个 Python 解题脚本 solve.py，要求：\n"
-            "1. 自包含，不依赖外部网络\n"
-            "2. 用 print() 输出最终结果\n"
-            "3. 如果找到 flag，print 单独一行 flag{...} 或对应格式\n"
-            "4. 只输出脚本代码，不要 markdown 围栏\n"
+            "1. 自包含，优先读取同目录下的附件文件来分析\n"
+            "2. 附件文件就在当前工作目录（与 solve.py 同级），直接用 open('文件名','rb') 读取即可\n"
+            "3. 用 print() 输出最终结果\n"
+            "4. 如果找到 flag，print 单独一行 flag{...} 或对应格式\n"
+            "5. 只输出脚本代码，不要 markdown 围栏\n"
+            "6. 根据附件内容预览中的线索，选择正确的分析方法\n"
         )
         sys = (
             "你是 CTF 解题脚本专家。输出纯 Python 代码，不要解释，不要 markdown 围栏。"
             "脚本必须能直接 python3 solve.py 运行。"
+            "重要：附件文件在当前工作目录中（与 solve.py 同级），直接用 open('filename','rb') 读取即可，"
+            "不要用 input/ 前缀或子目录路径。"
+            "根据附件分析信息，选择最有可能的方法："
+            "如果是加密题，根据密文特征选择解密算法；"
+            "如果是隐写题，检查图片 LSB/EXIF/文件尾；"
+            "如果是流量包，用 scapy 或手动解析提取关键数据；"
+            "如果是二进制逆向，根据 ELF 信息分析关键函数。"
         )
         messages = [{"role": "user", "content": prompt}]
         resp = self.llm.chat(

@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
+import { useRef } from 'react'
 import {
   Flame,
   Target,
@@ -13,6 +14,8 @@ import {
   AlertCircle,
   Plus,
   X,
+  Paperclip,
+  Trash2,
 } from 'lucide-react'
 import {
   ctfListDemos,
@@ -20,6 +23,7 @@ import {
   ctfListTasks,
   ctfLlmStatus,
   ctfCreateTask,
+  ctfUploadAttachment,
   type CtfDemo,
   type CtfTask,
   type LlmStatus,
@@ -79,6 +83,10 @@ export default function CtfHub() {
   })
   const [creating, setCreating] = useState(false)
   const [createError, setCreateError] = useState('')
+  // 附件上传
+  const [uploadFiles, setUploadFiles] = useState<File[]>([])
+  const [uploading, setUploading] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   const refresh = useCallback(() => {
     Promise.all([ctfListDemos(), ctfListTasks(), ctfLlmStatus()])
@@ -183,8 +191,22 @@ export default function CtfHub() {
         max_rounds: 8,
       })
       const taskId = res.data.task_id
+      // 上传附件（如有）
+      if (uploadFiles.length > 0) {
+        setUploading(true)
+        for (const file of uploadFiles) {
+          try {
+            await ctfUploadAttachment(taskId, file)
+          } catch (e: any) {
+            // 单个附件上传失败不阻塞，记录提示
+            console.warn(`附件 ${file.name} 上传失败:`, e?.message)
+          }
+        }
+        setUploading(false)
+      }
       setShowNew(false)
       setNewForm({ title: '', description: '', category: 'auto', flag_format: '', authorized: false, allow_network: false })
+      setUploadFiles([])
       navigate(`/ctf/${taskId}`)
     } catch (e: any) {
       setCreateError(e?.response?.data?.detail || e.message || '创建失败')
@@ -422,7 +444,7 @@ export default function CtfHub() {
                 <Plus size={16} className="text-amber-400" /> 新建 CTF 题目
               </h3>
               <button
-                onClick={() => setShowNew(false)}
+                onClick={() => { setShowNew(false); setUploadFiles([]); }}
                 className="text-gray-400 hover:text-white"
               >
                 <X size={18} />
@@ -432,7 +454,7 @@ export default function CtfHub() {
             <div className="p-5 space-y-4">
               <div className="rounded-lg border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-[11px] text-amber-200/80">
                 只需填写标题和题面，模型会自动识别题型（web/crypto/reverse/pwn/misc/forensics）。
-                附件可在创建后到详情页上传，网址/靶场也不必现在填。
+                附件可直接在此上传，也可以创建后到详情页补充。
               </div>
 
               <div>
@@ -458,6 +480,61 @@ export default function CtfHub() {
                   value={newForm.description}
                   onChange={(e) => setNewForm({ ...newForm, description: e.target.value })}
                 />
+              </div>
+
+              {/* 附件上传 */}
+              <div>
+                <label className="block text-sm font-medium text-gray-300 mb-1.5">
+                  附件 <span className="text-gray-500 text-xs ml-1">（可选，支持多文件）</span>
+                </label>
+                <div
+                  className="border-2 border-dashed border-[#374151] rounded-lg p-3 text-center cursor-pointer hover:border-amber-500/40 transition-colors"
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  <Paperclip size={18} className="mx-auto text-gray-500 mb-1" />
+                  <p className="text-xs text-gray-400">
+                    点击选择文件，或拖放附件到此处
+                  </p>
+                  <p className="text-[10px] text-gray-600 mt-1">
+                    支持任意格式（pcap/zip/py/bin/png…），单文件 ≤ 30MB
+                  </p>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    multiple
+                    className="hidden"
+                    onChange={(e) => {
+                      const files = e.target.files
+                      if (files) {
+                        setUploadFiles((prev) => [...prev, ...Array.from(files)])
+                      }
+                      // 重置 input 以便再次选择同名文件
+                      e.target.value = ''
+                    }}
+                  />
+                </div>
+                {uploadFiles.length > 0 && (
+                  <div className="mt-2 space-y-1">
+                    {uploadFiles.map((f, i) => (
+                      <div
+                        key={`${f.name}-${i}`}
+                        className="flex items-center gap-2 text-xs bg-[#1f2937] border border-[#374151] rounded-lg px-3 py-1.5"
+                      >
+                        <Paperclip size={12} className="text-amber-400 flex-shrink-0" />
+                        <span className="text-gray-300 truncate flex-1">{f.name}</span>
+                        <span className="text-gray-600 flex-shrink-0">
+                          {f.size < 1024 ? `${f.size}B` : f.size < 1048576 ? `${(f.size / 1024).toFixed(1)}KB` : `${(f.size / 1048576).toFixed(1)}MB`}
+                        </span>
+                        <button
+                          onClick={() => setUploadFiles((prev) => prev.filter((_, idx) => idx !== i))}
+                          className="text-gray-500 hover:text-red-400 flex-shrink-0"
+                        >
+                          <Trash2 size={12} />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
 
               <div className="grid grid-cols-2 gap-3">
@@ -524,18 +601,18 @@ export default function CtfHub() {
 
               <div className="flex justify-end gap-2 pt-2 border-t border-amber-500/10">
                 <button
-                  onClick={() => setShowNew(false)}
+                  onClick={() => { setShowNew(false); setUploadFiles([]); }}
                   className="px-4 py-2 text-sm text-gray-400 hover:text-white"
                 >
                   取消
                 </button>
                 <button
                   onClick={handleCreate}
-                  disabled={creating || !newForm.title.trim() || !newForm.description.trim()}
+                  disabled={creating || uploading || !newForm.title.trim() || !newForm.description.trim()}
                   className="flex items-center gap-1.5 px-4 py-2 bg-amber-500 hover:bg-amber-400 text-black text-sm font-medium rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  {creating ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle size={14} />}
-                  创建并开始
+                  {creating || uploading ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle size={14} />}
+                  {uploading ? '上传附件中…' : creating ? '创建中…' : '创建并开始'}
                 </button>
               </div>
             </div>

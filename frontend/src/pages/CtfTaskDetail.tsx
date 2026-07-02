@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import {
   ArrowLeft,
@@ -18,6 +18,8 @@ import {
   Brain,
   DollarSign,
   Eye,
+  Upload,
+  Paperclip,
 } from 'lucide-react'
 import {
   ctfGetTask,
@@ -27,6 +29,7 @@ import {
   ctfGetBlackboard,
   ctfAddHint,
   ctfGetTaskCost,
+  ctfUploadAttachment,
   type CtfTask,
   type BlackboardSnapshot,
   type TaskCostSummary,
@@ -81,6 +84,9 @@ export default function CtfTaskDetail() {
   const [hintInput, setHintInput] = useState('')
   const [hintSubmitting, setHintSubmitting] = useState(false)
   const [v6Error, setV6Error] = useState<string | null>(null)
+  // 附件上传
+  const [uploading, setUploading] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   const refresh = useCallback(() => {
     if (!taskId) return
@@ -154,6 +160,23 @@ export default function CtfTaskDetail() {
         setShowWriteup(true)
       })
       .catch((e) => setError(`WP 不可用: ${e?.response?.data?.detail || e.message}`))
+  }
+
+  const handleUploadAttachment = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!taskId || !e.target.files) return
+    const files = Array.from(e.target.files)
+    setUploading(true)
+    Promise.all(
+      files.map((f) => ctfUploadAttachment(taskId, f).catch((err) => {
+        console.warn(`附件 ${f.name} 上传失败:`, err?.message)
+        return null
+      }))
+    ).finally(() => {
+      setUploading(false)
+      // 刷新任务数据
+      setTimeout(refresh, 300)
+      e.target.value = ''
+    })
   }
 
   if (loading) {
@@ -313,8 +336,8 @@ export default function CtfTaskDetail() {
             </Panel>
           )}
 
-          {task.attachments.length > 0 && (
-            <Panel title="附件" icon={<FileText size={14} />}>
+          {task.attachments.length > 0 ? (
+            <Panel title="附件" icon={<Paperclip size={14} />} badge={`${task.attachments.length}`}>
               <ul className="text-xs space-y-1">
                 {task.attachments.map((a, i) => (
                   <li key={i} className="font-mono text-gray-400 truncate" title={a}>
@@ -322,8 +345,40 @@ export default function CtfTaskDetail() {
                   </li>
                 ))}
               </ul>
+              {task.state === 'INIT' && !task.is_running && (
+                <div className="mt-2 pt-2 border-t border-amber-500/10">
+                  <label className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-amber-500/10 border border-amber-500/30 rounded-lg text-amber-300 cursor-pointer hover:bg-amber-500/20 w-fit">
+                    {uploading ? <Loader2 size={12} className="animate-spin" /> : <Upload size={12} />}
+                    上传更多附件
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      multiple
+                      className="hidden"
+                      onChange={handleUploadAttachment}
+                    />
+                  </label>
+                </div>
+              )}
             </Panel>
-          )}
+          ) : task.state === 'INIT' && !task.is_running ? (
+            <Panel title="附件" icon={<Paperclip size={14} />} badge="0">
+              <div className="text-center text-gray-500 text-xs py-3">
+                暂无附件，可上传附件后启动解题
+              </div>
+              <label className="flex items-center justify-center gap-1.5 px-3 py-2 text-xs bg-amber-500/10 border border-amber-500/30 rounded-lg text-amber-300 cursor-pointer hover:bg-amber-500/20">
+                {uploading ? <Loader2 size={12} className="animate-spin" /> : <Upload size={12} />}
+                上传附件
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  multiple
+                  className="hidden"
+                  onChange={handleUploadAttachment}
+                />
+              </label>
+            </Panel>
+          ) : null}
         </div>
 
         {/* MIDDLE: Evidence Timeline */}

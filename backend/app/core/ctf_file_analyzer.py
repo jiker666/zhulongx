@@ -60,6 +60,10 @@ class FileAnalysis:
     elf_info: Dict[str, Any] = field(default_factory=dict)
     binwalk_signatures: List[str] = field(default_factory=list)
     recommendation: str = ""
+    # v6.4: 富文本内容预览，帮助 LLM 理解附件内容
+    content_preview: str = ""
+    # v6.4: binwalk 提取的子文件列表
+    extracted_files: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -78,6 +82,8 @@ class FileAnalysis:
             "elf_info": self.elf_info,
             "binwalk_signatures": self.binwalk_signatures[:20],
             "recommendation": self.recommendation,
+            "content_preview": self.content_preview,
+            "extracted_files": self.extracted_files[:20],
         }
 
 
@@ -307,6 +313,16 @@ class CtfFileAnalyzer:
                 line for line in bw.splitlines()
                 if line.strip() and not line.startswith("DECIMAL") and not line.startswith("---")
             ][:20]
+            # v6.4: 尝试 binwalk 提取并列出子文件
+            extracted_dir = file_path + ".extracted"
+            if os.path.isdir(extracted_dir):
+                for root, _, files in os.walk(extracted_dir):
+                    for name in files[:30]:
+                        rel = os.path.relpath(os.path.join(root, name), extracted_dir)
+                        analysis.extracted_files.append(rel)
+
+        # v6.4: 生成内容预览（帮助 LLM 理解附件）
+        analysis.content_preview = self._generate_content_preview(file_path, analysis)
 
         # 推荐
         analysis.recommendation = self._recommend(analysis)
@@ -397,6 +413,176 @@ class CtfFileAnalyzer:
         if not tips:
             tips.append("未发现明显特征，建议 strings + binwalk 二次确认")
         return "; ".join(tips)
+
+    # ---------- v6.4: 内容预览（帮助 LLM 理解附件） ----------
+
+    # 文本文件扩展名（可直接读内容）
+    _TEXT_EXTS = {
+        ".txt", ".log", ".md", ".csv", ".json", ".xml", ".html", ".htm",
+        ".py", ".pyc", ".java", ".c", ".cpp", ".h", ".hpp", ".cs", ".js",
+        ".ts", ".go", ".rs", ".rb", ".php", ".sh", ".bash", ".zsh",
+        ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf",
+        ".sql", ".r", ".m", ".asm", ".s",
+    }
+
+    def _generate_content_preview(self, file_path: str, analysis: FileAnalysis) -> str:
+        """生成文件内容预览，供 LLM 直接理解附件内容。
+
+        策略：
+        - 文本文件：直接读前 ~2000 字符
+        - 二进制文件：hex dump 前 512 字节
+        - 图片：尺寸 + 文件尾数据（可能藏隐写）
+        - 压缩包：列出内容文件
+        - PCAP：tshark 概要
+        - base64 文本：尝试解码展示
+        """
+        preview_parts: List[str] = []
+        ext = Path(file_path).suffix.lower()
+        size = analysis.size
+        mime = analysis.mime.lower() if analysis.mime else ""
+        ftype = analysis.type.lower()
+
+        try:
+            # 1. 文本文件 → 直接读内容
+            if ext in self._TEXT_EXTS or "text/" in mime or "ascii" in ftype or "utf-8" in ftype:
+                with open(file_path, "r", encoding="utf-8", errors="replace") as fh:
+                    content = fh.read(min(size, 4000))
+                if content:
+                    preview_parts.append(f"[文件内容前{len(content)}字符]:\n{content}")
+                return "\n".join(preview_parts)
+
+            # 2. 图片文件 → 尺寸 + 文件尾
+            if "image" in mime or ext in (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg"):
+                # 用 file 命令输出的尺寸信息
+                if analysis.exif:
+                    dims = {k: v for k, v in analysis.exif.items() if k in ("Image Width", "Image Height", "Image Size")}
+                    if dims:
+                        preview_parts.append(f"[图片信息]: {dims}")
+                # 读文件尾部（隐写常在文件尾附加数据）
+                tail = self._read_tail(file_path, 512)
+                if tail:
+                    preview_parts.append(f"[文件尾 {len(tail)} 字节 hex]:\n{tail}")
+                return "\n".join(preview_parts)
+
+            # 3. PCAP → tshark 概要
+            if ext in (".pcap", ".pcapng", ".cap") or "pcap" in ftype:
+                summary = self._run_tool(
+                    ["tshark", "-r", file_path, "-q", "-z", "io,phs"],
+                    max_out=2000, allow_fail=True,
+                )
+                if summary:
+                    preview_parts.append(f"[PCAP 协议层次]:\n{summary[:1500]}")
+                conv = self._run_tool(
+                    ["tshark", "-r", file_path, "-q", "-z", "conv,tcp"],
+                    max_out=1000, allow_fail=True,
+                )
+                if conv:
+                    preview_parts.append(f"[TCP 会话概要]:\n{conv[:800]}")
+                http_objs = self._run_tool(
+                    ["tshark", "-r", file_path, "-q", "-z", "http,tree"],
+                    max_out=1500, allow_fail=True,
+                )
+                if http_objs:
+                    preview_parts.append(f"[HTTP 对象]:\n{http_objs[:1000]}")
+                return "\n".join(preview_parts)
+
+            # 4. 压缩包 → 列内容
+            if ext == ".zip":
+                try:
+                    with zipfile.ZipFile(file_path) as zf:
+                        names = zf.namelist()[:50]
+                        preview_parts.append(f"[ZIP 内容 {len(names)}/{len(zf.namelist())} 个文件]:\n" + "\n".join(names))
+                except Exception as e:  # noqa: BLE001
+                    preview_parts.append(f"[ZIP 读取失败: {e}]")
+                return "\n".join(preview_parts)
+
+            # 5. 尝试当文本读（可能是无扩展名的文本）
+            try:
+                with open(file_path, "rb") as fh:
+                    head = fh.read(512)
+                # 判断是否像文本
+                printable = sum(1 for b in head if 32 <= b <= 126 or b in (9, 10, 13))
+                if printable / max(len(head), 1) > 0.85:
+                    text = head.decode("utf-8", errors="replace")
+                    preview_parts.append(f"[文本内容前{len(text)}字符]:\n{text}")
+                    # 继续读更多
+                    with open(file_path, "r", encoding="utf-8", errors="replace") as fh2:
+                        more = fh2.read(4000)
+                    if len(more) > 512:
+                        preview_parts.append(f"[续...共{len(more)}字符]")
+                    return "\n".join(preview_parts)
+            except Exception:  # noqa: BLE001
+                pass
+
+            # 6. 二进制文件 → hex dump 前 512 字节
+            hex_dump = self._hex_dump(file_path, 512)
+            if hex_dump:
+                preview_parts.append(f"[二进制 hex dump 前 512 字节]:\n{hex_dump}")
+
+            # 7. base64 可疑编码 → 尝试解码
+            for s in analysis.suspicious_strings:
+                if "base64_candidate" in s:
+                    # 提取 base64 内容
+                    b64_match = re.search(r'[A-Za-z0-9+/]{20,}={0,2}', s)
+                    if b64_match:
+                        try:
+                            import base64
+                            decoded = base64.b64decode(b64_match.group(0))
+                            preview = decoded[:200]
+                            try:
+                                text = preview.decode("utf-8", errors="replace")
+                                preview_parts.append(f"[Base64 解码预览]:\n{text}")
+                            except Exception:
+                                preview_parts.append(f"[Base64 解码 hex]: {preview.hex()}")
+                        except Exception:  # noqa: BLE001
+                            pass
+                    break  # 只解码第一个
+
+            # 8. 文件尾数据（可能藏 flag 或隐写附加数据）
+            if size > 512:
+                tail = self._read_tail(file_path, 256)
+                if tail:
+                    preview_parts.append(f"[文件尾 256 字节 hex]:\n{tail}")
+
+            return "\n".join(preview_parts)
+
+        except Exception as e:  # noqa: BLE001
+            return f"[预览生成失败: {type(e).__name__}: {e}]"
+
+    def _hex_dump(self, file_path: str, max_bytes: int = 512) -> str:
+        """生成文件头部的 hex dump。"""
+        try:
+            with open(file_path, "rb") as fh:
+                data = fh.read(max_bytes)
+            lines = []
+            for offset in range(0, len(data), 16):
+                chunk = data[offset:offset + 16]
+                hex_part = " ".join(f"{b:02x}" for b in chunk)
+                ascii_part = "".join(chr(b) if 32 <= b <= 126 else "." for b in chunk)
+                lines.append(f"{offset:08x}  {hex_part:<48s}  |{ascii_part}|")
+            return "\n".join(lines)
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _read_tail(self, file_path: str, tail_bytes: int = 256) -> str:
+        """读取文件尾部的 hex dump。"""
+        try:
+            size = os.path.getsize(file_path)
+            if size <= tail_bytes:
+                return ""
+            with open(file_path, "rb") as fh:
+                fh.seek(max(0, size - tail_bytes))
+                data = fh.read(tail_bytes)
+            lines = []
+            start_offset = max(0, size - tail_bytes)
+            for offset in range(0, len(data), 16):
+                chunk = data[offset:offset + 16]
+                hex_part = " ".join(f"{b:02x}" for b in chunk)
+                ascii_part = "".join(chr(b) if 32 <= b <= 126 else "." for b in chunk)
+                lines.append(f"{start_offset + offset:08x}  {hex_part:<48s}  |{ascii_part}|")
+            return "\n".join(lines)
+        except Exception:  # noqa: BLE001
+            return ""
 
     def _summarize(self, files: List[FileAnalysis]) -> Dict[str, Any]:
         total = len(files)
