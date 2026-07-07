@@ -2,55 +2,57 @@ import { useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react'
 import { Link } from 'react-router-dom'
 import {
   Check, Clipboard, Copy, Download, FileText, Filter, Loader2, Play, Plus,
-  RefreshCw, Search, ShieldCheck, Upload, UserRound, XCircle,
+  RefreshCw, Search, ShieldCheck, Upload, UserRound, XCircle, Zap,
+  Shield, Target, Flame, Eye, Crosshair,
 } from 'lucide-react'
 import {
   addAnswerCandidate,
   addChallengeManualResult,
   addChallengeNote,
-  Challenge,
   createChallenge,
   exportFinalOps,
   getChallengeBrief,
   getChallenges,
   getFinalOpsDebrief,
   getHealth,
-  HealthStatus,
+  type Challenge,
+  type HealthStatus,
   importChallenges,
   importFinalOpsBackup,
   patchChallenge,
   runChallengeTriage,
   submitChallenge,
 } from '../api'
+import { PageHeader } from '../components/layout'
+import { Surface, GlowButton, StatusBadge, LoadingState, ErrorState, EmptyState, SectionHeader } from '../components/ui'
 
 const TYPES = ['web', 'code', 'log', 'pcap', 'reverse', 'crypto', 'misc', 'unknown']
 const STATUSES = ['new', 'triaging', 'running', 'need_human', 'candidate_found', 'submitted', 'solved', 'blocked', 'paused', 'cancelled']
-const FILTER_KEY = 'cyberpilot.finalops.filters.v1'
+const FILTER_KEY = 'zhulongx.finalops.filters.v1'
 const MAX_VISIBLE = 60
 
-const STATUS_STYLE: Record<string, string> = {
-  new: 'text-gray-300 bg-gray-500/10',
-  triaging: 'text-blue-300 bg-blue-500/10',
-  running: 'text-yellow-300 bg-yellow-500/10',
-  need_human: 'text-orange-300 bg-orange-500/10',
-  candidate_found: 'text-cyan-300 bg-cyan-500/10',
-  submitted: 'text-purple-300 bg-purple-500/10',
-  solved: 'text-green-300 bg-green-500/10',
-  blocked: 'text-red-300 bg-red-500/10',
-  paused: 'text-amber-300 bg-amber-500/10',
-  cancelled: 'text-gray-400 bg-gray-600/10',
+const TYPE_RUNE: Record<string, string> = {
+  web: '🕸', code: '⌨', log: '📋', pcap: '📡',
+  reverse: '🔧', crypto: '🔐', misc: '🎲', unknown: '❓',
+}
+
+const STATUS_STATE_MAP: Record<string, 'INIT' | 'RUNNING' | 'DONE' | 'FAILED' | 'HUMAN_REQUIRED'> = {
+  new: 'INIT', triaging: 'RUNNING', running: 'RUNNING',
+  need_human: 'HUMAN_REQUIRED', candidate_found: 'DONE',
+  submitted: 'DONE', solved: 'DONE', blocked: 'FAILED',
+  paused: 'INIT', cancelled: 'FAILED',
+}
+
+const STATUS_LABEL: Record<string, string> = {
+  new: '待命', triaging: '分诊中', running: '执行中',
+  need_human: '需人工', candidate_found: '候选命中',
+  submitted: '已提交', solved: '已解决', blocked: '受阻',
+  paused: '已暂停', cancelled: '已取消',
 }
 
 function readFilters() {
-  try {
-    return JSON.parse(window.localStorage.getItem(FILTER_KEY) || '{}')
-  } catch {
-    return {}
-  }
-}
-
-function badge(text: string, cls = 'text-gray-300 bg-[#1f2937]') {
-  return <span className={`px-2 py-1 rounded text-xs font-medium ${cls}`}>{text}</span>
+  try { return JSON.parse(window.localStorage.getItem(FILTER_KEY) || '{}') }
+  catch { return {} }
 }
 
 function bestCandidate(challenge: Challenge) {
@@ -124,10 +126,7 @@ export default function FinalOps() {
   const solved = challenges.filter(c => c.status === 'solved').length
   const submitted = challenges.filter(c => ['submitted', 'accepted', 'rejected'].includes(c.submit_status)).length
 
-  const showNotice = (message: string) => {
-    setNotice(message)
-    setError('')
-  }
+  const showNotice = (message: string) => { setNotice(message); setError('') }
 
   const create = async () => {
     if (!newForm.name.trim()) return
@@ -153,12 +152,12 @@ export default function FinalOps() {
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = `cyberpilot-finalops-backup-${timestampName()}.json`
+      a.download = `zhulongx-finalops-backup-${timestampName()}.json`
       document.body.appendChild(a)
       a.click()
       a.remove()
       URL.revokeObjectURL(url)
-      showNotice(`已导出 ${r.data.challenges?.length || 0} 个 Challenge 的备份 JSON`)
+      showNotice(`已导出 ${r.data.challenges?.length || 0} 个 Challenge 的备份`)
     } catch (e: any) {
       setError(e?.response?.data?.detail || '导出备份失败')
     }
@@ -171,10 +170,10 @@ export default function FinalOps() {
       const text = await file.text()
       const data = JSON.parse(text)
       const r = await importFinalOpsBackup(data)
-      showNotice(`备份导入完成: 新增 ${r.data.imported_challenges || 0} 个，总计 ${r.data.total_challenges || 0} 个`)
+      showNotice(`备份导入完成: 新增 ${r.data.imported_challenges || 0} 个`)
       await load()
     } catch (e: any) {
-      setError(e?.response?.data?.detail || '导入备份失败，请确认 JSON 来自 FinalOps 导出')
+      setError(e?.response?.data?.detail || '导入备份失败')
     } finally {
       event.target.value = ''
     }
@@ -185,7 +184,7 @@ export default function FinalOps() {
     try {
       const r = await runChallengeTriage(id)
       setChallenges(prev => prev.map(c => c.id === id ? r.data : c))
-      showNotice('Triage 完成，已更新证据和候选答案')
+      showNotice('Triage 完成')
     } catch (e: any) {
       setError(e?.response?.data?.detail || 'Run Triage 失败')
     } finally {
@@ -196,16 +195,13 @@ export default function FinalOps() {
   const mark = async (challenge: Challenge, status: string) => {
     const r = await patchChallenge(challenge.id, { status })
     setChallenges(prev => prev.map(c => c.id === challenge.id ? r.data : c))
-    showNotice(`${challenge.name} 已标记为 ${status}`)
+    showNotice(`${challenge.name} 已标记为 ${STATUS_LABEL[status] || status}`)
   }
 
   const submit = async (challenge: Challenge, submitStatus: 'submitted' | 'accepted' | 'rejected') => {
     const candidate = bestCandidate(challenge)
     const defaultAnswer = challenge.submitted_answer || candidate?.candidate || ''
-    if (!defaultAnswer) {
-      setError('没有候选答案，先人工回填或添加 Candidate')
-      return
-    }
+    if (!defaultAnswer) { setError('没有候选答案'); return }
     const answer = window.prompt(`提交前确认答案 (${submitStatus})`, defaultAnswer)
     if (answer === null || !answer.trim()) return
     const submitter = window.prompt('提交人', challenge.submitter || challenge.assignee || 'team')
@@ -213,14 +209,11 @@ export default function FinalOps() {
     const note = window.prompt('提交备注', submitStatus === 'submitted' ? '已在平台提交前人工确认' : `平台返回 ${submitStatus}`)
     if (note === null) return
     const r = await submitChallenge(challenge.id, {
-      answer,
-      submitter,
-      submission_note: note,
-      candidate_id: candidate?.id,
-      submit_status: submitStatus,
+      answer, submitter, submission_note: note,
+      candidate_id: candidate?.id, submit_status: submitStatus,
     })
     setChallenges(prev => prev.map(c => c.id === challenge.id ? r.data : c))
-    showNotice(`${challenge.name} 提交流程已记录为 ${submitStatus}`)
+    showNotice(`${challenge.name} → ${submitStatus}`)
   }
 
   const addManual = async (challenge: Challenge) => {
@@ -255,128 +248,125 @@ export default function FinalOps() {
     showNotice(`已复制: ${command}`)
   }
 
+  if (loading) return <LoadingState />
+
   return (
-    <div className="p-6 xl:p-8">
-      <div className="flex flex-col xl:flex-row xl:items-end xl:justify-between gap-4 mb-5">
-        <div>
-          <h1 className="text-2xl font-bold text-white">FinalOps v4 作战台</h1>
-          <p className="text-gray-400 text-sm mt-1">题目、队员、证据、候选答案、提交记录和备份恢复</p>
-        </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <input ref={fileInputRef} type="file" accept="application/json,.json" className="hidden" onChange={importBackupFile} />
-          <button onClick={load} className="btn-dark">
-            <RefreshCw size={14} /> 刷新
-          </button>
-          <button onClick={copyDebrief} className="btn-dark">
-            <Clipboard size={14} /> Debrief
-          </button>
-          <button onClick={exportBackup} className="btn-dark">
-            <Download size={14} /> 导出备份
-          </button>
-          <button onClick={() => fileInputRef.current?.click()} className="btn-dark">
-            <Upload size={14} /> 导入备份
-          </button>
-        </div>
-      </div>
+    <div className="space-y-6">
+      <PageHeader
+        title="FinalOps 作战台"
+        subtitle="题目态势 · 证据链 · 候选答案 · 提交记录"
+        action={
+          <div className="flex flex-wrap gap-2">
+            <input ref={fileInputRef} type="file" accept="application/json,.json" className="hidden" onChange={importBackupFile} />
+            <GlowButton variant="secondary" size="sm" onClick={load}>
+              <RefreshCw size={14} /> 刷新
+            </GlowButton>
+            <GlowButton variant="secondary" size="sm" onClick={copyDebrief}>
+              <Clipboard size={14} /> Debrief
+            </GlowButton>
+            <GlowButton variant="secondary" size="sm" onClick={exportBackup}>
+              <Download size={14} /> 导出备份
+            </GlowButton>
+            <GlowButton variant="secondary" size="sm" onClick={() => fileInputRef.current?.click()}>
+              <Upload size={14} /> 导入备份
+            </GlowButton>
+          </div>
+        }
+      />
 
       {error && (
-        <div className="mb-4 flex items-center gap-2 text-sm text-red-300 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">
-          <XCircle size={15} /> {error}
-        </div>
+        <ErrorState title="操作异常" detail={error} onRetry={() => setError('')} />
       )}
       {notice && (
-        <div className="mb-4 flex items-center justify-between gap-2 text-sm text-cyan-200 bg-cyan-500/10 border border-cyan-500/20 rounded-lg px-3 py-2">
+        <Surface variant="glass" className="flex items-center justify-between gap-2 px-4 py-2.5 text-sm text-cyan-400">
           <span>{notice}</span>
-          <button onClick={() => setNotice('')} className="text-cyan-300 hover:text-white" title="关闭">x</button>
-        </div>
+          <button onClick={() => setNotice('')} className="text-cyan-500 hover:text-white text-xs">✕</button>
+        </Surface>
       )}
 
-      <div className="grid grid-cols-2 lg:grid-cols-6 gap-3 mb-5">
-        <TopStat label="Competition" value={health?.scope_config_summary?.competition_mode ? 'ON' : 'OFF'} tone={health?.scope_config_summary?.competition_mode ? 'text-green-300' : 'text-gray-300'} />
-        <TopStat label="Scope" value={health?.scope_config_summary?.configured ? 'CONFIGURED' : 'EMPTY'} tone={health?.scope_config_summary?.configured ? 'text-cyan-300' : 'text-yellow-300'} />
-        <TopStat label="LLM" value={health?.llm?.enabled ? health.llm.model : 'RULE'} tone={health?.llm?.enabled ? 'text-purple-300' : 'text-cyan-300'} />
-        <TopStat label="Running" value={String(running)} tone="text-yellow-300" />
-        <TopStat label="Submitted" value={String(submitted)} tone="text-purple-300" />
-        <TopStat label="Candidates" value={`${candidateCount} / Solved ${solved}`} tone="text-green-300" />
+      <div className="grid grid-cols-2 lg:grid-cols-6 gap-3">
+        <TopStat icon={<Zap size={14} />} label="竞赛模式" value={health?.scope_config_summary?.competition_mode ? 'ON' : 'OFF'} tone={health?.scope_config_summary?.competition_mode ? 'text-jade-400' : 'text-gray-500'} />
+        <TopStat icon={<Target size={14} />} label="Scope" value={health?.scope_config_summary?.configured ? 'CONFIGURED' : 'EMPTY'} tone={health?.scope_config_summary?.configured ? 'text-cyan-400' : 'text-ember-400'} />
+        <TopStat icon={<Eye size={14} />} label="LLM" value={health?.llm?.enabled ? health.llm.model : 'RULE'} tone={health?.llm?.enabled ? 'text-violet-400' : 'text-cyan-400'} />
+        <TopStat icon={<Flame size={14} />} label="Running" value={String(running)} tone="text-ember-400" />
+        <TopStat icon={<Crosshair size={14} />} label="Submitted" value={String(submitted)} tone="text-violet-400" />
+        <TopStat icon={<Shield size={14} />} label="Candidates" value={`${candidateCount} / Solved ${solved}`} tone="text-jade-400" />
       </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-[320px_1fr] gap-5">
         <aside className="space-y-4">
-          <div className="bg-[#111827] border border-[#1f2937] rounded-lg p-4">
-            <div className="flex items-center gap-2 text-white font-medium text-sm mb-3"><Plus size={15} /> 新建 Challenge</div>
-            <div className="space-y-2">
-              <input className="input" placeholder="题目名称" value={newForm.name} onChange={e => setNewForm({ ...newForm, name: e.target.value })} />
-              <div className="grid grid-cols-2 gap-2">
-                <select className="input" value={newForm.challenge_type} onChange={e => setNewForm({ ...newForm, challenge_type: e.target.value })}>
-                  {TYPES.map(t => <option key={t}>{t}</option>)}
-                </select>
-                <select className="input" value={newForm.priority} onChange={e => setNewForm({ ...newForm, priority: e.target.value })}>
-                  <option>high</option><option>medium</option><option>low</option>
-                </select>
-              </div>
-              <input className="input" placeholder="目标 URL/IP" value={newForm.target} onChange={e => setNewForm({ ...newForm, target: e.target.value })} />
-              <input className="input" placeholder="负责人" value={newForm.assignee} onChange={e => setNewForm({ ...newForm, assignee: e.target.value })} />
-              <textarea className="input min-h-[86px]" placeholder="题目描述" value={newForm.description} onChange={e => setNewForm({ ...newForm, description: e.target.value })} />
-              <button onClick={create} className="w-full flex items-center justify-center gap-1.5 px-3 py-2 bg-cyan-600 hover:bg-cyan-500 rounded-lg text-sm font-medium text-white">
-                <Plus size={14} /> 创建
-              </button>
+          <Surface variant="panel" className="p-4 space-y-3">
+            <SectionHeader title="新建 Challenge" icon={<Plus size={15} className="text-ember-400" />} />
+            <input className="input" placeholder="题目名称" value={newForm.name} onChange={e => setNewForm({ ...newForm, name: e.target.value })} />
+            <div className="grid grid-cols-2 gap-2">
+              <select className="input" value={newForm.challenge_type} onChange={e => setNewForm({ ...newForm, challenge_type: e.target.value })}>
+                {TYPES.map(t => <option key={t}>{t}</option>)}
+              </select>
+              <select className="input" value={newForm.priority} onChange={e => setNewForm({ ...newForm, priority: e.target.value })}>
+                <option>high</option><option>medium</option><option>low</option>
+              </select>
             </div>
-          </div>
+            <input className="input" placeholder="目标 URL/IP" value={newForm.target} onChange={e => setNewForm({ ...newForm, target: e.target.value })} />
+            <input className="input" placeholder="负责人" value={newForm.assignee} onChange={e => setNewForm({ ...newForm, assignee: e.target.value })} />
+            <textarea className={`input min-h-[72px]`} placeholder="题目描述" value={newForm.description} onChange={e => setNewForm({ ...newForm, description: e.target.value })} />
+            <GlowButton variant="primary" className="w-full" onClick={create}>
+              <Plus size={14} /> 创建
+            </GlowButton>
+          </Surface>
 
-          <div className="bg-[#111827] border border-[#1f2937] rounded-lg p-4">
-            <div className="flex items-center gap-2 text-white font-medium text-sm mb-3"><Upload size={15} /> 批量导入</div>
+          <Surface variant="panel" className="p-4 space-y-3">
+            <SectionHeader title="批量导入" icon={<Upload size={15} className="text-ember-400" />} />
             <textarea
-              className="input min-h-[150px] font-mono text-xs"
-              placeholder='JSON/CSV/Markdown，例如 {"challenges":[{"name":"web1","type":"web"}]}'
+              className="input min-h-[120px] font-mono text-xs"
+              placeholder='JSON/CSV/Markdown'
               value={importText}
               onChange={e => setImportText(e.target.value)}
             />
-            <button onClick={importJson} className="mt-2 w-full flex items-center justify-center gap-1.5 px-3 py-2 bg-[#1f2937] hover:bg-[#374151] rounded-lg text-sm font-medium text-gray-100">
+            <GlowButton variant="secondary" className="w-full" onClick={importJson}>
               <Upload size={14} /> 导入题单
-            </button>
-          </div>
+            </GlowButton>
+          </Surface>
 
-          <div className="bg-[#111827] border border-[#1f2937] rounded-lg p-4">
-            <div className="flex items-center gap-2 text-white font-medium text-sm mb-3"><FileText size={15} /> Real CTF Case</div>
+          <Surface variant="panel" className="p-4 space-y-3">
+            <SectionHeader title="Real CTF Case" icon={<FileText size={15} className="text-ember-400" />} />
             <input className="input font-mono text-xs" value={ctfCasePath} onChange={e => setCtfCasePath(e.target.value)} placeholder="ctf_cases/case01" />
-            <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+            <div className="grid grid-cols-2 gap-2 text-xs">
               <Info label="Blind Solve" value="ON" />
               <Info label="RAG Disabled" value="ON" />
               <Info label="History Disabled" value="ON" />
               <Info label="Search Disabled" value="ON" />
             </div>
-            <div className="mt-2 text-xs text-gray-500 leading-relaxed">MCP/Skills Tool Calls 与 Denied Access Attempts 记录在 solve_trace.json。</div>
-            <div className="mt-2 grid grid-cols-3 gap-2">
-              <button onClick={() => copyCtfCommand('solve')} className="btn-subtle justify-center">Solve</button>
-              <button onClick={() => copyCtfCommand('eval')} className="btn-subtle justify-center">Eval</button>
-              <button onClick={() => copyCtfCommand('both')} className="btn-subtle justify-center">Both</button>
+            <div className="text-xs text-gray-600 leading-relaxed">Tool Calls 与 Denied Access 记录在 solve_trace.json</div>
+            <div className="grid grid-cols-3 gap-2">
+              <GlowButton variant="secondary" size="sm" onClick={() => copyCtfCommand('solve')}>Solve</GlowButton>
+              <GlowButton variant="secondary" size="sm" onClick={() => copyCtfCommand('eval')}>Eval</GlowButton>
+              <GlowButton variant="secondary" size="sm" onClick={() => copyCtfCommand('both')}>Both</GlowButton>
             </div>
-            <div className="mt-2 text-xs text-gray-500 leading-relaxed">Evaluator 仅用于本地训练评估；比赛现场不要读取标准答案。</div>
-          </div>
+          </Surface>
 
-          <div className="bg-[#111827] border border-[#1f2937] rounded-lg p-4 text-xs text-gray-400 space-y-1.5">
-            <div className="flex items-center gap-2 text-white font-medium text-sm mb-2"><ShieldCheck size={15} /> Scope</div>
+          <Surface variant="glass" className="p-4 space-y-2 text-xs text-gray-400">
+            <SectionHeader title="Scope" icon={<ShieldCheck size={15} className="text-ember-400" />} />
             <div>Mode: <span className="text-gray-200">{health?.scope_config_summary?.competition_mode ? 'competition' : 'safe'}</span></div>
             <div>CIDR: <span className="text-gray-200">{health?.scope_config_summary?.cidrs?.join(', ') || '(empty)'}</span></div>
             <div>Domain: <span className="text-gray-200">{health?.scope_config_summary?.domains?.join(', ') || '(empty)'}</span></div>
             <div>Ports: <span className="text-gray-200">{health?.scope_config_summary?.ports?.join(', ') || 'any'}</span></div>
-          </div>
+          </Surface>
         </aside>
 
-        <section>
-          <div className="bg-[#111827] border border-[#1f2937] rounded-lg p-3 mb-4">
+        <section className="space-y-4">
+          <Surface variant="glass" className="p-3">
             <div className="grid grid-cols-1 md:grid-cols-[1fr_150px_150px_150px] gap-2">
               <div className="relative">
-                <Search size={14} className="absolute left-3 top-2.5 text-gray-500" />
+                <Search size={14} className="absolute left-3 top-2.5 text-gray-600" />
                 <input className="input pl-9" placeholder="搜索题名、目标、标签" value={query} onChange={e => setQuery(e.target.value)} />
               </div>
               <select className="input" value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
                 <option value="">全部状态</option>
-                {STATUSES.map(s => <option key={s} value={s}>{s}</option>)}
+                {STATUSES.map(s => <option key={s} value={s}>{STATUS_LABEL[s] || s}</option>)}
               </select>
               <select className="input" value={typeFilter} onChange={e => setTypeFilter(e.target.value)}>
                 <option value="">全部类型</option>
-                {TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+                {TYPES.map(t => <option key={t} value={t}>{TYPE_RUNE[t]} {t}</option>)}
               </select>
               <select className="input" value={assigneeFilter} onChange={e => setAssigneeFilter(e.target.value)}>
                 <option value="">全部负责人</option>
@@ -384,16 +374,16 @@ export default function FinalOps() {
               </select>
             </div>
             {visible.length > MAX_VISIBLE && (
-              <div className="text-xs text-yellow-300 mt-2">当前筛选命中 {visible.length} 个，仅展示前 {MAX_VISIBLE} 个；缩小筛选条件可继续查看。</div>
+              <div className="text-xs text-ember-400 mt-2">筛选命中 {visible.length} 个，仅展示前 {MAX_VISIBLE} 个</div>
             )}
-          </div>
+          </Surface>
 
-          {loading ? (
-            <div className="flex items-center gap-2 text-gray-400"><Loader2 className="animate-spin" size={16} /> 加载中...</div>
-          ) : visible.length === 0 ? (
-            <div className="text-center text-gray-500 py-16 bg-[#111827] border border-[#1f2937] rounded-lg">
-              <Filter size={34} className="mx-auto mb-3 opacity-40" /> 暂无匹配题目
-            </div>
+          {visible.length === 0 ? (
+            <EmptyState
+              title="暂无匹配题目"
+              description="调整筛选条件或新建 Challenge"
+              icon={<Filter size={34} className="text-gray-600" />}
+            />
           ) : (
             <div className="grid grid-cols-1 2xl:grid-cols-2 gap-4">
               {visibleLimited.map(challenge => (
@@ -420,12 +410,14 @@ export default function FinalOps() {
   )
 }
 
-function TopStat({ label, value, tone }: { label: string; value: string; tone: string }) {
+function TopStat({ icon, label, value, tone }: { icon: React.ReactNode; label: string; value: string; tone: string }) {
   return (
-    <div className="bg-[#111827] border border-[#1f2937] rounded-lg p-3">
-      <div className="text-xs text-gray-500 mb-1">{label}</div>
+    <Surface variant="panel" className="p-3">
+      <div className="flex items-center gap-1.5 text-xs text-gray-600 mb-1">
+        {icon} {label}
+      </div>
       <div className={`text-sm font-semibold truncate ${tone}`}>{value}</div>
-    </div>
+    </Surface>
   )
 }
 
@@ -465,21 +457,30 @@ function ChallengeCard({
   }
 
   return (
-    <article className="bg-[#111827] border border-[#1f2937] rounded-lg overflow-hidden">
-      <div className="p-4 border-b border-[#1f2937]">
+    <Surface variant="panel" className="overflow-hidden">
+      <div className="p-4 border-b border-obsidian-700">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <div className="flex items-center gap-2 mb-1 flex-wrap">
-              {badge(challenge.challenge_type, 'text-cyan-300 bg-cyan-500/10')}
-              {badge(challenge.status, STATUS_STYLE[challenge.status] || STATUS_STYLE.new)}
-              {badge(challenge.submit_status || 'not_submitted', challenge.submit_status === 'accepted' ? 'text-green-300 bg-green-500/10' : challenge.submit_status === 'rejected' ? 'text-red-300 bg-red-500/10' : 'text-purple-300 bg-purple-500/10')}
-              {badge(challenge.priority, challenge.priority === 'high' ? 'text-red-300 bg-red-500/10' : 'text-gray-300 bg-[#1f2937]')}
+            <div className="flex items-center gap-2 mb-1.5 flex-wrap">
+              <span className="px-2 py-0.5 rounded text-xs font-medium bg-obsidian-800 border border-obsidian-700">
+                {TYPE_RUNE[challenge.challenge_type] || '?'} {challenge.challenge_type}
+              </span>
+              <StatusBadge
+                state={STATUS_STATE_MAP[challenge.status] || 'INIT'}
+                label={STATUS_LABEL[challenge.status] || challenge.status}
+                pulse={challenge.status === 'running' || challenge.status === 'triaging'}
+              />
+              {challenge.priority === 'high' && (
+                <span className="px-2 py-0.5 rounded text-xs font-medium bg-crimson-500/10 text-crimson-400 border border-crimson-500/20">
+                  P0
+                </span>
+              )}
             </div>
-            <h2 className="text-white font-semibold truncate">{challenge.name}</h2>
-            <div className="text-xs text-gray-500 mt-1 truncate">{challenge.target || challenge.uploaded_file || '题面/附件'}</div>
+            <h2 className="text-white font-semibold truncate text-sm">{challenge.name}</h2>
+            <div className="text-xs text-gray-600 mt-1 truncate">{challenge.target || challenge.uploaded_file || '题面/附件'}</div>
           </div>
-          <div className="text-right text-xs text-gray-500 shrink-0">
-            <div className="flex items-center justify-end gap-1 text-gray-300"><UserRound size={12} /> {challenge.assignee || '未分配'}</div>
+          <div className="text-right text-xs text-gray-600 shrink-0">
+            <div className="flex items-center justify-end gap-1 text-gray-400"><UserRound size={12} /> {challenge.assignee || '未分配'}</div>
             <div className="mt-1">{new Date(challenge.updated_at).toLocaleString('zh-CN')}</div>
           </div>
         </div>
@@ -492,75 +493,74 @@ function ChallengeCard({
           <Info label="Reviewer" value={challenge.reviewer || 'none'} />
           <Info label="Submitter" value={challenge.submitter || 'none'} />
         </div>
-        <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-xs border border-[#1f2937] rounded-lg p-3 bg-[#0b1220]">
-          <Info label="Blind Solve Mode" value="ON" />
-          <Info label="RAG Disabled" value="ON" />
-          <Info label="Historical Matching Disabled" value="ON" />
-          <Info label="MCP/Skills Tool Calls" value="trace ledger" />
-          <Info label="Denied Access Attempts" value="trace log" />
-        </div>
 
         {candidate ? (
-          <div className="border border-cyan-500/20 rounded-lg p-3 bg-cyan-500/5">
+          <Surface variant="glass" className="p-3 border border-cyan-500/20">
             <div className="flex items-center justify-between gap-2">
-              <div className="text-xs text-cyan-300">最高置信候选 · {(candidate.confidence * 100).toFixed(0)}% · {candidate.validation_status}</div>
-              <button onClick={() => { copy(candidate.candidate); showNotice('候选答案已复制') }} className="p-1 text-gray-400 hover:text-cyan-300" title="复制答案候选">
+              <div className="text-xs text-cyan-400">
+                最佳候选 · {(candidate.confidence * 100).toFixed(0)}% · {candidate.validation_status}
+              </div>
+              <button onClick={() => { copy(candidate.candidate); showNotice('候选答案已复制') }} className="p-1 text-gray-500 hover:text-cyan-400 transition-colors">
                 <Copy size={14} />
               </button>
             </div>
-            <div className="font-mono text-sm text-white mt-1 break-all">{candidate.candidate}</div>
-          </div>
+            <div className="font-mono text-sm text-ember-300 mt-1 break-all">{candidate.candidate}</div>
+          </Surface>
         ) : (
-          <div className="text-xs text-gray-500 border border-[#1f2937] rounded-lg p-3">暂无答案候选</div>
+          <div className="text-xs text-gray-600 border border-obsidian-700 rounded-lg p-3">暂无答案候选</div>
         )}
 
         {challenge.submitted_answer && (
-          <div className="border border-purple-500/20 rounded-lg p-3 bg-purple-500/5 text-xs">
+          <Surface variant="glass" className="p-3 border border-violet-500/20 text-xs">
             <div className="flex items-center justify-between gap-2">
-              <span className="text-purple-300">提交记录 · {challenge.submit_status}</span>
-              <button onClick={() => { copy(challenge.submitted_answer); showNotice('提交答案已复制') }} className="text-gray-400 hover:text-purple-300" title="复制提交答案">
+              <span className="text-violet-400">提交记录 · {challenge.submit_status}</span>
+              <button onClick={() => { copy(challenge.submitted_answer); showNotice('提交答案已复制') }} className="text-gray-500 hover:text-violet-400 transition-colors">
                 <Copy size={13} />
               </button>
             </div>
-            <div className="font-mono text-gray-100 break-all mt-1">{challenge.submitted_answer}</div>
-            <div className="text-gray-500 mt-1">{challenge.submitted_at ? new Date(challenge.submitted_at).toLocaleString('zh-CN') : ''} {challenge.submission_note}</div>
-          </div>
+            <div className="font-mono text-gray-200 break-all mt-1">{challenge.submitted_answer}</div>
+            <div className="text-gray-600 mt-1">{challenge.submitted_at ? new Date(challenge.submitted_at).toLocaleString('zh-CN') : ''} {challenge.submission_note}</div>
+          </Surface>
         )}
 
         <div className="text-xs text-gray-400 leading-relaxed line-clamp-2">{challenge.latest_summary || challenge.description || '等待分诊'}</div>
-        <div className="text-xs text-gray-500 leading-relaxed line-clamp-2">{challenge.next_suggestion || challenge.runbook?.strategy || '等待下一步建议'}</div>
+        <div className="text-xs text-gray-600 leading-relaxed line-clamp-2">{challenge.next_suggestion || challenge.runbook?.strategy || '等待下一步建议'}</div>
 
         <div className="flex flex-wrap gap-2">
-          <button onClick={runTriage} disabled={triageLocked} className="btn-primary">
+          <GlowButton variant="primary" size="sm" onClick={runTriage} disabled={triageLocked}>
             {running ? <Loader2 size={13} className="animate-spin" /> : <Play size={13} />} Triage
-          </button>
-          <button onClick={addNote} className="btn-dark">Note</button>
-          <button onClick={addCandidate} className="btn-dark">Candidate</button>
-          <button onClick={() => submit('submitted')} className="btn-dark">Submit</button>
-          <button onClick={() => submit('accepted')} className="btn-dark text-green-300">Accepted</button>
-          <button onClick={() => submit('rejected')} className="btn-dark text-red-300">Rejected</button>
-          <button onClick={() => mark('blocked')} className="btn-dark">Blocked</button>
-          <button onClick={() => mark('solved')} className="btn-dark">Solved</button>
-          <button onClick={copyBrief} className="btn-dark"><FileText size={13} /> Brief</button>
+          </GlowButton>
+          <GlowButton variant="secondary" size="sm" onClick={addNote}>Note</GlowButton>
+          <GlowButton variant="secondary" size="sm" onClick={addCandidate}>Candidate</GlowButton>
+          <GlowButton variant="secondary" size="sm" onClick={() => submit('submitted')}>Submit</GlowButton>
+          <GlowButton variant="secondary" size="sm" onClick={() => submit('accepted')} className="text-jade-400">Accepted</GlowButton>
+          <GlowButton variant="secondary" size="sm" onClick={() => submit('rejected')} className="text-crimson-400">Rejected</GlowButton>
+          <GlowButton variant="secondary" size="sm" onClick={() => mark('blocked')}>Blocked</GlowButton>
+          <GlowButton variant="secondary" size="sm" onClick={() => mark('solved')}>Solved</GlowButton>
+          <GlowButton variant="secondary" size="sm" onClick={copyBrief}><FileText size={13} /> Brief</GlowButton>
           {challenge.task_ids[0] && (
-            <Link to={`/tasks/${challenge.task_ids[0]}/report`} className="btn-dark">Report</Link>
+            <Link to={`/tasks/${challenge.task_ids[0]}/report`}>
+              <GlowButton variant="secondary" size="sm">Report</GlowButton>
+            </Link>
           )}
         </div>
 
         <div className="flex flex-wrap gap-2">
-          <button onClick={() => { copy(evidenceText); showNotice('证据摘要已复制') }} className="btn-subtle"><Copy size={12} /> 复制证据</button>
-          <button onClick={() => mark('paused')} className="btn-subtle">暂停</button>
-          <button onClick={() => mark('need_human')} className="btn-subtle">需人工</button>
+          <button onClick={() => { copy(evidenceText); showNotice('证据摘要已复制') }} className="text-xs text-gray-500 hover:text-ember-400 transition-colors flex items-center gap-1">
+            <Copy size={12} /> 复制证据
+          </button>
+          <button onClick={() => mark('paused')} className="text-xs text-gray-500 hover:text-ember-400 transition-colors">暂停</button>
+          <button onClick={() => mark('need_human')} className="text-xs text-gray-500 hover:text-crimson-400 transition-colors">需人工</button>
         </div>
 
-        <div className="grid grid-cols-[1fr_auto] gap-2 pt-2 border-t border-[#1f2937]">
-          <input className="input" placeholder="人工回填：页面返回、截图说明、提交结果" value={manual} onChange={e => setManual(e.target.value)} />
-          <button onClick={addManual} className="px-3 py-2 bg-[#1f2937] rounded-lg text-gray-100 hover:bg-[#374151]" title="回填人工结果">
+        <div className="grid grid-cols-[1fr_auto] gap-2 pt-2 border-t border-obsidian-700">
+          <input className="input" placeholder="人工回填：页面返回、截图说明" value={manual} onChange={e => setManual(e.target.value)} />
+          <GlowButton variant="secondary" size="sm" onClick={addManual} title="回填人工结果">
             <Check size={15} />
-          </button>
+          </GlowButton>
         </div>
       </div>
-    </article>
+    </Surface>
   )
 }
 
@@ -568,7 +568,7 @@ function Info({ label, value }: { label: string; value: string }) {
   return (
     <div>
       <div className="text-gray-600">{label}</div>
-      <div className="text-gray-300 truncate">{value}</div>
+      <div className="text-gray-400 truncate">{value}</div>
     </div>
   )
 }

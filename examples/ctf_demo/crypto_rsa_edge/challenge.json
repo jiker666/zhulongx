@@ -1,0 +1,10 @@
+{
+  "title": "Crypto RSA Edge Cases",
+  "category": "crypto",
+  "difficulty": "hard",
+  "description": "我们截获了两条 RSA 加密消息 cipher1.txt 和 cipher2.txt，它们用同一模数 n 加密但指数不同（e1=7, e2=11）。还额外给了 dp = d mod (p-1) 和 n 的高位信息。请利用 Common Modulus Attack + CRT 恢复明文，再利用 dp 泄漏分解 n 验证。flag 藏在明文中。",
+  "flag_format": "flag\\{[^}]+\\}",
+  "hint": "扩展欧几里得求 s,t 使 7s+11t=1 → m = c1^s * c2^t mod n; dp 泄漏可推 p = gcd(n, 2^(dp*e-1)-1 mod n - 1)",
+  "needs_llm": true,
+  "est_time_sec": 240
+}

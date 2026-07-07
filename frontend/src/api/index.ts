@@ -265,6 +265,14 @@ export interface CtfTask {
   authorized: boolean
   allow_network: boolean
   max_rounds: number
+  max_time_sec: number
+  shell_history: Array<{
+    command: string
+    exit_code: number | null
+    stdout: string
+    stderr: string
+    duration_ms: number
+  }>
   attachments: string[]
   state: string
   rounds_used: number
@@ -344,6 +352,7 @@ export const ctfCreateTask = (data: {
   authorized?: boolean
   allow_network?: boolean
   max_rounds?: number
+  max_time_sec?: number
 }) => api.post<{ task_id: string; state: string }>('/ctf/tasks', data)
 export const ctfUploadAttachment = (taskId: string, file: File) => {
   const formData = new FormData()
@@ -352,7 +361,7 @@ export const ctfUploadAttachment = (taskId: string, file: File) => {
     headers: { 'Content-Type': 'multipart/form-data' },
   })
 }
-export const ctfSolveTask = (taskId: string, payload: { mode?: string; max_rounds?: number }) =>
+export const ctfSolveTask = (taskId: string, payload: { mode?: string; max_rounds?: number; max_time_sec?: number }) =>
   api.post<CtfTask>(`/ctf/tasks/${taskId}/solve`, payload)
 export const ctfGetEvents = (taskId: string) =>
   api.get<{
@@ -365,9 +374,9 @@ export const ctfGetEvents = (taskId: string) =>
 export const ctfGetWriteup = (taskId: string) =>
   api.get<string>(`/ctf/tasks/${taskId}/writeup`, { responseType: 'text' as const })
 export const ctfListDemos = () => api.get<CtfDemo[]>('/ctf/demos')
-export const ctfRunDemo = (demoId: string, maxRounds = 8) =>
+export const ctfRunDemo = (demoId: string, maxRounds = 0, maxTimeSec = 600) =>
   api.post<CtfTask & { expected_flag?: string | null; match?: boolean | null }>(
-    `/ctf/demos/${demoId}/run?max_rounds=${maxRounds}`
+    `/ctf/demos/${demoId}/run?max_rounds=${maxRounds}&max_time_sec=${maxTimeSec}`
   )
 export const ctfBenchmark = () => api.get<CtfBenchmark>('/ctf/benchmark')
 
@@ -486,6 +495,9 @@ export const ctfUpdateIntent = (taskId: string, intentId: string, data: Partial<
 }>) => api.patch<BlackboardIntent>(`/ctf/tasks/${taskId}/intents/${intentId}`, data)
 export const ctfGetTaskCost = (taskId: string) =>
   api.get<TaskCostSummary>(`/ctf/tasks/${taskId}/cost`)
+export const ctfStopTask = (taskId: string) =>
+  api.post<{ task_id: string; state: string; note: string }>(`/ctf/tasks/${taskId}/stop`)
+
 export const ctfGetRouterStatus = () =>
   api.get<RouterStatus>('/ctf/llm/router/status')
 

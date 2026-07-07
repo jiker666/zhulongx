@@ -1,0 +1,10 @@
+{
+  "title": "Reverse Custom VM Bytecode",
+  "category": "reverse",
+  "difficulty": "hard",
+  "description": "crackme 是一个自定义虚拟机程序，VM 有 4 个 32-bit 寄存器 r0-r3，指令集包括算术、位运算、条件跳转。程序读取输入字符串，逐字符进行多步变换后与内置常量表比对。请逆向 VM 指令集语义，提取变换逻辑，用 z3 或手动逆向约束求解 flag。flag 格式 flag{...}。",
+  "flag_format": "flag\\{[^}]+\\}",
+  "hint": "VM 有 8 条核心指令: MOV ri,imm / XOR ri,rj / ADD ri,rj / SHL ri,imm / AND ri,imm / CMP ri,rj / JZ addr / HALT; 每字符变换: ((ch ^ key) + shift) & 0xFF",
+  "needs_llm": true,
+  "est_time_sec": 360
+}

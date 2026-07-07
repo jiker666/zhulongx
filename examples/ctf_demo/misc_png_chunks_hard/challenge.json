@@ -1,0 +1,10 @@
+{
+  "title": "Misc PNG Hidden Chunks",
+  "category": "misc",
+  "difficulty": "hard",
+  "description": "一张看起来正常的 PNG 图片 stego.png，但文件中隐藏了非标准 PNG chunk（自定义 chunk type 'cTfI'）。数据段按字节异或 0xAA 加密。请解析 PNG chunk 结构，找到隐藏的自定义 chunk，解密数据，恢复 flag。flag 格式 flag{...}。",
+  "flag_format": "flag\\{[^}]+\\}",
+  "hint": "PNG chunk 结构: [4B length][4B type][data][4B CRC]，遍历所有 chunk 找 type='cTfI'，data XOR 0xAA 解密",
+  "needs_llm": true,
+  "est_time_sec": 180
+}

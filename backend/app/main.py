@@ -29,10 +29,29 @@ async def lifespan(app: FastAPI):
     init_db()
     from app.core.tool_registry import tool_registry
     tool_registry.sync_to_db()
-    # v6.1: 加载 runtime_config 覆盖 settings（前端可编辑配置）
     from app.core.runtime_config import load_runtime_config_on_startup
     load_runtime_config_on_startup()
+    _cleanup_ghost_tasks()
     yield
+
+
+def _cleanup_ghost_tasks():
+    import datetime
+    from app.database import SessionLocal
+    from app.models.ctf import CtfTask as CtfTaskModel
+    try:
+        db = SessionLocal()
+        ghosts = db.query(CtfTaskModel).filter(CtfTaskModel.is_running == True).all()
+        for g in ghosts:
+            g.is_running = False
+            g.state = "HUMAN_REQUIRED"
+            g.error = "服务重启，任务已中断"
+            g.finished_at = datetime.datetime.utcnow()
+        if ghosts:
+            db.commit()
+        db.close()
+    except Exception:
+        pass
 
 
 app = FastAPI(

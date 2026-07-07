@@ -1,72 +1,91 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import {
-  ArrowLeft,
-  Flame,
-  Loader2,
-  Play,
-  Terminal,
-  FileText,
-  CheckCircle,
-  XCircle,
-  Clock,
-  Code,
-  ShieldAlert,
-  Download,
-  RefreshCw,
-  AlertCircle,
-  Brain,
-  DollarSign,
-  Eye,
-  Upload,
-  Paperclip,
+  ArrowLeft, Flame, Loader2, Play, Terminal, FileText,
+  CheckCircle2, XCircle, Clock, Code, ShieldAlert,
+  Download, RefreshCw, AlertCircle, Brain, DollarSign,
+  Eye, Upload, Paperclip, Zap, BrainCircuit, Flag,
+  Bug, Info, Sparkles, Radio, Shield, Target, X, Square,
 } from 'lucide-react'
 import {
-  ctfGetTask,
-  ctfGetEvents,
-  ctfGetWriteup,
-  ctfSolveTask,
-  ctfGetBlackboard,
-  ctfAddHint,
-  ctfGetTaskCost,
-  ctfUploadAttachment,
-  type CtfTask,
-  type BlackboardSnapshot,
-  type TaskCostSummary,
+  ctfGetTask, ctfGetEvents, ctfGetWriteup, ctfSolveTask, ctfStopTask,
+  ctfGetBlackboard, ctfAddHint, ctfGetTaskCost, ctfUploadAttachment,
+  type CtfTask, type BlackboardSnapshot, type TaskCostSummary,
 } from '../api'
+import { z, statusStyle, categoryStyle } from '../styles/tokens'
+import {
+  Surface, GlowButton, StatusBadge, SectionHeader, CodeBlock,
+  CopyButton, ProgressRing, EmptyState, LoadingState, ErrorState,
+} from '../components/ui'
+import { BrandMark } from '../components/brand'
+import { PageHeader } from '../components/layout'
 
-const STATE_LABELS: Record<string, string> = {
-  INIT: '初始化',
-  CLASSIFY: '题型识别',
-  PLAN: '生成计划',
-  ANALYZE_FILES: '附件分析',
-  GENERATE_SCRIPT: '生成脚本',
-  RUN_SCRIPT: '执行脚本',
-  REFLECT_ERROR: '反思修复',
-  VERIFY_FLAG: '校验 Flag',
-  GENERATE_WRITEUP: '生成 WP',
-  DONE: '已完成',
-  FAILED: '失败',
-  HUMAN_REQUIRED: '需人工接管',
+interface AgentLiveEvent {
+  type: 'agent_live'
+  task_id: string
+  event_type: 'thinking' | 'action' | 'result' | 'flag' | 'error' | 'info'
+  phase: string
+  title: string
+  detail: string
+  code: string
+  output: string
+  success: boolean | null
+  extra: Record<string, any>
+  ts: number
 }
 
-const STATE_COLORS: Record<string, string> = {
-  INIT: 'text-gray-300 border-gray-500 bg-gray-500/10',
-  CLASSIFY: 'text-blue-300 border-blue-500 bg-blue-500/10',
-  PLAN: 'text-blue-300 border-blue-500 bg-blue-500/10',
-  ANALYZE_FILES: 'text-cyan-300 border-cyan-500 bg-cyan-500/10',
-  GENERATE_SCRIPT: 'text-purple-300 border-purple-500 bg-purple-500/10',
-  RUN_SCRIPT: 'text-amber-300 border-amber-500 bg-amber-500/10',
-  REFLECT_ERROR: 'text-orange-300 border-orange-500 bg-orange-500/10',
-  VERIFY_FLAG: 'text-yellow-300 border-yellow-500 bg-yellow-500/10',
-  GENERATE_WRITEUP: 'text-teal-300 border-teal-500 bg-teal-500/10',
-  DONE: 'text-green-300 border-green-500 bg-green-500/10',
-  FAILED: 'text-red-300 border-red-500 bg-red-500/10',
-  HUMAN_REQUIRED: 'text-yellow-300 border-yellow-500 bg-yellow-500/10',
+const EVT_STYLE: Record<string, { icon: React.ReactNode; dot: string; border: string; bg: string; text: string; label: string }> = {
+  thinking: { icon: <BrainCircuit size={13} />, dot: 'bg-violet-400', border: 'border-violet-500', bg: 'bg-violet-500/10', text: 'text-violet-300', label: '思考' },
+  action:   { icon: <Zap size={13} />,          dot: 'bg-cyan-400',   border: 'border-cyan-500',   bg: 'bg-cyan-500/10',   text: 'text-cyan-300',   label: '行动' },
+  result:   { icon: <CheckCircle2 size={13} />,   dot: 'bg-jade-400',  border: 'border-jade-500',  bg: 'bg-jade-500/10',  text: 'text-jade-300',  label: '结果' },
+  flag:     { icon: <Flag size={13} />,            dot: 'bg-ember-400', border: 'border-ember-500', bg: 'bg-ember-500/10', text: 'text-ember-300', label: 'Flag' },
+  error:    { icon: <Bug size={13} />,             dot: 'bg-crimson-400',border: 'border-crimson-500',bg: 'bg-crimson-500/10',text: 'text-crimson-300',label: '错误' },
+  info:     { icon: <Info size={13} />,            dot: 'bg-slate-400', border: 'border-slate-500', bg: 'bg-slate-500/10', text: 'text-slate-300', label: '信息' },
+}
+
+const STATE_LABELS: Record<string, string> = {
+  INIT: '初始化', CLASSIFY: '题型识别', PLAN: '生成计划',
+  ANALYZE_FILES: '附件分析', AGENT_THINK: '🧠 思考中',
+  RUN_SHELL: '⚡ 执行命令', GENERATE_SCRIPT: '生成脚本',
+  RUN_SCRIPT: '执行脚本', REFLECT_ERROR: '反思修复',
+  VERIFY_FLAG: '校验 Flag', GENERATE_WRITEUP: '生成 WP',
+  DONE: '已完成', FAILED: '失败', HUMAN_REQUIRED: '需人工接管',
 }
 
 function formatTime(ts: number) {
   return new Date(ts * 1000).toLocaleTimeString('zh-CN', { hour12: false })
+}
+
+function InfoRow({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="flex justify-between items-center text-xs">
+      <span className="text-slate-500">{label}</span>
+      <span className={`${mono ? 'font-mono' : ''} text-slate-200 text-right`}>{value}</span>
+    </div>
+  )
+}
+
+function KindTag({ kind }: { kind: string }) {
+  const m: Record<string, string> = {
+    candidate: 'bg-jade-500/15 text-jade-400',
+    error: 'bg-crimson-500/15 text-crimson-400',
+    file: 'bg-cyan-500/15 text-cyan-400',
+    clue: 'bg-ember-500/15 text-ember-400',
+    tool_result: 'bg-violet-500/15 text-violet-400',
+    constraint: 'bg-slate-500/15 text-slate-400',
+  }
+  return <span className={`inline-block px-1.5 py-0.5 text-[9px] rounded ${m[kind] || 'bg-slate-500/15 text-slate-400'}`}>{kind}</span>
+}
+
+function IntentTag({ status }: { status: string }) {
+  const m: Record<string, string> = {
+    completed: 'bg-jade-500/15 text-jade-400',
+    in_progress: 'bg-ember-500/15 text-ember-400',
+    failed: 'bg-crimson-500/15 text-crimson-400',
+    deprecated: 'bg-slate-500/15 text-slate-500 line-through',
+    pending: 'bg-cyan-500/15 text-cyan-400',
+  }
+  return <span className={`inline-block px-1.5 py-0.5 text-[9px] rounded ${m[status] || 'bg-slate-500/15 text-slate-400'}`}>{status}</span>
 }
 
 export default function CtfTaskDetail() {
@@ -78,76 +97,90 @@ export default function CtfTaskDetail() {
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [solving, setSolving] = useState(false)
-  // v6 state
   const [blackboard, setBlackboard] = useState<BlackboardSnapshot | null>(null)
   const [costSummary, setCostSummary] = useState<TaskCostSummary | null>(null)
   const [hintInput, setHintInput] = useState('')
   const [hintSubmitting, setHintSubmitting] = useState(false)
   const [v6Error, setV6Error] = useState<string | null>(null)
-  // 附件上传
   const [uploading, setUploading] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const [liveEvents, setLiveEvents] = useState<AgentLiveEvent[]>([])
+  const liveLogRef = useRef<HTMLDivElement>(null)
+  const wsRef = useRef<WebSocket | null>(null)
+  const [wsConnected, setWsConnected] = useState(false)
 
   const refresh = useCallback(() => {
     if (!taskId) return
-    setRefreshing(true)
-    setError(null)
+    setRefreshing(true); setError(null)
     ctfGetTask(taskId)
-      .then((r) => {
-        setTask(r.data)
-      })
-      .catch((e) => {
-        setError(e?.response?.data?.detail || e.message || '无法加载任务')
-      })
-      .finally(() => {
-        setLoading(false)
-        setRefreshing(false)
-      })
-    // v6: 并行拉取黑板 + 成本（容错，后端未升级时不报错）
-    ctfGetBlackboard(taskId)
-      .then((r) => setBlackboard(r.data))
-      .catch(() => setBlackboard(null))
-    ctfGetTaskCost(taskId)
-      .then((r) => setCostSummary(r.data))
-      .catch(() => setCostSummary(null))
+      .then((r) => setTask(r.data))
+      .catch((e) => setError(e?.response?.data?.detail || e.message || '无法加载任务'))
+      .finally(() => { setLoading(false); setRefreshing(false) })
+    ctfGetBlackboard(taskId).then((r) => setBlackboard(r.data)).catch(() => setBlackboard(null))
+    ctfGetTaskCost(taskId).then((r) => setCostSummary(r.data)).catch(() => setCostSummary(null))
   }, [taskId])
 
-  useEffect(() => {
-    refresh()
-  }, [refresh])
+  useEffect(() => { refresh() }, [refresh])
 
-  // Auto-refresh every 1.5s while running
   useEffect(() => {
     if (!task) return
     if (['DONE', 'FAILED', 'HUMAN_REQUIRED'].includes(task.state)) return
-    const interval = setInterval(refresh, 1500)
-    return () => clearInterval(interval)
+    const iv = setInterval(refresh, 1500)
+    return () => clearInterval(iv)
   }, [task?.state, refresh])
+
+  useEffect(() => {
+    if (!taskId || !task) return
+    if (['DONE', 'FAILED', 'HUMAN_REQUIRED'].includes(task.state) && wsRef.current) return
+    if (wsRef.current) return
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const ws = new WebSocket(`${protocol}//${window.location.host}/ws/ctf/${taskId}`)
+    wsRef.current = ws
+    ws.onopen = () => setWsConnected(true)
+    ws.onmessage = (ev) => {
+      try {
+        const data = JSON.parse(ev.data)
+        if (data.type === 'agent_live') setLiveEvents((p) => [...p.slice(-200), data as AgentLiveEvent])
+      } catch {}
+    }
+    ws.onclose = () => { setWsConnected(false); wsRef.current = null }
+    ws.onerror = () => setWsConnected(false)
+    const ping = setInterval(() => { if (ws.readyState === WebSocket.OPEN) ws.send('ping') }, 15000)
+    return () => { clearInterval(ping); ws.close(); wsRef.current = null }
+  }, [taskId, task?.state])
+
+  useEffect(() => {
+    if (task && ['DONE', 'FAILED', 'HUMAN_REQUIRED'].includes(task.state) && wsRef.current) {
+      wsRef.current.close(); wsRef.current = null
+    }
+  }, [task?.state])
+
+  useEffect(() => { if (liveLogRef.current) liveLogRef.current.scrollTop = liveLogRef.current.scrollHeight }, [liveEvents])
 
   const handleSolve = () => {
     if (!taskId) return
     setSolving(true)
-    ctfSolveTask(taskId, { mode: 'auto', max_rounds: 8 })
-      .then(() => {
-        // immediately refresh to show running state
-        setTimeout(refresh, 200)
-      })
-      .catch((e) => {
-        setError(`启动解题失败: ${e?.response?.data?.detail || e.message}`)
-      })
+    ctfSolveTask(taskId, { mode: 'auto', max_rounds: 0, max_time_sec: 600 })
+      .then(() => setTimeout(refresh, 200))
+      .catch((e) => setError(`启动解题失败: ${e?.response?.data?.detail || e.message}`))
       .finally(() => setSolving(false))
+  }
+
+  const [stopping, setStopping] = useState(false)
+  const handleStop = () => {
+    if (!taskId) return
+    setStopping(true)
+    ctfStopTask(taskId)
+      .then(() => setTimeout(refresh, 200))
+      .catch((e) => setError(`停止失败: ${e?.response?.data?.detail || e.message}`))
+      .finally(() => setStopping(false))
   }
 
   const handleAddHint = () => {
     if (!taskId || !hintInput.trim()) return
-    setHintSubmitting(true)
-    setV6Error(null)
+    setHintSubmitting(true); setV6Error(null)
     ctfAddHint(taskId, { content: hintInput.trim(), source: 'human' })
-      .then(() => {
-        setHintInput('')
-        // 刷新黑板
-        ctfGetBlackboard(taskId).then((r) => setBlackboard(r.data))
-      })
+      .then(() => { setHintInput(''); ctfGetBlackboard(taskId).then((r) => setBlackboard(r.data)) })
       .catch((e) => setV6Error(e?.response?.data?.detail || e.message))
       .finally(() => setHintSubmitting(false))
   }
@@ -155,10 +188,7 @@ export default function CtfTaskDetail() {
   const fetchWriteup = () => {
     if (!taskId) return
     ctfGetWriteup(taskId)
-      .then((r) => {
-        setWriteup(typeof r.data === 'string' ? r.data : (r.data as any))
-        setShowWriteup(true)
-      })
+      .then((r) => { setWriteup(typeof r.data === 'string' ? r.data : (r.data as any)); setShowWriteup(true) })
       .catch((e) => setError(`WP 不可用: ${e?.response?.data?.detail || e.message}`))
   }
 
@@ -166,600 +196,511 @@ export default function CtfTaskDetail() {
     if (!taskId || !e.target.files) return
     const files = Array.from(e.target.files)
     setUploading(true)
-    Promise.all(
-      files.map((f) => ctfUploadAttachment(taskId, f).catch((err) => {
-        console.warn(`附件 ${f.name} 上传失败:`, err?.message)
-        return null
-      }))
-    ).finally(() => {
-      setUploading(false)
-      // 刷新任务数据
-      setTimeout(refresh, 300)
-      e.target.value = ''
-    })
+    Promise.all(files.map((f) => ctfUploadAttachment(taskId, f).catch(() => null)))
+      .finally(() => { setUploading(false); setTimeout(refresh, 300); e.target.value = '' })
   }
 
-  if (loading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-[#0a0e1a]">
-        <Loader2 className="animate-spin text-amber-400" size={32} />
-      </div>
-    )
-  }
+  if (loading) return <LoadingState />
+  if (error && !task) return <ErrorState title="作战中枢暂时离线" detail={error} onRetry={refresh} />
+  if (!task) return <EmptyState icon={<Target size={32} />} title="任务不存在" />
 
-  if (error && !task) {
-    return (
-      <div className="min-h-screen bg-[#0a0e1a] p-6 flex items-center justify-center">
-        <div className="max-w-md text-center">
-          <AlertCircle className="mx-auto text-red-400 mb-3" size={32} />
-          <h2 className="text-lg font-bold text-white mb-2">加载失败</h2>
-          <p className="text-sm text-gray-400 mb-4">{error}</p>
-          <div className="flex gap-2 justify-center">
-            <button
-              onClick={refresh}
-              className="px-4 py-2 bg-amber-500/10 border border-amber-500/30 text-amber-300 rounded-lg text-sm hover:bg-amber-500/20"
-            >
-              重试
-            </button>
-            <Link
-              to="/ctf"
-              className="px-4 py-2 bg-[#1f2937] border border-[#374151] text-gray-300 rounded-lg text-sm"
-            >
-              返回 CTF 作战
-            </Link>
-          </div>
-        </div>
-      </div>
-    )
-  }
-
-  if (!task) {
-    return (
-      <div className="min-h-screen bg-[#0a0e1a] p-6">
-        <p className="text-gray-400">Task not found.</p>
-        <Link to="/ctf" className="text-amber-400 text-sm mt-4 inline-block">
-          ← 返回 CTF 作战
-        </Link>
-      </div>
-    )
-  }
-
-  const stateColor = STATE_COLORS[task.state] || STATE_COLORS.INIT
+  const ss = statusStyle(task.is_running ? 'RUNNING' : task.state)
+  const cs = categoryStyle(task.plan?.category || task.category_hint || 'misc')
+  const isSolved = task.state === 'DONE'
+  const isFailed = task.state === 'FAILED'
+  const needsHuman = task.state === 'HUMAN_REQUIRED'
+  const canSolve = !task.is_running && task.state !== 'DONE'
+const canStop = task.is_running && !['DONE','FAILED','HUMAN_REQUIRED'].includes(task.state)
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-[#0a0e1a] via-[#0d1426] to-[#0a0e1a] p-4">
-      {/* Top Bar */}
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-3">
-          <Link
-            to="/ctf"
-            className="px-3 py-1.5 text-xs text-gray-400 hover:text-white border border-[#1f2937] rounded-lg hover:border-amber-500/40"
-          >
-            <ArrowLeft size={12} className="inline mr-1" /> 返回
-          </Link>
-          <div>
-            <h1 className="text-lg font-bold text-white">{task.title}</h1>
-            <p className="text-xs text-gray-500">ID: {task.task_id}</p>
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          <span className={`px-3 py-1 rounded border text-xs font-mono ${stateColor}`}>
-            {STATE_LABELS[task.state] || task.state}
-            {task.is_running && (
-              <Loader2 size={10} className="inline ml-1 animate-spin" />
+    <div className="min-h-screen bg-obsidian-950">
+      <PageHeader
+        title={task.title}
+        subtitle={`ID: ${task.task_id}`}
+        icon={<BrandMark size={22} className="text-ember-400" />}
+        action={
+          <div className="flex items-center gap-2">
+            <Link to="/ctf">
+              <GlowButton variant="ghost" size="sm">
+                <ArrowLeft size={14} /> 返回
+              </GlowButton>
+            </Link>
+            <StatusBadge state={task.is_running ? 'RUNNING' : task.state} pulse={task.is_running} label={STATE_LABELS[task.state] || task.state} />
+            {canSolve && (
+              <GlowButton onClick={handleSolve} disabled={solving} size="sm" loading={solving}>
+                <Play size={14} /> 启动解题
+              </GlowButton>
             )}
-          </span>
-          {task.state === 'INIT' && !task.is_running && (
-            <button
-              onClick={handleSolve}
-              disabled={solving}
-              className="px-3 py-1.5 text-xs bg-amber-500/20 border border-amber-500/40 text-amber-200 rounded-lg hover:bg-amber-500/30 disabled:opacity-50 flex items-center gap-1"
-            >
-              {solving ? <Loader2 size={12} className="animate-spin" /> : <Play size={12} />}
-              启动解题
-            </button>
-          )}
-          <button
-            onClick={refresh}
-            className="px-3 py-1.5 text-xs border border-[#1f2937] rounded-lg text-gray-400 hover:text-white hover:border-amber-500/40 flex items-center gap-1"
-          >
-            <RefreshCw size={12} className={refreshing ? 'animate-spin' : ''} /> 刷新
-          </button>
-          <button
-            onClick={fetchWriteup}
-            disabled={!task.has_writeup}
-            className="px-3 py-1.5 text-xs bg-green-500/10 border border-green-500/30 text-green-300 rounded-lg hover:bg-green-500/20 disabled:opacity-40 flex items-center gap-1"
-          >
-            <Download size={12} /> 导出 WP
-          </button>
-        </div>
-      </div>
+            {canStop && (
+              <GlowButton onClick={handleStop} disabled={stopping} size="sm" variant="danger" loading={stopping}>
+                <Square size={14} /> 停止
+              </GlowButton>
+            )}
+            <GlowButton variant="secondary" onClick={refresh} size="sm" loading={refreshing}>
+              <RefreshCw size={13} /> 刷新
+            </GlowButton>
+            {task.has_writeup && (
+              <GlowButton variant="secondary" onClick={fetchWriteup} size="sm" disabled={!task.has_writeup}>
+                <Download size={13} /> 导出 WP
+              </GlowButton>
+            )}
+          </div>
+        }
+      />
 
-      {/* Error Banner */}
-      {error && (
-        <div className="mb-4 px-4 py-3 bg-red-500/10 border border-red-500/30 rounded-lg flex items-center gap-2 text-red-300 text-sm">
-          <AlertCircle size={16} />
-          <span className="flex-1">{error}</span>
-          <button onClick={refresh} className="text-red-200 underline text-xs">
-            重试
-          </button>
-        </div>
-      )}
+      {error && <ErrorState title="同步失败" detail={error} onRetry={refresh} />}
 
-      {/* Main Grid: 3 columns */}
-      <div className="grid grid-cols-12 gap-3">
-        {/* LEFT: Task Info + Plan */}
-        <div className="col-span-12 lg:col-span-3 space-y-3">
-          <Panel title="任务信息" icon={<FileText size={14} />}>
-            <div className="text-xs space-y-1">
-              <Row label="题型" value={task.plan?.category || task.category_hint} />
-              <Row label="置信度" value={`${((task.plan?.confidence || 0) * 100).toFixed(0)}%`} />
-              <Row label="授权" value={task.authorized ? '✅ 已授权' : '❌ 未授权'} />
-              <Row label="联网" value={task.allow_network ? '✅ 允许' : '❌ 默认禁用'} />
-              <Row label="轮次" value={`${task.rounds_used} / ${task.max_rounds}`} />
-              <Row label="附件数" value={`${task.attachments.length}`} />
-              <Row label="创建时间" value={formatTime(task.created_at)} />
+      <div className="px-6 md:px-8 pb-8">
+        {/* Victory / Failure Banner */}
+        {isSolved && (
+          <Surface variant="success" glow="jade" className="mb-4 p-4 flex items-center gap-4">
+            <div className="w-12 h-12 rounded-full bg-jade-500/20 flex items-center justify-center">
+              <Flag size={24} className="text-jade-400" />
             </div>
-            <div className="mt-2 text-xs text-gray-400">
-              <div className="text-amber-300 mb-1">题面</div>
-              <div className="bg-black/40 p-2 rounded text-gray-300 max-h-32 overflow-y-auto">
-                {task.description || '(无)'}
-              </div>
+            <div>
+              <div className="text-jade-300 font-bold text-lg">攻克成功</div>
+              <div className="text-jade-400/70 text-sm font-mono">{task.best_flag}</div>
             </div>
-          </Panel>
+          </Surface>
+        )}
+        {(isFailed || needsHuman) && (
+          <Surface variant="danger" glow="crimson" className="mb-4 p-4 flex items-center gap-4">
+            <div className="w-12 h-12 rounded-full bg-crimson-500/20 flex items-center justify-center">
+              <ShieldAlert size={24} className="text-crimson-400" />
+            </div>
+            <div>
+              <div className="text-crimson-300 font-bold">{needsHuman ? '需人工接管' : '攻克失败'}</div>
+              <div className="text-crimson-400/70 text-sm">{task.error || 'Agent 未能确定 flag'}</div>
+            </div>
+          </Surface>
+        )}
 
-          {task.plan && (
-            <Panel title="解题计划" icon={<Flame size={14} />}>
-              <div className="text-xs space-y-2">
-                <div className="text-gray-400">{task.plan.initial_guess}</div>
-                {task.plan.script_plan.length > 0 && (
-                  <div>
-                    <div className="text-purple-300 mb-1 text-[10px] uppercase">执行计划</div>
-                    <ol className="list-decimal list-inside text-gray-300 space-y-0.5">
-                      {task.plan.script_plan.map((s, i) => (
-                        <li key={i}>{s}</li>
-                      ))}
-                    </ol>
+        {/* Main 3-column grid */}
+        <div className="grid grid-cols-12 gap-4">
+          {/* LEFT: Task Info + Plan + Attachments */}
+          <div className="col-span-12 lg:col-span-3 space-y-4">
+            <Surface variant="panel" className="p-4">
+              <SectionHeader title="任务情报"><span /></SectionHeader>
+              <div className="space-y-2">
+                <InfoRow label="题型" value={task.plan?.category || task.category_hint || '—'} />
+                <InfoRow label="置信度" value={`${((task.plan?.confidence || 0) * 100).toFixed(0)}%`} mono />
+                <InfoRow label="授权" value={task.authorized ? '✓ 已授权' : '✗ 未授权'} />
+                <InfoRow label="联网" value={task.allow_network ? '✓ 允许' : '✗ 默认禁用'} />
+                <InfoRow label="轮次" value={task.max_rounds > 0 ? `${task.rounds_used} / ${task.max_rounds}` : `${task.rounds_used} (无限)`} mono />
+                <InfoRow label="附件" value={`${task.attachments.length}`} mono />
+                <InfoRow label="创建" value={formatTime(task.created_at)} mono />
+              </div>
+              <div className="mt-3 pt-3 border-t border-obsidian-600/40">
+                <div className="text-[10px] text-ember-400 uppercase tracking-wider mb-1.5">题面</div>
+                <div className="bg-obsidian-950/60 p-3 rounded-lg text-xs text-slate-300 max-h-32 overflow-y-auto leading-relaxed">
+                  {task.description || '(无)'}
+                </div>
+              </div>
+            </Surface>
+
+            {task.plan && (
+              <Surface variant="panel" className="p-4">
+                <SectionHeader title="解题计划" icon={<Flame size={14} className="text-cyan-400" />} />
+                <div className="space-y-2 text-xs">
+                  <div className="text-slate-400">{task.plan.initial_guess}</div>
+                  {task.plan.script_plan.length > 0 && (
+                    <div>
+                      <div className="text-violet-400 text-[10px] uppercase tracking-wider mb-1">执行计划</div>
+                      <ol className="list-decimal list-inside text-slate-300 space-y-0.5">
+                        {task.plan.script_plan.map((s, i) => <li key={i}>{s}</li>)}
+                      </ol>
+                    </div>
+                  )}
+                  {task.plan.risks.length > 0 && (
+                    <div>
+                      <div className="text-ember-400 text-[10px] uppercase tracking-wider mb-1">风险</div>
+                      <ul className="list-disc list-inside text-slate-400 text-[11px] space-y-0.5">
+                        {task.plan.risks.map((r, i) => <li key={i}>{r}</li>)}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              </Surface>
+            )}
+
+            <Surface variant="panel" className="p-4">
+              <SectionHeader title={`附件 · ${task.attachments.length}`} icon={<Paperclip size={14} className="text-ember-400" />} />
+              {task.attachments.length > 0 ? (
+                <ul className="space-y-1">
+                  {task.attachments.map((a, i) => (
+                    <li key={i} className="text-xs font-mono text-slate-400 truncate" title={a}>{a.split('/').pop()}</li>
+                  ))}
+                </ul>
+              ) : (
+                <div className="text-xs text-slate-500 text-center py-2">暂无附件</div>
+              )}
+              {canSolve && (
+                <label className="mt-3 flex items-center gap-1.5 px-3 py-1.5 text-xs bg-ember-500/10 border border-ember-500/30 rounded-lg text-ember-300 cursor-pointer hover:bg-ember-500/20 w-fit">
+                  {uploading ? <Loader2 size={12} className="animate-spin" /> : <Upload size={12} />}
+                  上传附件
+                  <input ref={fileInputRef} type="file" multiple className="hidden" onChange={handleUploadAttachment} />
+                </label>
+              )}
+            </Surface>
+          </div>
+
+          {/* MIDDLE: Agent Live + Evidence + Script */}
+          <div className="col-span-12 lg:col-span-5 space-y-4">
+            <Surface variant="glass" className="p-4" glow={task.is_running ? 'cyan' : undefined}>
+              <div className="flex items-center justify-between mb-3">
+                <SectionHeader title="Agent 实时思考" icon={<Sparkles size={14} className="text-cyan-400" />} />
+                <div className="flex items-center gap-2">
+                  <span className={`w-2 h-2 rounded-full ${wsConnected ? 'bg-jade-400 animate-pulse' : 'bg-slate-500'}`} />
+                  <span className="text-[10px] text-slate-500">{wsConnected ? '已连接' : '等待连接'}</span>
+                  {liveEvents.length > 0 && (
+                    <span className="text-[10px] text-slate-500 font-mono">{liveEvents.length} 条</span>
+                  )}
+                </div>
+              </div>
+              <div ref={liveLogRef} className="space-y-1 max-h-[360px] overflow-y-auto font-mono text-xs">
+                {liveEvents.length === 0 ? (
+                  <div className="text-center text-slate-500 text-sm py-6">
+                    {task.is_running ? '🧠 Agent 正在启动，思考日志即将推送...' : '等待 Agent 启动后实时推送思考过程'}
                   </div>
-                )}
-                {task.plan.risks.length > 0 && (
-                  <div>
-                    <div className="text-orange-300 mb-1 text-[10px] uppercase">风险</div>
-                    <ul className="list-disc list-inside text-gray-400 text-[11px] space-y-0.5">
-                      {task.plan.risks.map((r, i) => (
-                        <li key={i}>{r}</li>
-                      ))}
-                    </ul>
-                  </div>
+                ) : (
+                  liveEvents.map((evt, idx) => {
+                    const sty = EVT_STYLE[evt.event_type] || EVT_STYLE.info
+                    const ts = new Date(evt.ts * 1000).toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
+                    return (
+                      <div key={idx} className={`relative pl-7 border-l-2 ${sty.border} pb-1.5`}>
+                        <div className={`absolute -left-[7px] top-0.5 w-3 h-3 rounded-full flex items-center justify-center ${sty.bg}`}>
+                          {sty.icon}
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[9px] text-slate-600 tabular-nums">{ts}</span>
+                          <span className={`px-1 py-0 rounded text-[9px] ${sty.bg} ${sty.text}`}>{sty.label}</span>
+                          <span className="text-slate-200 font-sans font-semibold text-[11px]">{evt.title}</span>
+                          {evt.success !== null && (evt.success ? <CheckCircle2 size={10} className="text-jade-400" /> : <XCircle size={10} className="text-crimson-400" />)}
+                        </div>
+                        {evt.detail && (
+                          <div className="mt-0.5 text-slate-400 whitespace-pre-wrap break-all leading-relaxed font-sans text-[11px]">
+                            {evt.detail.length > 600 ? <>{evt.detail.slice(0, 600)}<span className="text-slate-600 cursor-pointer" onClick={(e) => { e.currentTarget.parentElement!.textContent = evt.detail }}> ...</span></> : evt.detail}
+                          </div>
+                        )}
+                        {evt.code && (
+                          <div className="mt-1 bg-obsidian-950/80 border border-obsidian-600/40 rounded-lg p-2 text-[10px] text-slate-300 whitespace-pre-wrap break-all max-h-32 overflow-y-auto">
+                            {evt.code.length > 800 ? evt.code.slice(0, 800) + '\n...' : evt.code}
+                          </div>
+                        )}
+                        {evt.output && evt.event_type === 'result' && (
+                          <div className="mt-1 bg-obsidian-950/60 border border-obsidian-600/30 rounded-lg p-1.5 text-[10px] whitespace-pre-wrap break-all max-h-28 overflow-y-auto">
+                            <span className="text-slate-600">output:</span>{' '}
+                            <span className={evt.success ? 'text-slate-300' : 'text-crimson-300'}>
+                              {evt.output.length > 600 ? evt.output.slice(0, 600) + '...' : evt.output}
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })
                 )}
               </div>
-            </Panel>
-          )}
+            </Surface>
 
-          {task.attachments.length > 0 ? (
-            <Panel title="附件" icon={<Paperclip size={14} />} badge={`${task.attachments.length}`}>
-              <ul className="text-xs space-y-1">
-                {task.attachments.map((a, i) => (
-                  <li key={i} className="font-mono text-gray-400 truncate" title={a}>
-                    {a.split('/').pop()}
-                  </li>
-                ))}
-              </ul>
-              {task.state === 'INIT' && !task.is_running && (
-                <div className="mt-2 pt-2 border-t border-amber-500/10">
-                  <label className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-amber-500/10 border border-amber-500/30 rounded-lg text-amber-300 cursor-pointer hover:bg-amber-500/20 w-fit">
-                    {uploading ? <Loader2 size={12} className="animate-spin" /> : <Upload size={12} />}
-                    上传更多附件
-                    <input
-                      ref={fileInputRef}
-                      type="file"
-                      multiple
-                      className="hidden"
-                      onChange={handleUploadAttachment}
-                    />
-                  </label>
+            <Surface variant="panel" className="p-4">
+              <SectionHeader title={`推理时间线 · ${task.evidence.length} 步`} icon={<Play size={14} className="text-ember-400" />} />
+              <div className="space-y-1.5 max-h-[240px] overflow-y-auto">
+                {task.evidence.length === 0 ? (
+                  <div className="text-center text-slate-500 text-sm py-4">等待 Agent 启动...</div>
+                ) : (
+                  task.evidence.map((e, idx) => (
+                    <div key={idx} className={`relative pl-5 border-l-2 ${e.success ? 'border-jade-500' : 'border-crimson-500'} pb-1`}>
+                      <div className={`absolute -left-[5px] top-1 w-2.5 h-2.5 rounded-full ${e.success ? 'bg-jade-500' : 'bg-crimson-500'} ring-2 ring-obsidian-800`} />
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[9px] text-slate-600 font-mono tabular-nums">{formatTime(e.timestamp)}</span>
+                        <span className="text-[10px] font-bold text-ember-300 uppercase tracking-wider">{e.step}</span>
+                        {e.success ? <CheckCircle2 size={10} className="text-jade-400" /> : <XCircle size={10} className="text-crimson-400" />}
+                      </div>
+                      <div className="text-[11px] text-slate-400">{e.input_summary}</div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </Surface>
+
+            {task.current_script && (
+              <CodeBlock code={task.current_script} title="当前 solve.py" language="python" className="max-h-72 overflow-y-auto" />
+            )}
+          </div>
+
+          {/* RIGHT: Flags + Shell + Script Runs + Error */}
+          <div className="col-span-12 lg:col-span-4 space-y-4">
+            <Surface variant={isSolved ? 'success' : 'panel'} glow={isSolved ? 'jade' : undefined} className="p-4">
+              <SectionHeader title="候选 Flag" icon={<Flag size={14} className="text-ember-400" />} />
+              {task.best_flag ? (
+                <div className="px-3 py-2 bg-jade-500/10 border border-jade-500/30 rounded-lg">
+                  <div className="text-[10px] text-jade-300 uppercase mb-1">最佳候选</div>
+                  <div className="font-mono text-sm text-jade-200 break-all">{task.best_flag}</div>
+                  <CopyButton text={task.best_flag} className="mt-1" />
+                </div>
+              ) : (
+                <div className="text-center text-slate-500 text-xs py-4">{task.state === 'DONE' ? '未提取到 flag' : 'Agent 正在推理...'}</div>
+              )}
+              {task.candidate_flags.length > 1 && (
+                <div className="mt-3 space-y-1">
+                  <div className="text-[10px] text-slate-500 uppercase tracking-wider">其他候选</div>
+                  {task.candidate_flags.slice(1, 5).map((c, i) => (
+                    <div key={i} className="text-xs font-mono text-slate-400 px-2 py-1 bg-obsidian-950/60 rounded break-all">
+                      {c.flag} <span className="text-[10px] text-slate-500">({(c.confidence * 100).toFixed(0)}%)</span>
+                    </div>
+                  ))}
                 </div>
               )}
-            </Panel>
-          ) : task.state === 'INIT' && !task.is_running ? (
-            <Panel title="附件" icon={<Paperclip size={14} />} badge="0">
-              <div className="text-center text-gray-500 text-xs py-3">
-                暂无附件，可上传附件后启动解题
-              </div>
-              <label className="flex items-center justify-center gap-1.5 px-3 py-2 text-xs bg-amber-500/10 border border-amber-500/30 rounded-lg text-amber-300 cursor-pointer hover:bg-amber-500/20">
-                {uploading ? <Loader2 size={12} className="animate-spin" /> : <Upload size={12} />}
-                上传附件
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  multiple
-                  className="hidden"
-                  onChange={handleUploadAttachment}
-                />
-              </label>
-            </Panel>
-          ) : null}
+            </Surface>
+
+            {task.shell_history.length > 0 && (
+              <Surface variant="panel" className="p-4">
+                <SectionHeader title={`Shell · ${task.shell_history.length} 条`} icon={<Terminal size={14} className="text-cyan-400" />} />
+                <div className="space-y-2 max-h-52 overflow-y-auto">
+                  {task.shell_history.map((h, i) => (
+                    <div key={i} className="bg-obsidian-950/60 rounded-lg p-2 text-xs">
+                      <div className="flex items-center gap-1.5 mb-0.5">
+                        <span className="text-slate-600 font-mono">$ </span>
+                        <span className="text-cyan-300 font-mono break-all">{h.command}</span>
+                      </div>
+                      {h.exit_code !== null && (
+                        <div className="flex items-center gap-2 text-[10px]">
+                          <span className={`px-1 py-0.5 rounded font-mono ${h.exit_code === 0 ? 'bg-jade-500/15 text-jade-400' : 'bg-crimson-500/15 text-crimson-400'}`}>
+                            exit={h.exit_code}
+                          </span>
+                          {h.duration_ms > 0 && (
+                            <span className="text-slate-500 flex items-center gap-0.5">
+                              <Clock size={9} /> {h.duration_ms}ms
+                            </span>
+                          )}
+                        </div>
+                      )}
+                      {h.stdout && (
+                        <div className="font-mono text-[10px] text-slate-400 whitespace-pre-wrap break-all mt-0.5 max-h-16 overflow-y-auto">
+                          {h.stdout.slice(0, 300)}{h.stdout.length > 300 ? '...' : ''}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </Surface>
+            )}
+
+            {task.script_runs.length > 0 && (
+              <Surface variant="panel" className="p-4">
+                <SectionHeader title={`脚本执行 · ${task.script_runs.length} 次`} icon={<Terminal size={14} className="text-ember-400" />} />
+                <div className="space-y-2 max-h-64 overflow-y-auto">
+                  {task.script_runs.map((r, i) => (
+                    <div key={i} className="bg-obsidian-950/60 rounded-lg p-2 text-xs">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-slate-500">Run #{i + 1}</span>
+                        <span className={`px-1.5 py-0.5 text-[10px] font-mono rounded ${r.success ? 'bg-jade-500/15 text-jade-400' : 'bg-crimson-500/15 text-crimson-400'}`}>
+                          exit={r.exit_code}
+                        </span>
+                        <span className="text-[10px] text-slate-500 flex items-center gap-1">
+                          <Clock size={10} /> {r.duration_ms}ms
+                        </span>
+                        {r.timed_out && <span className="text-[10px] text-ember-400">⏱ timeout</span>}
+                      </div>
+                      {r.stdout && (
+                        <div className="font-mono text-[11px] text-slate-300 whitespace-pre-wrap break-all mb-1">
+                          <span className="text-slate-500">stdout:</span> {r.stdout.slice(0, 200)}{r.stdout.length > 200 ? '...' : ''}
+                        </div>
+                      )}
+                      {r.stderr && (
+                        <div className="font-mono text-[11px] text-crimson-300 whitespace-pre-wrap break-all">
+                          <span className="text-slate-500">stderr:</span> {r.stderr.slice(0, 150)}{r.stderr.length > 150 ? '...' : ''}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </Surface>
+            )}
+
+            {task.error && !isSolved && (
+              <Surface variant="danger" className="p-3 flex items-start gap-2">
+                <ShieldAlert size={14} className="text-crimson-400 flex-shrink-0 mt-0.5" />
+                <span className="text-xs text-crimson-300">{task.error}</span>
+              </Surface>
+            )}
+          </div>
         </div>
 
-        {/* MIDDLE: Evidence Timeline */}
-        <div className="col-span-12 lg:col-span-5 space-y-3">
-          <Panel title="Agent 推理时间线" icon={<Play size={14} />} badge={`${task.evidence.length} 步`}>
-            <div className="space-y-2 max-h-[480px] overflow-y-auto">
-              {task.evidence.length === 0 ? (
-                <div className="text-center text-gray-500 text-sm py-8">等待 Agent 启动...</div>
+        {/* v6: Blackboard / Cost / Observer */}
+        <div className="grid grid-cols-12 gap-4 mt-4">
+          <div className="col-span-12 lg:col-span-5">
+            <Surface variant="panel" className="p-4">
+              <SectionHeader
+                title="事实黑板 Blackboard"
+                icon={<Brain size={14} className="text-violet-400" />}
+              />
+              {!blackboard ? (
+                <div className="text-xs text-slate-500 text-center py-4">黑板数据不可用</div>
               ) : (
-                task.evidence.map((e, idx) => (
-                  <div
-                    key={idx}
-                    className={`relative pl-6 border-l-2 ${
-                      e.success ? 'border-green-500' : 'border-red-500'
-                    } pb-2`}
-                  >
-                    <div
-                      className={`absolute -left-[7px] top-1 w-3 h-3 rounded-full ${
-                        e.success ? 'bg-green-500' : 'bg-red-500'
-                      } ring-2 ring-[#0d1426]`}
-                    />
-                    <div className="flex items-center gap-2">
-                      <span className="text-[10px] text-gray-500 font-mono tabular-nums">
-                        {formatTime(e.timestamp)}
-                      </span>
-                      <span className="text-xs font-bold text-amber-300 uppercase tracking-wider">
-                        {e.step}
-                      </span>
-                      {e.success ? (
-                        <CheckCircle size={12} className="text-green-400" />
-                      ) : (
-                        <XCircle size={12} className="text-red-400" />
-                      )}
+                <div className="space-y-3 max-h-80 overflow-y-auto">
+                  {blackboard.facts.length > 0 && (
+                    <div>
+                      <div className="text-[10px] text-cyan-400 uppercase tracking-wider mb-1.5">事实</div>
+                      <div className="space-y-1">
+                        {blackboard.facts.slice(0, 20).map((f) => (
+                          <div key={f.fact_id} className="bg-obsidian-950/60 rounded-lg px-2 py-1.5 text-xs">
+                            <div className="flex items-center gap-2 mb-0.5">
+                              <KindTag kind={f.kind} />
+                              <span className="text-slate-500 text-[10px]">{f.source_step}</span>
+                            </div>
+                            <div className="text-slate-300 break-all">{f.content}</div>
+                          </div>
+                        ))}
+                      </div>
                     </div>
-                    <div className="text-xs text-gray-300 mt-0.5">{e.input_summary}</div>
+                  )}
+                  {blackboard.intents.length > 0 && (
+                    <div>
+                      <div className="text-[10px] text-violet-400 uppercase tracking-wider mb-1.5">意图</div>
+                      <div className="space-y-1">
+                        {blackboard.intents.slice(0, 10).map((i) => (
+                          <div key={i.intent_id} className="bg-obsidian-950/60 rounded-lg px-2 py-1.5 text-xs flex items-center gap-2">
+                            <IntentTag status={i.status} />
+                            <span className="text-slate-300">{i.title}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  <div>
+                    <div className="text-[10px] text-ember-400 uppercase tracking-wider mb-1.5">提示</div>
+                    {blackboard.hints.length > 0 && (
+                      <div className="space-y-1 mb-2">
+                        {blackboard.hints.slice(0, 10).map((h) => (
+                          <div key={h.hint_id} className={`text-xs rounded-lg px-2 py-1.5 ${
+                            h.source === 'observer' ? 'bg-violet-500/10 text-violet-200' :
+                            h.source === 'human' ? 'bg-ember-500/10 text-ember-200' :
+                            'bg-obsidian-950/60 text-slate-300'
+                          } ${h.consumed ? 'opacity-50 line-through' : ''}`}>
+                            <span className="text-[9px] text-slate-500 mr-1">[{h.source}]</span>
+                            {h.content}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={hintInput}
+                        onChange={(e) => setHintInput(e.target.value)}
+                        onKeyDown={(e) => e.key === 'Enter' && handleAddHint()}
+                        placeholder="添加人工提示..."
+                        className="flex-1 text-xs bg-obsidian-950/60 border border-obsidian-600/40 rounded-lg px-3 py-1.5 text-slate-200 placeholder-slate-600 focus:outline-none focus:border-ember-500/40"
+                      />
+                      <GlowButton onClick={handleAddHint} disabled={hintSubmitting || !hintInput.trim()} size="sm" loading={hintSubmitting}>
+                        添加
+                      </GlowButton>
+                    </div>
+                    {v6Error && <div className="text-[10px] text-crimson-400 mt-1">{v6Error}</div>}
                   </div>
-                ))
+                </div>
               )}
-            </div>
-          </Panel>
+            </Surface>
+          </div>
 
-          {/* Current Script */}
-          {task.current_script && (
-            <Panel title="当前 solve.py" icon={<Code size={14} />}>
-              <pre className="text-xs font-mono text-gray-300 bg-black/60 p-3 rounded max-h-72 overflow-auto whitespace-pre-wrap">
-                {task.current_script}
-              </pre>
-            </Panel>
-          )}
-        </div>
-
-        {/* RIGHT: Flags + Errors */}
-        <div className="col-span-12 lg:col-span-4 space-y-3">
-          <Panel title="候选 Flag" icon={<CheckCircle size={14} />}>
-            {task.best_flag ? (
-              <div className="px-3 py-2 bg-green-500/10 border border-green-500/30 rounded">
-                <div className="text-[10px] text-green-300 uppercase mb-1">最佳候选</div>
-                <div className="font-mono text-sm text-green-200 break-all">{task.best_flag}</div>
-              </div>
-            ) : (
-              <div className="text-center text-gray-500 text-xs py-4">
-                {task.state === 'DONE'
-                  ? '未提取到 flag'
-                  : 'Agent 正在推理...'}
-              </div>
-            )}
-            {task.candidate_flags.length > 1 && (
-              <div className="mt-2 space-y-1">
-                <div className="text-[10px] text-gray-500 uppercase">其他候选</div>
-                {task.candidate_flags.slice(1, 5).map((c, i) => (
-                  <div key={i} className="text-xs font-mono text-gray-400 px-2 py-1 bg-black/40 rounded break-all">
-                    {c.flag}{' '}
-                    <span className="text-[10px] text-gray-500">({(c.confidence * 100).toFixed(0)}%)</span>
+          <div className="col-span-12 lg:col-span-4">
+            <Surface variant="panel" className="p-4">
+              <SectionHeader title="模型成本 Cost" icon={<DollarSign size={14} className="text-ember-400" />} />
+              {!costSummary ? (
+                <div className="text-xs text-slate-500 text-center py-4">成本数据不可用</div>
+              ) : (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between px-3 py-2 bg-obsidian-950/60 rounded-lg">
+                    <span className="text-xs text-slate-400">本题估算成本</span>
+                    <span className={`font-mono font-bold text-sm ${costSummary.budget_exceeded ? 'text-crimson-300' : 'text-jade-300'}`}>
+                      ${costSummary.total_cost_usd.toFixed(6)}
+                    </span>
                   </div>
-                ))}
-              </div>
-            )}
-          </Panel>
-
-          {task.script_runs.length > 0 && (
-            <Panel title="脚本执行" icon={<Terminal size={14} />} badge={`${task.script_runs.length} 次`}>
-              <div className="space-y-2 max-h-64 overflow-y-auto">
-                {task.script_runs.map((r, i) => (
-                  <div key={i} className="text-xs bg-black/40 rounded p-2">
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className="text-gray-500">Run #{i + 1}</span>
-                      <span
-                        className={`px-1.5 py-0.5 text-[10px] font-mono rounded ${
-                          r.success
-                            ? 'bg-green-500/20 text-green-300'
-                            : 'bg-red-500/20 text-red-300'
-                        }`}
-                      >
-                        exit={r.exit_code}
-                      </span>
-                      <span className="text-[10px] text-gray-500 flex items-center gap-1">
-                        <Clock size={10} /> {r.duration_ms}ms
-                      </span>
-                      {r.timed_out && (
-                        <span className="text-[10px] text-orange-400">⏱ timeout</span>
-                      )}
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="px-3 py-2 bg-obsidian-950/60 rounded-lg">
+                      <div className="text-[10px] text-slate-500">预算上限</div>
+                      <div className="text-slate-200 font-mono text-sm">${costSummary.budget_per_task_usd.toFixed(4)}</div>
                     </div>
-                    {r.stdout && (
-                      <div className="font-mono text-[11px] text-gray-300 whitespace-pre-wrap break-all mb-1">
-                        <span className="text-gray-500">stdout:</span>{' '}
-                        {r.stdout.slice(0, 200)}
-                        {r.stdout.length > 200 ? '...' : ''}
-                      </div>
-                    )}
-                    {r.stderr && (
-                      <div className="font-mono text-[11px] text-red-300 whitespace-pre-wrap break-all">
-                        <span className="text-gray-500">stderr:</span>{' '}
-                        {r.stderr.slice(0, 150)}
-                        {r.stderr.length > 150 ? '...' : ''}
-                      </div>
-                    )}
-                  </div>
-                ))}
-              </div>
-            </Panel>
-          )}
-
-          {task.error && (
-            <div className="px-3 py-2 bg-red-500/10 border border-red-500/30 rounded text-xs text-red-300 flex items-start gap-2">
-              <ShieldAlert size={14} className="flex-shrink-0 mt-0.5" />
-              <span>{task.error}</span>
-            </div>
-          )}
-
-          {task.state === 'HUMAN_REQUIRED' && (
-            <div className="px-3 py-3 bg-yellow-500/10 border border-yellow-500/30 rounded text-xs text-yellow-200">
-              <div className="font-semibold mb-1">需人工接管</div>
-              <p className="text-yellow-200/80">
-                Agent 已用尽 {task.max_rounds} 轮仍未能确定 flag。请人工分析附件并提交答案。
-              </p>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* v6: Blackboard / Cost / Observer 三联面板 */}
-      <div className="grid grid-cols-12 gap-3 mt-4">
-        {/* Blackboard */}
-        <div className="col-span-12 lg:col-span-5">
-          <Panel title="事实黑板 Blackboard" icon={<Brain size={14} />}
-            badge={blackboard ? `${blackboard.fact_count} facts / ${blackboard.candidate_count} 候选` : '未加载'}>
-            {!blackboard ? (
-              <div className="text-xs text-gray-500 text-center py-4">
-                黑板数据不可用（后端可能未升级到 v6）
-              </div>
-            ) : (
-              <div className="space-y-3 max-h-80 overflow-y-auto">
-                {/* Facts */}
-                {blackboard.facts.length > 0 && (
-                  <div>
-                    <div className="text-[10px] text-cyan-300 uppercase mb-1">事实 (Facts)</div>
-                    <div className="space-y-1">
-                      {blackboard.facts.slice(0, 20).map((f) => (
-                        <div key={f.fact_id} className="text-xs bg-black/40 rounded px-2 py-1">
-                          <span className={`inline-block px-1 py-0.5 text-[9px] rounded mr-1 ${
-                            f.kind === 'candidate' ? 'bg-green-500/20 text-green-300' :
-                            f.kind === 'error' ? 'bg-red-500/20 text-red-300' :
-                            f.kind === 'file' ? 'bg-blue-500/20 text-blue-300' :
-                            'bg-gray-500/20 text-gray-300'
-                          }`}>{f.kind}</span>
-                          <span className="text-gray-500 text-[10px]">{f.source_step}</span>
-                          <div className="text-gray-300 break-all mt-0.5">{f.content}</div>
-                        </div>
-                      ))}
+                    <div className={`px-3 py-2 rounded-lg ${costSummary.budget_exceeded ? 'bg-crimson-500/10' : 'bg-obsidian-950/60'}`}>
+                      <div className="text-[10px] text-slate-500">预算状态</div>
+                      <div className={costSummary.budget_exceeded ? 'text-crimson-300 font-bold' : 'text-jade-300'}>{costSummary.budget_exceeded ? '⚠ 超支' : '✓ 正常'}</div>
                     </div>
                   </div>
-                )}
-                {/* Intents */}
-                {blackboard.intents.length > 0 && (
-                  <div>
-                    <div className="text-[10px] text-purple-300 uppercase mb-1">意图 (Intents)</div>
-                    <div className="space-y-1">
-                      {blackboard.intents.slice(0, 10).map((i) => (
-                        <div key={i.intent_id} className="text-xs bg-black/40 rounded px-2 py-1 flex items-center gap-2">
-                          <span className={`px-1 py-0.5 text-[9px] rounded ${
-                            i.status === 'completed' ? 'bg-green-500/20 text-green-300' :
-                            i.status === 'in_progress' ? 'bg-amber-500/20 text-amber-300' :
-                            i.status === 'failed' ? 'bg-red-500/20 text-red-300' :
-                            i.status === 'deprecated' ? 'bg-gray-500/20 text-gray-400' :
-                            'bg-blue-500/20 text-blue-300'
-                          }`}>{i.status}</span>
-                          <span className="text-gray-300">{i.title}</span>
-                        </div>
-                      ))}
+                  <div className="grid grid-cols-3 gap-1 text-center">
+                    <div className="px-2 py-1.5 bg-cyan-500/10 rounded-lg">
+                      <div className="text-[9px] text-cyan-300">cheap</div>
+                      <div className="text-cyan-200 font-mono text-sm">{costSummary.cheap_calls}</div>
+                    </div>
+                    <div className="px-2 py-1.5 bg-violet-500/10 rounded-lg">
+                      <div className="text-[9px] text-violet-300">expert</div>
+                      <div className="text-violet-200 font-mono text-sm">{costSummary.expert_calls}</div>
+                    </div>
+                    <div className="px-2 py-1.5 bg-slate-500/10 rounded-lg">
+                      <div className="text-[9px] text-slate-400">static</div>
+                      <div className="text-slate-300 font-mono text-sm">{costSummary.static_only_calls}</div>
                     </div>
                   </div>
-                )}
-                {/* Hints + Add */}
-                <div>
-                  <div className="text-[10px] text-yellow-300 uppercase mb-1">提示 (Hints)</div>
-                  {blackboard.hints.length > 0 && (
-                    <div className="space-y-1 mb-2">
-                      {blackboard.hints.slice(0, 10).map((h) => (
-                        <div key={h.hint_id} className={`text-xs rounded px-2 py-1 ${
-                          h.source === 'observer' ? 'bg-purple-500/10 text-purple-200' :
-                          h.source === 'human' ? 'bg-amber-500/10 text-amber-200' :
-                          'bg-black/40 text-gray-300'
-                        } ${h.consumed ? 'opacity-50 line-through' : ''}`}>
-                          <span className="text-[9px] text-gray-500 mr-1">[{h.source}]</span>
-                          {h.content}
+                  <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[11px]">
+                    <div className="text-slate-400">输入 tokens: <span className="text-slate-200 font-mono">{costSummary.total_input_tokens}</span></div>
+                    <div className="text-slate-400">输出 tokens: <span className="text-slate-200 font-mono">{costSummary.total_output_tokens}</span></div>
+                    <div className="text-slate-400">成功: <span className="text-jade-300 font-mono">{costSummary.successful_calls}</span></div>
+                    <div className="text-slate-400">失败: <span className="text-crimson-300 font-mono">{costSummary.failed_calls}</span></div>
+                    <div className="text-slate-400">缓存命中: <span className="text-ember-300 font-mono">{costSummary.cache_hits}</span></div>
+                  </div>
+                  {Object.keys(costSummary.by_model).length > 0 && (
+                    <div className="pt-2 border-t border-obsidian-600/30">
+                      <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">按模型</div>
+                      {Object.entries(costSummary.by_model).map(([m, n]) => (
+                        <div key={m} className="flex justify-between text-[11px]">
+                          <span className="text-slate-400 font-mono">{m}</span>
+                          <span className="text-slate-200 font-mono">{n}</span>
                         </div>
                       ))}
                     </div>
                   )}
-                  <div className="flex gap-1">
-                    <input
-                      type="text"
-                      value={hintInput}
-                      onChange={(e) => setHintInput(e.target.value)}
-                      onKeyDown={(e) => e.key === 'Enter' && handleAddHint()}
-                      placeholder="添加人工提示..."
-                      className="flex-1 text-xs bg-black/40 border border-gray-700 rounded px-2 py-1 text-gray-200 placeholder-gray-600 focus:outline-none focus:border-amber-500/40"
-                    />
-                    <button
-                      onClick={handleAddHint}
-                      disabled={hintSubmitting || !hintInput.trim()}
-                      className="px-2 py-1 text-xs bg-amber-500/20 border border-amber-500/40 text-amber-200 rounded hover:bg-amber-500/30 disabled:opacity-40"
-                    >
-                      {hintSubmitting ? <Loader2 size={12} className="animate-spin" /> : '添加'}
-                    </button>
-                  </div>
-                  {v6Error && <div className="text-[10px] text-red-400 mt-1">{v6Error}</div>}
                 </div>
-              </div>
-            )}
-          </Panel>
-        </div>
+              )}
+            </Surface>
+          </div>
 
-        {/* Cost Panel */}
-        <div className="col-span-12 lg:col-span-4">
-          <Panel title="模型成本 Cost" icon={<DollarSign size={14} />} badge={costSummary ? `${costSummary.total_calls} calls` : '未加载'}>
-            {!costSummary ? (
-              <div className="text-xs text-gray-500 text-center py-4">
-                成本数据不可用（后端可能未升级到 v6）
-              </div>
-            ) : (
-              <div className="text-xs space-y-2">
-                <div className="flex items-center justify-between px-2 py-2 bg-black/40 rounded">
-                  <span className="text-gray-400">本题估算成本</span>
-                  <span className={`font-mono font-bold ${costSummary.budget_exceeded ? 'text-red-300' : 'text-green-300'}`}>
-                    ${costSummary.total_cost_usd.toFixed(6)}
-                  </span>
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <div className="px-2 py-1 bg-black/40 rounded">
-                    <div className="text-[10px] text-gray-500">预算上限</div>
-                    <div className="text-gray-300 font-mono">${costSummary.budget_per_task_usd.toFixed(4)}</div>
-                  </div>
-                  <div className={`px-2 py-1 rounded ${costSummary.budget_exceeded ? 'bg-red-500/10' : 'bg-black/40'}`}>
-                    <div className="text-[10px] text-gray-500">预算状态</div>
-                    <div className={costSummary.budget_exceeded ? 'text-red-300 font-bold' : 'text-green-300'}>
-                      {costSummary.budget_exceeded ? '⚠ 超支' : '✓ 正常'}
-                    </div>
-                  </div>
-                </div>
-                <div className="grid grid-cols-3 gap-1 text-center">
-                  <div className="px-1 py-1 bg-blue-500/10 rounded">
-                    <div className="text-[9px] text-blue-300">cheap</div>
-                    <div className="text-blue-200 font-mono">{costSummary.cheap_calls}</div>
-                  </div>
-                  <div className="px-1 py-1 bg-purple-500/10 rounded">
-                    <div className="text-[9px] text-purple-300">expert</div>
-                    <div className="text-purple-200 font-mono">{costSummary.expert_calls}</div>
-                  </div>
-                  <div className="px-1 py-1 bg-gray-500/10 rounded">
-                    <div className="text-[9px] text-gray-300">static</div>
-                    <div className="text-gray-200 font-mono">{costSummary.static_only_calls}</div>
-                  </div>
-                </div>
-                <div className="grid grid-cols-2 gap-2 text-[11px]">
-                  <div className="text-gray-400">输入 tokens: <span className="text-gray-200 font-mono">{costSummary.total_input_tokens}</span></div>
-                  <div className="text-gray-400">输出 tokens: <span className="text-gray-200 font-mono">{costSummary.total_output_tokens}</span></div>
-                  <div className="text-gray-400">成功: <span className="text-green-300 font-mono">{costSummary.successful_calls}</span></div>
-                  <div className="text-gray-400">失败: <span className="text-red-300 font-mono">{costSummary.failed_calls}</span></div>
-                  <div className="text-gray-400">缓存命中: <span className="text-amber-300 font-mono">{costSummary.cache_hits}</span></div>
-                </div>
-                {Object.keys(costSummary.by_model).length > 0 && (
-                  <div className="pt-1 border-t border-gray-800">
-                    <div className="text-[10px] text-gray-500 uppercase mb-1">按模型</div>
-                    {Object.entries(costSummary.by_model).map(([m, n]) => (
-                      <div key={m} className="flex justify-between text-[11px]">
-                        <span className="text-gray-400 font-mono">{m}</span>
-                        <span className="text-gray-200 font-mono">{n}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-          </Panel>
-        </div>
-
-        {/* Observer Panel */}
-        <div className="col-span-12 lg:col-span-3">
-          <Panel title="Observer 旁路监督" icon={<Eye size={14} />}>
-            {!blackboard || blackboard.hints.filter((h) => h.source === 'observer').length === 0 ? (
-              <div className="text-xs text-gray-500 text-center py-4">
-                Observer 暂无建议
-              </div>
-            ) : (
-              <div className="space-y-2 max-h-80 overflow-y-auto">
-                {blackboard.hints
-                  .filter((h) => h.source === 'observer')
-                  .slice(0, 15)
-                  .map((h) => (
-                    <div key={h.hint_id} className={`text-xs bg-purple-500/10 border border-purple-500/20 rounded px-2 py-1.5 ${h.consumed ? 'opacity-50' : ''}`}>
-                      <div className="text-[10px] text-purple-400 mb-0.5">{formatTime(h.created_at)}</div>
-                      <div className="text-purple-100 break-all">{h.content}</div>
+          <div className="col-span-12 lg:col-span-3">
+            <Surface variant="panel" className="p-4">
+              <SectionHeader title="Observer 旁路监督" icon={<Eye size={14} className="text-violet-400" />} />
+              {!blackboard || blackboard.hints.filter((h) => h.source === 'observer').length === 0 ? (
+                <div className="text-xs text-slate-500 text-center py-4">Observer 暂无建议</div>
+              ) : (
+                <div className="space-y-2 max-h-80 overflow-y-auto">
+                  {blackboard.hints.filter((h) => h.source === 'observer').slice(0, 15).map((h) => (
+                    <div key={h.hint_id} className={`text-xs bg-violet-500/10 border border-violet-500/20 rounded-lg px-3 py-1.5 ${h.consumed ? 'opacity-50' : ''}`}>
+                      <div className="text-[10px] text-violet-400 mb-0.5">{formatTime(h.created_at)}</div>
+                      <div className="text-violet-100 break-all">{h.content}</div>
                     </div>
                   ))}
+                </div>
+              )}
+              <div className="mt-3 text-[10px] text-slate-500 leading-relaxed">
+                Observer 旁路监督循环、跑偏、预算浪费，不直接执行工具
               </div>
-            )}
-            <div className="mt-2 text-[10px] text-gray-500">
-              Observer 旁路监督循环、跑偏、预算浪费，不直接执行工具
-            </div>
-          </Panel>
+            </Surface>
+          </div>
         </div>
       </div>
 
       {/* Writeup Modal */}
       {showWriteup && writeup && (
-        <div
-          className="fixed inset-0 z-50 bg-black/80 backdrop-blur flex items-center justify-center p-8"
-          onClick={() => setShowWriteup(false)}
-        >
-          <div
-            className="max-w-4xl w-full max-h-[90vh] overflow-y-auto bg-[#0d1426] border border-amber-500/30 rounded-xl p-6"
-            onClick={e => e.stopPropagation()}
-          >
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-8" onClick={() => setShowWriteup(false)}>
+          <div className="max-w-4xl w-full max-h-[90vh] overflow-y-auto bg-obsidian-900 border border-ember-500/30 rounded-2xl p-6" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-bold text-amber-300">解题报告 WP</h3>
-              <button
-                onClick={() => setShowWriteup(false)}
-                className="text-gray-400 hover:text-white"
-              >
-                ✕
-              </button>
+              <h3 className="text-lg font-bold text-ember-300 flex items-center gap-2">
+                <BrandMark size={20} className="text-ember-400" /> 解题报告 WP
+              </h3>
+              <button onClick={() => setShowWriteup(false)} className="text-slate-400 hover:text-white"><X size={18} /></button>
             </div>
-            <pre className="text-xs text-gray-300 whitespace-pre-wrap font-mono">{writeup}</pre>
+            <CodeBlock code={writeup} language="markdown" />
           </div>
         </div>
       )}
-    </div>
-  )
-}
-
-function Panel({
-  title,
-  icon,
-  badge,
-  children,
-}: {
-  title: string
-  icon: React.ReactNode
-  badge?: string
-  children: React.ReactNode
-}) {
-  return (
-    <div className="bg-[#0d1426]/80 backdrop-blur border border-amber-500/20 rounded-xl p-3">
-      <div className="flex items-center justify-between mb-2">
-        <h3 className="text-xs font-semibold text-amber-300 flex items-center gap-1.5 uppercase tracking-wider">
-          {icon}
-          {title}
-        </h3>
-        {badge && <span className="text-[10px] text-gray-500">{badge}</span>}
-      </div>
-      {children}
-    </div>
-  )
-}
-
-function Row({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex justify-between">
-      <span className="text-gray-500">{label}</span>
-      <span className="text-gray-300 text-right">{value}</span>
     </div>
   )
 }

@@ -1,0 +1,10 @@
+{
+  "title": "Reverse PyInstaller VM Opcode",
+  "category": "reverse",
+  "difficulty": "hard",
+  "description": "我们拿到一个 PyInstaller 打包的可执行文件 crackme，解包后发现核心逻辑在 vm_engine.pyc 里。这是一个自定义栈式虚拟机，有 16 条 opcode，程序读入用户输入后经 VM 执行验证。请逆向 VM opcode 语义，还原验证逻辑，找到正确的 flag。flag 格式 flag{...}。",
+  "flag_format": "flag\\{[^}]+\\}",
+  "hint": "PyInstaller 解包 → uncompyle6/decompyle3 反编译 vm_engine.pyc → 逐条 opcode 推导栈状态 → 逆向约束求 flag",
+  "needs_llm": true,
+  "est_time_sec": 300
+}

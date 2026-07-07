@@ -53,16 +53,17 @@ class RouteDecision:
 
 # 各 lane 默认 max_tokens（按规格第 3.3 节）
 STEP_TOKEN_BUDGET = {
-    "classify": 400,
-    "plan": 600,
-    "generate_script": 1800,
-    "reflect_error": 900,
+    "classify": 800,
+    "plan": 1200,
+    "agent_think": 4096,
+    "generate_script": 2048,
+    "reflect_error": 1200,
     "generate_writeup": 2000,
     "verify_flag": 400,
-    "analyze_files": 400,
-    "reason": 600,
-    "observer": 300,
-    "default": 800,
+    "analyze_files": 800,
+    "reason": 800,
+    "observer": 400,
+    "default": 2048,
 }
 
 
@@ -232,6 +233,13 @@ class ModelRouter:
         """返回升级原因（空字符串 = 不升级）。"""
         if force_expert:
             return "user_force_expert"
+        # v8: hard mode 下困难题型直接 expert
+        if settings.CTF_HARD_MODE:
+            # hard mode: 有错误就升级，不等 3 轮
+            if repeated_error_count >= 1:
+                return "hard_mode_repeated_error"
+            if rounds_used >= 2 and not candidate_flags:
+                return "hard_mode_rounds_no_candidate"
         # 连续失败 3 轮且无候选 flag
         if rounds_used >= 3 and not candidate_flags:
             return "rounds_no_candidate"

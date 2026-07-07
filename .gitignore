@@ -78,3 +78,14 @@ data/runtime_config.json
 data/runtime_config_audit.jsonl
 backend/data/runtime_config.json
 backend/data/runtime_config_audit.jsonl
+
+
+# v10 additions
+.claude/
+.skills/
+CLAUDE.md
+DELIVERY_SUMMARY_v8.md
+MERGE_NOTES_CC.md
+benchmark_results.json
+backend/vendor/
+scripts/hard_ctf_benchmark.py

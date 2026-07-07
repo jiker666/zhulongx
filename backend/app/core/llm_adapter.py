@@ -50,7 +50,7 @@ PROVIDER_COMPAT: Dict[str, Dict[str, Any]] = {
     "openai": {"supports_developer": True, "supports_json_mode": True, "api_style": "openai"},
     "codex": {"supports_developer": True, "supports_json_mode": True, "api_style": "openai"},
     # Anthropic Messages API（晚晴网关 / Claude 官方 / AWS Bedrock 等）
-    "wanqing": {"supports_developer": False, "supports_json_mode": False, "api_style": "anthropic"},
+    "wanqing": {"supports_developer": False, "supports_json_mode": True, "api_style": "openai", "supports_tools": True},
     "anthropic": {"supports_developer": False, "supports_json_mode": False, "api_style": "anthropic"},
     "claude": {"supports_developer": False, "supports_json_mode": False, "api_style": "anthropic"},
 }
@@ -130,9 +130,11 @@ class LLMResponse:
     attempts: int = 0
     elapsed_ms: int = 0
     mode: str = "live"  # live | mock | disabled
+    thinking: str = ""  # v8: 保留 Anthropic/GLM-5.2 的思考过程（extended thinking blocks）
+    tool_calls: Any = None  # v10: 原生 tool_calls (OpenAI function calling)
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        d = {
             "success": self.success,
             "content": self.content,
             "model": self.model,
@@ -142,6 +144,11 @@ class LLMResponse:
             "elapsed_ms": self.elapsed_ms,
             "mode": self.mode,
         }
+        if self.thinking:
+            d["thinking"] = self.thinking
+        if self.tool_calls:
+            d["tool_calls"] = self.tool_calls
+        return d
 
 
 class LLMAdapter:
@@ -225,6 +232,7 @@ class LLMAdapter:
         temperature: Optional[float] = None,
         json_mode: bool = False,
         stream: bool = False,
+        tools: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         clean = sanitize_messages_for_provider(messages, self.provider)
         payload: Dict[str, Any] = {
@@ -237,6 +245,8 @@ class LLMAdapter:
         compat = PROVIDER_COMPAT.get(self.provider, PROVIDER_COMPAT["openai"])
         if json_mode and compat.get("supports_json_mode", True):
             payload["response_format"] = {"type": "json_object"}
+        if tools and compat.get("supports_tools", False):
+            payload["tools"] = tools
         return payload
 
     def _mock_complete(
@@ -507,14 +517,18 @@ class LLMAdapter:
                 # 解析 Anthropic 响应: content 是 block 数组，取 text block 拼接
                 content_blocks = data.get("content", []) or []
                 text_parts: List[str] = []
+                thinking_parts: List[str] = []  # v8: 保留思考过程
                 for block in content_blocks:
                     if not isinstance(block, dict):
                         continue
                     btype = block.get("type", "")
                     if btype == "text" and block.get("text"):
                         text_parts.append(block["text"])
-                    # thinking 块不拼到 content（避免污染脚本）
+                    elif btype == "thinking" and block.get("thinking"):
+                        # v8: 保留思考过程，不拼入 content 但存入 thinking 字段
+                        thinking_parts.append(block["thinking"])
                 content = "".join(text_parts)
+                thinking = "\n".join(thinking_parts) if thinking_parts else ""
                 usage = data.get("usage", {}) or {}
                 # 归一化 usage 字段（Anthropic 用 input_tokens/output_tokens）
                 if "input_tokens" in usage and "prompt_tokens" not in usage:
@@ -542,14 +556,35 @@ class LLMAdapter:
                     attempts=attempt + 1,
                     elapsed_ms=elapsed_ms,
                     mode="live",
+                    thinking=thinking,  # v8: 传递思考过程
                 )
             except httpx.TimeoutException:
                 last_error = f"LLM request timeout after {self.timeout}s"
                 logger.warning("LLM(anthropic) timeout model=%s attempt=%d", self.model, attempt + 1)
+            except httpx.ReadError as e:
+                last_error = f"LLM ReadError (connection lost mid-response): {str(e)[:200]}"
+                logger.warning("LLM(anthropic) ReadError model=%s attempt=%d err=%s", self.model, attempt + 1, str(e)[:100])
+                if attempt < attempts - 1:
+                    time.sleep(min(2 * (attempt + 1), 8.0))
+            except httpx.RemoteProtocolError as e:
+                last_error = f"LLM RemoteProtocolError: {str(e)[:200]}"
+                logger.warning("LLM(anthropic) RemoteProtocolError model=%s attempt=%d err=%s", self.model, attempt + 1, str(e)[:100])
+                if attempt < attempts - 1:
+                    time.sleep(min(2 * (attempt + 1), 8.0))
+            except httpx.ConnectError as e:
+                last_error = f"LLM ConnectError: {str(e)[:200]}"
+                logger.warning("LLM(anthropic) ConnectError model=%s attempt=%d err=%s", self.model, attempt + 1, str(e)[:100])
+                if attempt < attempts - 1:
+                    time.sleep(min(3 * (attempt + 1), 12.0))
             except httpx.HTTPStatusError as e:
                 body = mask_sensitive_in_text(e.response.text[:300])
                 last_error = f"LLM HTTP {e.response.status_code}: {body}"
-                logger.warning("LLM(anthropic) HTTP %d attempt=%d body=%s", e.response.status_code, attempt + 1, body)
+                logger.warning(
+                    "LLM(anthropic) HTTP %d attempt=%d body=%s model=%s base_url=%s key_len=%d",
+                    e.response.status_code, attempt + 1, body,
+                    mask_sensitive_in_text(self.model), self.base_url,
+                    len(self.api_key) if self.api_key else 0,
+                )
             except Exception as e:  # noqa: BLE001
                 last_error = f"LLM error: {type(e).__name__}: {str(e)[:200]}"
                 logger.warning("LLM(anthropic) fail %s attempt=%d", type(e).__name__, attempt + 1)
@@ -576,8 +611,9 @@ class LLMAdapter:
         max_tokens: Optional[int] = None,
         temperature: Optional[float] = None,
         json_mode: bool = False,
+        tools: Optional[List[Dict[str, Any]]] = None,
     ) -> LLMResponse:
-        """非流式 chat。"""
+        """非流式 chat，支持 tools (OpenAI function calling)。"""
         full_messages: List[Dict[str, str]] = []
         if system_prompt:
             full_messages.append({"role": "system", "content": system_prompt})
@@ -598,10 +634,11 @@ class LLMAdapter:
             )
 
         # Anthropic Messages API 协议分支（晚晴网关 / Claude 官方）
+        # 注意：wanqing 已改为 openai 协议，不会再走这个分支
         if self._is_anthropic_style():
             return self._chat_anthropic(
                 full_messages,
-                system_prompt=None,  # system 已在 full_messages 里，_chat_anthropic 会提取
+                system_prompt=None,
                 max_tokens=max_tokens,
                 temperature=temperature,
                 json_mode=json_mode,
@@ -614,6 +651,7 @@ class LLMAdapter:
             temperature=temperature,
             json_mode=json_mode,
             stream=False,
+            tools=tools,
         )
 
         last_error: Optional[str] = None
@@ -629,27 +667,45 @@ class LLMAdapter:
                 content = data["choices"][0]["message"]["content"]
                 usage = data.get("usage", {})
                 model_name = data.get("model", self.model)
+                # Extract native tool_calls from OpenAI response
+                tool_calls_raw = data["choices"][0]["message"].get("tool_calls", None)
+                reasoning_content = data["choices"][0]["message"].get("reasoning_content", "")
                 self.last_success = time.time()
                 self.last_error = ""
                 logger.info(
-                    "LLM call ok model=%s provider=%s attempt=%d elapsed=%dms",
+                    "LLM call ok model=%s provider=%s attempt=%d elapsed=%dms has_tool_calls=%s",
                     mask_sensitive_in_text(model_name),
                     self.provider,
                     attempt + 1,
                     elapsed_ms,
+                    "yes" if tool_calls_raw else "no",
                 )
-                return LLMResponse(
+                resp = LLMResponse(
                     success=True,
-                    content=content,
+                    content=content or "",
                     model=model_name,
                     usage=usage,
                     attempts=attempt + 1,
                     elapsed_ms=elapsed_ms,
                     mode="live",
+                    thinking=reasoning_content or "",
                 )
+                if tool_calls_raw:
+                    resp.tool_calls = tool_calls_raw
+                return resp
             except httpx.TimeoutException:
                 last_error = f"LLM request timeout after {self.timeout}s"
                 logger.warning("LLM timeout model=%s attempt=%d", self.model, attempt + 1)
+            except httpx.ReadError as e:
+                last_error = f"LLM ReadError (connection lost): {str(e)[:200]}"
+                logger.warning("LLM ReadError model=%s attempt=%d err=%s", self.model, attempt + 1, str(e)[:100])
+                if attempt < attempts - 1:
+                    time.sleep(min(2 * (attempt + 1), 8.0))
+            except httpx.RemoteProtocolError as e:
+                last_error = f"LLM RemoteProtocolError: {str(e)[:200]}"
+                logger.warning("LLM RemoteProtocolError model=%s attempt=%d", self.model, attempt + 1)
+                if attempt < attempts - 1:
+                    time.sleep(min(2 * (attempt + 1), 8.0))
             except httpx.HTTPStatusError as e:
                 body = mask_sensitive_in_text(e.response.text[:200])
                 last_error = f"LLM HTTP {e.response.status_code}: {body}"
@@ -756,3 +812,96 @@ def get_adapter() -> LLMAdapter:
     if _adapter is None:
         _adapter = LLMAdapter()
     return _adapter
+
+
+def _maybe_fix_provider_for_base_url(adapter: LLMAdapter) -> LLMAdapter:
+    """若 base_url 含 wanqing 但 provider 不是 wanqing，强制修正为 wanqing（走 Anthropic 协议）。"""
+    if adapter.base_url and "wanqing" in adapter.base_url.lower() and adapter.provider != "wanqing":
+        adapter.provider = "wanqing"
+        compat = PROVIDER_COMPAT.get("wanqing", {})
+        adapter.mock_mode = (adapter.provider == "mock") or (
+            not adapter.enabled and settings.APP_ENV in ("dev", "demo", "test")
+        )
+    return adapter
+
+
+def get_route_adapter(route) -> LLMAdapter:
+    """根据 RouteDecision 创建对应 lane 的 LLMAdapter。
+
+    核心修复：route 返回 expert 时，必须用 LLM_EXPERT_* 配置创建客户端，
+    而不是仍然走默认 self.llm。
+    """
+    from app.core.model_router import RouteDecision
+    if not isinstance(route, RouteDecision):
+        return get_adapter()
+
+    lane = route.lane
+
+    # static_only / stop：不需要真正调用，返回默认即可
+    if lane in ("static_only", "stop"):
+        return get_adapter()
+
+    # expert lane：使用 LLM_EXPERT_* 配置
+    if lane == "expert" and _has_real_key(settings.LLM_EXPERT_API_KEY):
+        return _maybe_fix_provider_for_base_url(LLMAdapter(
+            enabled=True,
+            base_url=settings.LLM_EXPERT_BASE_URL,
+            api_key=settings.LLM_EXPERT_API_KEY,
+            model=settings.LLM_EXPERT_MODEL,
+            temperature=route.temperature if route.temperature else settings.LLM_EXPERT_TEMPERATURE,
+            max_tokens=route.max_tokens if route.max_tokens else settings.LLM_EXPERT_MAX_TOKENS,
+            timeout=settings.LLM_TIMEOUT,
+            max_retries=settings.LLM_MAX_RETRIES,
+            provider=settings.LLM_EXPERT_PROVIDER,
+        ))
+
+    # cheap lane：如果配置了 LLM_CHEAP_*，使用它；否则复用主 LLM
+    if lane == "cheap":
+        if _has_real_key(settings.LLM_CHEAP_API_KEY) and settings.LLM_ROUTER_ENABLED:
+            return _maybe_fix_provider_for_base_url(LLMAdapter(
+                enabled=True,
+                base_url=settings.LLM_CHEAP_BASE_URL,
+                api_key=settings.LLM_CHEAP_API_KEY,
+                model=settings.LLM_CHEAP_MODEL,
+                temperature=route.temperature if route.temperature else settings.LLM_CHEAP_TEMPERATURE,
+                max_tokens=route.max_tokens if route.max_tokens else settings.LLM_CHEAP_MAX_TOKENS,
+                timeout=settings.LLM_TIMEOUT,
+                max_retries=settings.LLM_MAX_RETRIES,
+                provider=settings.LLM_CHEAP_PROVIDER,
+            ))
+        # 无 cheap key 但主 LLM 有 key → 复用主 LLM
+        if settings.LLM_ENABLED and _has_real_key(settings.LLM_API_KEY):
+            return LLMAdapter(
+                enabled=True,
+                base_url=settings.LLM_BASE_URL,
+                api_key=settings.LLM_API_KEY,
+                model=settings.LLM_MODEL,
+                temperature=route.temperature if route.temperature else settings.LLM_TEMPERATURE,
+                max_tokens=route.max_tokens if route.max_tokens else settings.LLM_MAX_TOKENS,
+                timeout=settings.LLM_TIMEOUT,
+                max_retries=settings.LLM_MAX_RETRIES,
+                provider=settings.LLM_PROVIDER,
+            )
+        # 都没 key → 返回默认（mock）
+        return get_adapter()
+
+    # fallback lane
+    if lane == "fallback" and _has_real_key(settings.LLM_FALLBACK_API_KEY):
+        return _maybe_fix_provider_for_base_url(LLMAdapter(
+            enabled=True,
+            base_url=settings.LLM_FALLBACK_BASE_URL,
+            api_key=settings.LLM_FALLBACK_API_KEY,
+            model=settings.LLM_FALLBACK_MODEL,
+            temperature=route.temperature if route.temperature else 0.2,
+            max_tokens=route.max_tokens if route.max_tokens else 1800,
+            timeout=settings.LLM_TIMEOUT,
+            max_retries=settings.LLM_MAX_RETRIES,
+            provider=settings.LLM_FALLBACK_PROVIDER,
+        ))
+
+    # 兜底：返回默认 adapter
+    return get_adapter()
+
+
+def _has_real_key(key: str) -> bool:
+    return bool(key and key != "replace_me")

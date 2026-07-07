@@ -17,6 +17,11 @@ from app.tools.artifact_triage import ArtifactTriageTool
 from app.tools.http_replay import HttpReplayTool
 from app.tools.api_runner import APIRunnerTool
 from app.tools.manual_action import ManualActionStep
+from app.tools.filesystem import ListDirTool, ReadFileTool, WriteFileTool, GrepTool
+from app.tools.shell import RunShellTool
+from app.tools.python_runner import RunPythonTool
+from app.tools.archive import ExtractArchiveTool
+from app.tools.flag_submit import SubmitFlagTool
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +49,14 @@ class ToolRegistry:
             HttpReplayTool(),
             APIRunnerTool(),
             ManualActionStep(),
+            ListDirTool(),
+            ReadFileTool(),
+            WriteFileTool(),
+            GrepTool(),
+            RunShellTool(),
+            RunPythonTool(),
+            ExtractArchiveTool(),
+            SubmitFlagTool(),
         ]
         for tool in default_tools:
             self.register(tool)

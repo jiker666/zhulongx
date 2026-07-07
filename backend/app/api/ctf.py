@@ -57,12 +57,14 @@ class TaskCreateIn(BaseModel):
     flag_format: Optional[str] = Field(None, description="例如 SCTF\\{.*\\}")
     authorized: bool = Field(False, description="是否已获授权")
     allow_network: bool = Field(False, description="是否允许联网（需 authorized=true）")
-    max_rounds: int = Field(8, ge=1, le=16)
+    max_rounds: int = Field(0, ge=0, description="最大轮数，0=无限")
+    max_time_sec: int = Field(600, ge=30, le=3600, description="最大运行时间(秒)")
 
 
 class TaskSolveIn(BaseModel):
     mode: str = Field("auto", description="auto|assist|manual")
-    max_rounds: int = Field(8, ge=1, le=16)
+    max_rounds: int = Field(0, ge=0, description="最大轮数，0=无限")
+    max_time_sec: int = Field(600, ge=30, le=3600, description="最大运行时间(秒)")
 
 
 # ---------- async runner ----------
@@ -70,13 +72,14 @@ class TaskSolveIn(BaseModel):
 # 全局线程池（避免阻塞 event loop）
 _runner_lock = threading.Lock()
 _running_tasks: Dict[str, threading.Thread] = {}
+_cancel_events: Dict[str, threading.Event] = {}
 
 
-def _run_task_in_thread(task_id: str, max_rounds: int) -> None:
+def _run_task_in_thread(task_id: str, max_rounds: int, max_time_sec: int = 600) -> None:
     """在独立线程中运行 orchestrator（不阻塞 FastAPI event loop）。"""
     try:
         orch = get_orchestrator()
-        orch.run(task_id, max_rounds=max_rounds)
+        orch.run(task_id, max_rounds=max_rounds, max_time_sec=max_time_sec)
     except Exception as e:  # noqa: BLE001
         # 标记失败
         import logging
@@ -95,16 +98,16 @@ def _run_task_in_thread(task_id: str, max_rounds: int) -> None:
             _running_tasks.pop(task_id, None)
 
 
-def _start_async_run(task_id: str, max_rounds: int) -> None:
+def _start_async_run(task_id: str, max_rounds: int, max_time_sec: int = 600) -> None:
     """启动后台线程执行任务。"""
     with _runner_lock:
         if task_id in _running_tasks:
-            return  # 已在运行
+            return
         if is_task_running(task_id):
-            return  # DB 标记为运行中
+            return
     t = threading.Thread(
         target=_run_task_in_thread,
-        args=(task_id, max_rounds),
+        args=(task_id, max_rounds, max_time_sec),
         daemon=True,
         name=f"ctf-run-{task_id}",
     )
@@ -208,6 +211,7 @@ def create_task(payload: TaskCreateIn):
         authorized=payload.authorized,
         allow_network=payload.allow_network,
         max_rounds=payload.max_rounds,
+        max_time_sec=payload.max_time_sec,
         source="api",
     )
     return {"task_id": task.task_id, "state": task.state.value}
@@ -261,13 +265,32 @@ def solve_task(task_id: str, payload: TaskSolveIn):
     if is_task_running(task_id):
         return {"task_id": task_id, "state": task.state.value, "note": "任务已在运行中"}
     # 异步启动
-    _start_async_run(task_id, payload.max_rounds)
+    _start_async_run(task_id, payload.max_rounds, payload.max_time_sec)
     return {
         "task_id": task_id,
         "state": task.state.value,
         "note": "已异步启动，请轮询 /events 或 /tasks/{task_id} 获取进度",
         "poll_interval_ms": 1000,
     }
+
+
+@router.post("/tasks/{task_id}/stop")
+def stop_task(task_id: str):
+    """手动停止正在运行的任务。"""
+    _cancel_events.setdefault(task_id, threading.Event()).set()
+    orch = get_orchestrator()
+    task = orch.get_task(task_id)
+    if task and task.is_running:
+        task.state = CtfState.HUMAN_REQUIRED
+        task.error = "用户手动停止"
+        task.is_running = False
+        try:
+            save_task(task.to_dict())
+        except Exception:
+            pass
+    with _runner_lock:
+        _running_tasks.pop(task_id, None)
+    return {"task_id": task_id, "state": "HUMAN_REQUIRED", "note": "任务已停止"}
 
 
 @router.get("/tasks/{task_id}/events")
@@ -325,7 +348,7 @@ def list_demos():
 
 
 @router.post("/demos/{demo_id}/run")
-def run_demo(demo_id: str, max_rounds: int = 8, sync: bool = False):
+def run_demo(demo_id: str, max_rounds: int = 0, max_time_sec: int = 600, sync: bool = False):
     """运行内置 demo 题。默认异步，sync=true 同步等待。"""
     demo_root = Path(settings.CTF_DEMO_DIR)
     case_dir = demo_root / demo_id
@@ -385,9 +408,9 @@ def run_demo(demo_id: str, max_rounds: int = 8, sync: bool = False):
 
     # 同步 or 异步
     if sync:
-        orch.run(task.task_id, max_rounds=max_rounds)
+        orch.run(task.task_id, max_rounds=max_rounds, max_time_sec=max_time_sec)
     else:
-        _start_async_run(task.task_id, max_rounds)
+        _start_async_run(task.task_id, max_rounds, max_time_sec)
 
     return {
         "task_id": task.task_id,

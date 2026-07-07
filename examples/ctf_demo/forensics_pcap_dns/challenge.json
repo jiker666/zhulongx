@@ -1,0 +1,10 @@
+{
+  "title": "Forensics PCAP DNS Exfiltration",
+  "category": "forensics",
+  "difficulty": "hard",
+  "description": "我们捕获了一段网络流量 capture.pcap，分析发现攻击者通过 DNS 隧道外传了敏感数据。DNS 查询的子域名部分是 hex 编码的数据片段，格式为 <seq>.<hex_data>.exfil.example.com。请提取所有 DNS 查询，按 seq 排序，拼接 hex_data 并解码，找到被外传的 flag。flag 格式 flag{...}。",
+  "flag_format": "flag\\{[^}]+\\}",
+  "hint": "tshark -r capture.pcap -Y 'dns.qry.name' -T fields -e dns.qry.name → 正则提取 seq+hex → 排序拼接 → hex_decode",
+  "needs_llm": true,
+  "est_time_sec": 300
+}

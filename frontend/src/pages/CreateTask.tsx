@@ -1,26 +1,26 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { createTask, runTask, uploadFile } from '../api'
-import { Upload, Play, Loader2 } from 'lucide-react'
+import { PageHeader } from '../components/layout'
+import { Surface, GlowButton, SectionHeader } from '../components/ui'
+import { Upload, Play, Loader2, Shield, FileCode, Globe, FileSearch, Cpu, Sparkles } from 'lucide-react'
 
 const TASK_TYPES = [
-  { value: 'web_scan', label: 'Web 扫描 (web_scan)' },
-  { value: 'code_audit', label: '代码审计 (code_audit)' },
-  { value: 'log_analysis', label: '日志分析 (log_analysis)' },
-  { value: 'reverse_helper', label: '逆向辅助 (reverse_helper)' },
-  { value: 'auto', label: '自动识别 (auto)' },
+  { value: 'web_scan', label: 'Web 扫描', icon: Globe, desc: '对 Web 目标进行安全扫描' },
+  { value: 'code_audit', label: '代码审计', icon: FileCode, desc: '静态分析源码安全风险' },
+  { value: 'log_analysis', label: '日志分析', icon: FileSearch, desc: '分析日志中的异常行为' },
+  { value: 'reverse_helper', label: '逆向辅助', icon: Cpu, desc: '辅助二进制/固件逆向' },
+  { value: 'auto', label: '自动识别', icon: Sparkles, desc: '智能体自动判断分析类型' },
 ]
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function FieldType({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div>
-      <label className="block text-sm font-medium text-gray-300 mb-1.5">{label}</label>
+    <div className="space-y-1.5">
+      <label className="block text-sm font-medium text-ember-400">{label}</label>
       {children}
     </div>
   )
 }
-
-const inputCls = 'w-full bg-[#1f2937] border border-[#374151] rounded-lg px-3 py-2.5 text-gray-200 placeholder-gray-500 focus:outline-none focus:border-cyan-500 text-sm'
 
 export default function CreateTask() {
   const navigate = useNavigate()
@@ -74,36 +74,43 @@ export default function CreateTask() {
   }
 
   return (
-    <div className="p-8 max-w-2xl">
-      <h1 className="text-2xl font-bold text-white mb-1">创建安全任务</h1>
-      <p className="text-gray-400 text-sm mb-8">提交分析任务，Agent 将自动生成执行计划并开始工作</p>
+    <div className="max-w-2xl space-y-6">
+      <PageHeader
+        title="部署任务"
+        subtitle="向烛龙智能体下达安全分析指令"
+      />
 
-      <div className="mb-5 rounded-lg border border-cyan-500/20 bg-cyan-500/10 px-4 py-3 text-xs text-cyan-100">
-        演示模式：请使用本地样例或明确授权目标；平台默认只做只读、有限、可审计的安全分析。
-      </div>
+      <Surface variant="glass" className="p-4 flex items-start gap-3">
+        <Shield size={16} className="text-ember-400 mt-0.5 shrink-0" aria-hidden="true" />
+        <p className="text-xs text-ember-300/80 leading-relaxed">
+          安全边界：平台默认只做只读、有限、可审计的安全分析。请使用本地样例或明确授权目标。
+        </p>
+      </Surface>
 
-      <div className="bg-[#111827] border border-[#1f2937] rounded-xl p-6 space-y-5">
-        <Field label="任务标题 *">
+      <Surface variant="panel" className="p-6 space-y-5">
+        <SectionHeader title="任务配置" />
+
+        <FieldType label="任务标题 *">
           <input
-            className={inputCls}
+            className="input"
             placeholder="例如：审计 Java 项目中的水平越权风险"
             value={form.title}
             onChange={e => setForm({ ...form, title: e.target.value })}
           />
-        </Field>
+        </FieldType>
 
-        <Field label="任务描述">
+        <FieldType label="任务描述">
           <textarea
-            className={inputCls + ' min-h-[80px] resize-y'}
+            className="input min-h-[80px] resize-y"
             placeholder="描述分析目标和关注点..."
             value={form.description}
             onChange={e => setForm({ ...form, description: e.target.value })}
           />
-        </Field>
+        </FieldType>
 
-        <Field label="任务类型">
+        <FieldType label="任务类型">
           <select
-            className={inputCls}
+            className="input appearance-none cursor-pointer"
             value={form.task_type}
             onChange={e => setForm({ ...form, task_type: e.target.value })}
           >
@@ -111,61 +118,88 @@ export default function CreateTask() {
               <option key={t.value} value={t.value}>{t.label}</option>
             ))}
           </select>
-          <p className="text-xs text-gray-500 mt-1">选择 auto 时会结合描述、URL、上传文件和 ZIP 关键文件自动识别场景。</p>
-        </Field>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 mt-3" role="radiogroup" aria-label="任务类型选择">
+            {TASK_TYPES.map(t => {
+              const Icon = t.icon
+              const active = form.task_type === t.value
+              return (
+                <button
+                  key={t.value}
+                  role="radio"
+                  aria-checked={active}
+                  onClick={() => setForm({ ...form, task_type: t.value })}
+                  className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-xs transition-all
+                    ${active
+                      ? 'border-ember-500/50 bg-ember-500/10 text-ember-300'
+                      : 'border-obsidian-700 bg-obsidian-800 text-gray-500 hover:text-gray-400'
+                    }`}
+                >
+                  <Icon size={14} className={active ? 'text-ember-400' : 'text-gray-600'} aria-hidden="true" />
+                  {t.label}
+                </button>
+              )
+            })}
+          </div>
+        </FieldType>
 
-        <Field label="目标 URL（Web 扫描时填写）">
+        <FieldType label="目标 URL（Web 扫描时填写）">
           <input
-            className={inputCls}
+            className="input"
             placeholder="http://example.com"
             value={form.target}
             onChange={e => setForm({ ...form, target: e.target.value })}
           />
-        </Field>
+        </FieldType>
 
-        <Field label="上传文件（代码审计/日志分析）">
+        <FieldType label="上传文件（代码审计/日志分析）">
           <div className="flex items-center gap-3">
-            <label className="flex items-center gap-2 px-4 py-2 bg-[#1f2937] border border-[#374151] rounded-lg text-sm text-gray-300 cursor-pointer hover:border-cyan-500 transition-colors">
-              <Upload size={15} />
+            <label className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm cursor-pointer transition-all
+              border border-obsidian-700 bg-obsidian-800 text-gray-300
+              hover:border-ember-500/50 hover:bg-obsidian-700`}>
+              <Upload size={15} className="text-ember-400" aria-hidden="true" />
               {file ? file.name : '选择文件'}
-              <input type="file" className="hidden" onChange={handleFileChange} />
+              <input type="file" className="hidden" onChange={handleFileChange} aria-label="选择上传文件" />
             </label>
-            {uploading && <Loader2 size={16} className="animate-spin text-cyan-400" />}
-            {uploadedPath && <span className="text-xs text-green-400">✓ 上传成功</span>}
+            {uploading && <Loader2 size={16} className="animate-spin text-ember-400" aria-label="上传中" />}
+            {uploadedPath && <span className="text-xs text-jade-400" aria-live="polite">已上传</span>}
           </div>
-          <p className="text-xs text-gray-500 mt-1">支持 .zip .java .js .log .txt 等，最大 50MB；上传路径会作为 uploaded_file 单独提交。</p>
+          <p className="text-xs text-slate-600 mt-1">支持 .zip .java .js .log .txt 等，最大 50MB</p>
           {uploadedPath && (
-            <div className="mt-2 rounded border border-[#374151] bg-[#0b1220] px-3 py-2 text-xs text-gray-400 break-all">
-              <span className="text-gray-500">uploaded_file</span> {uploadedPath}
+            <div className="mt-2 rounded border border-obsidian-700 bg-obsidian-950 px-3 py-2 text-xs text-slate-500 break-all font-mono">
+              {uploadedPath}
             </div>
           )}
-        </Field>
+        </FieldType>
 
         {error && (
-          <div className="text-sm text-red-400 bg-red-400/10 border border-red-400/20 rounded-lg px-3 py-2">
+          <div className="p-3 text-sm text-crimson-400" role="alert">
+            <Surface variant="danger">
             {error}
+            </Surface>
           </div>
         )}
 
         <div className="flex gap-3 pt-2">
-          <button
-            className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-[#1f2937] border border-[#374151] rounded-lg text-sm text-gray-300 hover:bg-[#374151] transition-colors disabled:opacity-50"
+          <GlowButton
+            variant="secondary"
+            className="flex-1"
             disabled={submitting}
             onClick={() => handleSubmit(false)}
           >
             {submitting ? <Loader2 size={15} className="animate-spin" /> : null}
             保存草稿
-          </button>
-          <button
-            className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-cyan-500 rounded-lg text-sm text-white font-medium hover:bg-cyan-400 transition-colors disabled:opacity-50"
+          </GlowButton>
+          <GlowButton
+            variant="primary"
+            className="flex-1"
             disabled={submitting}
             onClick={() => handleSubmit(true)}
           >
             <Play size={15} />
-            {submitting ? '处理中...' : '创建并运行'}
-          </button>
+            {submitting ? '部署中...' : '创建并运行'}
+          </GlowButton>
         </div>
-      </div>
+      </Surface>
     </div>
   )
 }

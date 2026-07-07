@@ -47,9 +47,6 @@ DANGEROUS_PATTERNS: List[str] = [
     r">\s*/dev/sd[a-z]",
     r"\bchmod\s+-R\s+777\s+/",
     r"\bchown\s+-R\s+.*\s+/",
-    r"/etc/passwd",
-    r"/etc/shadow",
-    r"\.ssh/id_rsa",
     r"169\.254\.169\.254",  # cloud metadata
     r"\bsudo\b",
     r"\bnc\b.*-e",
@@ -70,7 +67,7 @@ SAFE_BINARIES = {
     "file", "strings", "xxd", "hexdump", "od",
     "binwalk", "exiftool", "exif",
     "readelf", "objdump", "nm", "ldd", "checksec",
-    "unzip", "tar", "gunzip", "gzip",
+    "unzip", "tar", "gunzip", "gzip", "7z", "upx",
     "grep", "egrep", "fgrep", "rg", "ack",
     "find", "ls", "stat", "wc", "head", "tail", "cut", "tr", "sort", "uniq",
     "cat", "less", "more",
@@ -78,21 +75,30 @@ SAFE_BINARIES = {
     "md5sum", "sha1sum", "sha256sum", "shasum",
     "base64", "base32", "url_encode",
     "echo", "printf",
-    "nc", "ncat",  # 仍需 scope_guard 在网络访问处二次校验
+    "nc", "ncat",
     "diff", "cmp",
+    "mv", "cp", "chmod", "rm", "rmdir", "mkdir", "touch", "ln",
+    "gdb", "strace", "ltrace",
+    "openssl", "git",
+    "sqlmap", "nmap", "nikto", "john", "hashcat",
+    "gdb-multiarch",
+    "apt", "dpkg", "brew",
 }
 
 # 永远禁止的二进制（即使被白名单前面调用也拒绝）
 DENIED_BINARIES = {
-    "rm", "rmdir", "mv", "cp",
-    "chmod", "chown", "chroot", "mount", "umount",
+    "chroot", "mount", "umount",
     "kill", "killall", "pkill",
     "shutdown", "reboot", "halt", "poweroff",
     "mkfs", "fdisk", "dd",
     "sudo", "su",
-    "curl", "wget",  # 网络访问单独由 scope_guard 控制
     "ssh", "scp", "sftp", "ftp", "telnet",
     "docker", "podman",
+}
+
+# 仅在未授权联网时禁止的二进制（授权联网时放行）
+NETWORK_DENIED_BINARIES = {
+    "curl", "wget",
 }
 
 
@@ -219,6 +225,12 @@ class CodeExecutionSandbox:
                 success=False, exit_code=-1, stdout="", stderr=f"binary not allowed: {head}",
                 duration_ms=0, error="denied_binary",
             )
+        if not self.allow_network and head in NETWORK_DENIED_BINARIES:
+            return SandboxResult(
+                success=False, exit_code=-1, stdout="",
+                stderr=f"binary not allowed (network disabled): {head}",
+                duration_ms=0, error="denied_binary_no_network",
+            )
         # 不在 SAFE_BINARIES 里的，允许但记录警告
         # (CTF 场景常需要 binwalk/exiftool/objdump 等多种工具，强白名单会导致正常用例失败)
         # 因此这里采用「黑名单优先 + 危险模式正则」的策略
@@ -332,24 +344,20 @@ class CodeExecutionSandbox:
     def _limit_resources() -> None:
         """通过 POSIX setrlimit 限制 CPU/内存/进程数。"""
         import resource
-        # CPU 时间 30s
         try:
-            resource.setrlimit(resource.RLIMIT_CPU, (30, 30))
+            resource.setrlimit(resource.RLIMIT_CPU, (120, 120))
         except Exception:
             pass
-        # 内存 1GB
         try:
-            resource.setrlimit(resource.RLIMIT_AS, (1024 * 1024 * 1024, 1024 * 1024 * 1024))
+            resource.setrlimit(resource.RLIMIT_AS, (2 * 1024 * 1024 * 1024, 2 * 1024 * 1024 * 1024))
         except Exception:
             pass
-        # 文件大小 100MB
         try:
-            resource.setrlimit(resource.RLIMIT_FSIZE, (100 * 1024 * 1024, 100 * 1024 * 1024))
+            resource.setrlimit(resource.RLIMIT_FSIZE, (500 * 1024 * 1024, 500 * 1024 * 1024))
         except Exception:
             pass
-        # 子进程数 32
         try:
-            resource.setrlimit(resource.RLIMIT_NPROC, (32, 32))
+            resource.setrlimit(resource.RLIMIT_NPROC, (64, 64))
         except Exception:
             pass
 

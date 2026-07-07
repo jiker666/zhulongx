@@ -38,6 +38,10 @@ class ObserverAdvice:
     drift_detected: bool = False
     advice: str = ""
     confidence: float = 0.5
+    # v8: 新增建议类型
+    should_switch_hypothesis: bool = False
+    should_expand_context: bool = False
+    should_run_tool_check: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
