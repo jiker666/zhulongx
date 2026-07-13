@@ -1,6 +1,0 @@
-Randomized blind-solve payload.
-noise=xey0t0euaw41zyd09m7h3745zje7kh6b
-decoy=flag{decoy_riy9dg5q}
-payload=synt%7Bnnh8s1uqht0z1wsfe9060p5m%7D
-hint=encoding depth 2; validate through Evidence, not title memory.
-more_noise=dwwakenlgshtfhfqlkeownoflhxtq9e9s1qdiz5z

@@ -1,7 +1,0 @@
-{
-  "flag": "flag{aavnzpodwsvumvbpc}",
-  "chain": [
-    "xor_single_byte_0x73",
-    "hex"
-  ]
-}

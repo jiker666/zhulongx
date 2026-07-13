@@ -218,7 +218,12 @@ def run_triage(challenge_id: int, db: Session = Depends(get_db)):
         scope_guard.summary(),
         20,
     )
-    triage_result = ArtifactTriageTool().safe_run({
+    from app.core.agent_tool_gateway import AgentToolGateway
+    gateway = AgentToolGateway(
+        task_id=str(task.id), workspace=os.path.dirname(challenge.uploaded_file or settings.UPLOAD_DIR),
+        category=challenge.challenge_type, authorized=True, allow_network=bool(challenge.target),
+    )
+    triage_tool_result = gateway.execute_raw("ArtifactTriageTool", {
         "uploaded_file": challenge.uploaded_file,
         "file_path": challenge.uploaded_file,
         "challenge_type": challenge.challenge_type,
@@ -226,6 +231,7 @@ def run_triage(challenge_id: int, db: Session = Depends(get_db)):
         "challenge_id": challenge.id,
         "task_id": task.id,
     })
+    triage_result = {"success": triage_tool_result.success, "summary": triage_tool_result.error_message, "details": triage_tool_result.structured_output, "evidence": triage_tool_result.evidence_ids}
     step_records = []
     triage_step = PlanStep("题目附件分诊", "ArtifactTriageTool", "FinalOps run-triage 统一提取题目线索", "planning", "runbook")
     step = _save_api_step(db, task, 1, triage_step, f"file={challenge.uploaded_file or '(none)'}", triage_result)
@@ -243,7 +249,8 @@ def run_triage(challenge_id: int, db: Session = Depends(get_db)):
 
     fingerprint_result = None
     if challenge.target and (challenge.challenge_type or "").lower() == "web":
-        fingerprint_result = HttpFingerprintTool().safe_run({"target": challenge.target, "challenge_id": challenge.id, "task_id": task.id})
+        fingerprint_tool_result = gateway.execute_raw("HttpFingerprintTool", {"target": challenge.target, "challenge_id": challenge.id, "task_id": task.id})
+        fingerprint_result = {"success": fingerprint_tool_result.success, "summary": fingerprint_tool_result.error_message, "details": fingerprint_tool_result.structured_output, "evidence": fingerprint_tool_result.evidence_ids}
         fp_step = PlanStep("HTTP 指纹识别", "HttpFingerprintTool", "Web 题第一轮只读指纹观察", "execution", "runbook")
         step = _save_api_step(db, task, 2, fp_step, f"target={challenge.target}", fingerprint_result)
         step_records.append(_step_record(step, fingerprint_result))
