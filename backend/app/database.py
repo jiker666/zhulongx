@@ -107,7 +107,6 @@ def init_db():
     from app.models import (  # noqa: F401
         task, step, report, tool, challenge, evidence, answer_candidate,
         challenge_note, ctf, blackboard,
-        competition_runtime,
     )
     Base.metadata.create_all(bind=engine)
     _migrate_db()

@@ -25,6 +25,10 @@ class RunManager:
         with self._lock:
             return self._sessions.get(run_id)
 
+    def sessions(self) -> tuple[AgentSession, ...]:
+        with self._lock:
+            return tuple(self._sessions.values())
+
     def start(self, run_id: str) -> bool:
         with self._lock:
             session = self._sessions.get(run_id)

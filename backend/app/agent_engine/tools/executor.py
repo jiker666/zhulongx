@@ -80,7 +80,7 @@ class ToolExecutionService:
         began = time.monotonic()
         try:
             context.abort_token.raise_if_aborted()
-            result = definition.executor.execute(context, call.arguments)
+            result = definition.executor.execute(replace(context, tool_call_id=call.id), call.arguments)
         except Exception as exc:
             result = ToolResult(False, f"{call.name} failed", error=f"{type(exc).__name__}: {exc}")
         duration_ms = int((time.monotonic() - began) * 1000)

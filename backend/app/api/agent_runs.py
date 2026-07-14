@@ -31,6 +31,7 @@ class AgentRunCreate(BaseModel):
     flag_pattern: str = r"flag\{[^}]+\}"
     authorized: bool = False
     allow_process: bool = False
+    allow_worker: bool = False
     allow_private_network: bool = False
     allowed_hosts: list[str] = Field(default_factory=list, max_length=100)
     allowed_ports: list[int] = Field(default_factory=list, max_length=100)
@@ -68,9 +69,14 @@ def create_agent_run(payload: AgentRunCreate):
         raise HTTPException(400, str(exc)) from exc
     if payload.scenario == "ctf":
         scenario = CTFScenario(flag_pattern=payload.flag_pattern)
-    runtime_root = Path(settings.CTF_RUN_DIR).expanduser().resolve()
+    runtime_root = Path(
+        settings.WORKER_SHARED_ROOT if payload.allow_worker else settings.CTF_RUN_DIR
+    ).expanduser().resolve()
     runtime_root.mkdir(parents=True, exist_ok=True)
     workspace = Path(tempfile.mkdtemp(prefix="agent_v3_", dir=runtime_root))
+    # Rootless container engines remap bind-mount groups differently. Landlock
+    # inside worker-base enforces the per-run boundary for worker workspaces.
+    workspace.chmod(0o777 if payload.allow_worker else 0o700)
     network_mode = "allowlist" if payload.authorized and payload.allowed_hosts else "deny"
     request = RunRequest(
         task_id=payload.task_id,
@@ -81,6 +87,7 @@ def create_agent_run(payload: AgentRunCreate):
         authorization={
             "authorized": payload.authorized,
             "allow_process": payload.allow_process,
+            "allow_worker": payload.allow_worker,
             "allow_private_network": payload.allow_private_network,
         },
         network_policy=NetworkPolicy(

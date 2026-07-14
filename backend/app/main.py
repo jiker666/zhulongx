@@ -21,6 +21,7 @@ from app.api.challenges import router as challenges_router
 from app.api.ctf import router as ctf_router
 from app.api.settings import router as settings_router
 from app.api.agent_runs import router as agent_runs_router
+from app.api.competition import router as competition_router
 from app.config import settings
 from app.core.scope_guard import scope_guard
 
@@ -85,6 +86,7 @@ app.include_router(challenges_router, prefix="/api")
 app.include_router(ctf_router, prefix="/api")
 app.include_router(settings_router, prefix="/api")
 app.include_router(agent_runs_router, prefix="/api")
+app.include_router(competition_router, prefix="/api")
 app.include_router(ws_router)   # WS route already has /ws prefix
 
 

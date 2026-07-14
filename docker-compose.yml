@@ -8,6 +8,7 @@ services:
     volumes:
       - ./data:/app/data
       - ./backend/app/storage:/app/app/storage
+      - ./data/worker_tasks:/workspace/tasks
     environment:
       - APP_NAME=${APP_NAME:-CyberPilot}
       - APP_ENV=${APP_ENV:-dev}
@@ -22,13 +23,9 @@ services:
       - LLM_TIMEOUT=${LLM_TIMEOUT:-60}
       - LLM_MAX_RETRIES=${LLM_MAX_RETRIES:-2}
       - COMPETITION_MODE=${COMPETITION_MODE:-false}
-      - COMPETITION_WORKFLOW_ENABLED=${COMPETITION_WORKFLOW_ENABLED:-false}
-      - COMPETITION_PROFILE=${COMPETITION_PROFILE:-training}
-      - COMPETITION_WORKSPACE_ROOT=${COMPETITION_WORKSPACE_ROOT:-./data/competition_workspaces}
-      - COMPETITION_MAX_PARALLEL_CHALLENGES=${COMPETITION_MAX_PARALLEL_CHALLENGES:-3}
-      - COMPETITION_MAX_PARALLEL_WORKERS_PER_CHALLENGE=${COMPETITION_MAX_PARALLEL_WORKERS_PER_CHALLENGE:-2}
-      - COMPETITION_MAX_TOOL_RUNTIME=${COMPETITION_MAX_TOOL_RUNTIME:-60}
       - WORKER_BASE_URL=${WORKER_BASE_URL:-http://worker-base:8090}
+      - WORKER_SHARED_ROOT=/workspace/tasks
+      - WORKER_WORKSPACE_ROOT=/workspace/tasks
       - SCOPE_CIDRS=${SCOPE_CIDRS:-}
       - SCOPE_DOMAINS=${SCOPE_DOMAINS:-}
       - SCOPE_PORTS=${SCOPE_PORTS:-}
@@ -42,6 +39,7 @@ services:
       - DEV_ALLOW_PRIVATE_TARGETS=${DEV_ALLOW_PRIVATE_TARGETS:-false}
     networks:
       - cyberpilot-net
+      - worker-control-net
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
       interval: 30s
@@ -68,19 +66,27 @@ services:
     expose:
       - "8090"
     ports:
-      - "${WORKER_PORT:-8090}:8090"
+      - "127.0.0.1:${WORKER_PORT:-8090}:8090"
     volumes:
       - ./data/worker_tasks:/workspace/tasks
     read_only: true
+    init: true
+    pids_limit: 256
     tmpfs:
       - /tmp:size=256m
     cap_drop:
       - ALL
     security_opt:
       - no-new-privileges:true
+    environment:
+      - WORKER_WORKSPACE_ROOT=/workspace/tasks
+      - WORKER_TERMINATE_GRACE_SECONDS=${WORKER_TERMINATE_GRACE_SECONDS:-1.5}
     networks:
-      - cyberpilot-net
+      - worker-control-net
 
 networks:
   cyberpilot-net:
     driver: bridge
+  worker-control-net:
+    driver: bridge
+    internal: true

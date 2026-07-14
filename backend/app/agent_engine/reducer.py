@@ -57,7 +57,7 @@ class StateReducer:
             state.status = RunStatus.HUMAN_REQUIRED
             state.human_handoff = deepcopy(payload.get("handoff") or payload.get("output", {}).get("handoff"))
         elif event_type == EventType.HUMAN_ANSWERED.value:
-            state.status = RunStatus.RUNNING
+            state.status = RunStatus(payload.get("resume_status", RunStatus.RUNNING.value))
             state.human_handoff = None
         elif event_type == EventType.CANDIDATE_PENDING_EXTERNAL.value:
             state.status = RunStatus.PENDING_EXTERNAL

@@ -22,7 +22,7 @@ from app.agent_engine.state import PAUSED_STATUSES, RunRequest, RunStatus, Sessi
 from app.agent_engine.tools.builtin import build_builtin_registry
 from app.agent_engine.tools.executor import ToolExecutionService
 from app.agent_engine.tools.registry import ToolRegistry
-from app.agent_engine.tools.types import ToolContext
+from app.agent_engine.tools.types import ToolCall, ToolContext
 from app.agent_engine.validation.base import Validator
 
 
@@ -204,7 +204,90 @@ class AgentSession:
     def abort(self, reason: str = "cancelled by user") -> bool:
         changed = self.abort_token.abort(reason)
         self.sandbox.abort_all()
+        if changed and self.state.status not in TERMINAL_STATUSES - {RunStatus.HUMAN_REQUIRED}:
+            self._append(
+                EventType.RUN_CANCELLED,
+                actor="control_plane",
+                payload={"status": RunStatus.CANCELLED.value, "error": reason, "output": {}},
+            )
+            self._persist_checkpoint()
         return changed
+
+    def pause_for_human(self, reason: str = "paused by operator") -> SessionState:
+        if self.state.status in PAUSED_STATUSES:
+            return self.state
+        if self.state.status in TERMINAL_STATUSES:
+            raise ValueError("terminal run cannot be paused")
+        self._append(
+            EventType.HUMAN_REQUESTED,
+            actor="human",
+            payload={
+                "status": RunStatus.HUMAN_REQUIRED.value,
+                "error": reason,
+                "handoff": {"question": reason, "reason": "operator pause"},
+            },
+        )
+        self._persist_checkpoint()
+        return self.state
+
+    def record_human_evidence(self, content: str) -> dict[str, object]:
+        if self.state.status in TERMINAL_STATUSES - {RunStatus.HUMAN_REQUIRED}:
+            raise ValueError("terminal run cannot accept evidence")
+        value = content.strip()
+        if not value:
+            raise ValueError("human evidence is empty")
+        evidence = {
+            "evidence_id": f"human_{uuid.uuid4().hex}",
+            "evidence_type": "human_observation",
+            "summary": value[:20_000],
+            "source_event_ids": [],
+            "confidence": 1.0,
+            "source": "human",
+        }
+        self._append(EventType.EVIDENCE_RECORDED, actor="human", payload={"evidence": evidence})
+        self._persist_checkpoint()
+        return evidence
+
+    def record_hypothesis(self, hypothesis: dict[str, object]) -> dict[str, object]:
+        if self.state.status in TERMINAL_STATUSES - {RunStatus.HUMAN_REQUIRED}:
+            raise ValueError("terminal run cannot accept hypotheses")
+        value = dict(hypothesis)
+        value.setdefault("hypothesis_id", f"hyp_{uuid.uuid4().hex}")
+        self._append(EventType.HYPOTHESIS_PROPOSED, actor="human", payload={"hypothesis": value})
+        self._persist_checkpoint()
+        return value
+
+    def execute_tool(self, call: ToolCall):
+        """Execute an operator-requested tool through the canonical policy/event path."""
+        if self.state.status in TERMINAL_STATUSES - {RunStatus.HUMAN_REQUIRED}:
+            raise ValueError("terminal run cannot execute tools")
+        try:
+            self.budget.check()
+        except BudgetExceeded as exc:
+            raise ValueError(str(exc)) from exc
+        context = ToolContext(
+            run_id=self.run_id,
+            request=self.request,
+            workspace=self.workspace,
+            abort_token=self.abort_token,
+            sandbox=self.sandbox,
+        )
+        execution = self.executor.execute(call, context, parent_event_id=self._last_event_id())
+        if not execution.replayed:
+            self.budget.record_tool_call()
+        self.reducer.apply(self.state, execution.result_event)
+        state_event_type = execution.result.metadata.get("state_event_type")
+        state_event_payload = execution.result.metadata.get("state_event_payload")
+        if execution.result.success and state_event_type and isinstance(state_event_payload, dict):
+            self._append(
+                EventType(str(state_event_type)),
+                actor="state_tool",
+                parent_event_id=execution.result_event.event_id,
+                payload=state_event_payload,
+            )
+        self.state.budget_usage = self.budget.usage.to_dict()
+        self._persist_checkpoint()
+        return execution
 
     def _timeout_abort(self) -> None:
         self._timed_out = True
@@ -215,7 +298,7 @@ class AgentSession:
         return self.events.read(self.run_id, after_sequence=after_sequence)
 
     def _finish(self, outcome: LoopOutcome, parent_event_id: str | None) -> SessionState:
-        if self.state.status in TERMINAL_STATUSES and outcome.status != self.state.status:
+        if self.state.status in TERMINAL_STATUSES:
             return self.state
         active_node = next(
             (node for node in self.state.current_plan.get("nodes", []) if node.get("status") == "running"),
@@ -290,12 +373,18 @@ class AgentSession:
     ) -> SessionState:
         if self.state.status != RunStatus.HUMAN_REQUIRED:
             raise ValueError("run is not waiting for human input")
+        resume_status = (
+            RunStatus.RUNNING
+            if any(event.type == EventType.RUN_STARTED.value for event in self.event_stream())
+            else RunStatus.CREATED
+        )
         self._append(
             EventType.HUMAN_ANSWERED,
             actor="human",
             payload={
                 "public_response": public_response or {},
                 "secure_input_refs": list(secure_input_refs),
+                "resume_status": resume_status.value,
             },
         )
         self.state.error = ""

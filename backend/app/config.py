@@ -92,21 +92,15 @@ class Settings(BaseSettings):
     MAX_UPLOAD_SIZE: int = 50 * 1024 * 1024  # 50MB
 
     COMPETITION_MODE: bool = False
-    # Opt-in competition workflow. Legacy CTF orchestration stays the default.
-    COMPETITION_PROFILE: str = "training"
-    COMPETITION_WORKFLOW_ENABLED: bool = False
-    COMPETITION_MAX_PARALLEL_CHALLENGES: int = 3
-    COMPETITION_MAX_PARALLEL_WORKERS_PER_CHALLENGE: int = 2
-    COMPETITION_MAX_TOOL_RUNTIME: int = 60
-    COMPETITION_WORKSPACE_ROOT: str = "./data/competition_workspaces"
     WORKER_BASE_URL: str = "http://worker-base:8090"
+    WORKER_SHARED_ROOT: str = str(DEFAULT_RUNTIME_ROOT / "worker_tasks")
+    WORKER_WORKSPACE_ROOT: str = "/workspace/tasks"
     WORKER_CONNECT_TIMEOUT: float = 3.0
     WORKER_READ_TIMEOUT: float = 20.0
     WORKER_MAX_RETRIES: int = 1
     WORKER_CIRCUIT_BREAKER_THRESHOLD: int = 3
     WORKER_CIRCUIT_BREAKER_RESET_SECONDS: int = 30
     WORKER_TERMINATE_GRACE_SECONDS: int = 2
-    WORKER_KILL_GRACE_SECONDS: int = 2
     SCOPE_CIDRS: str = ""
     SCOPE_DOMAINS: str = ""
     SCOPE_PORTS: str = ""

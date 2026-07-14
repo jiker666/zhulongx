@@ -40,4 +40,6 @@ class PolicyEngine:
                 return PolicyDecision(False, "network allowlist is empty")
         if "process_execution" in permissions and not bool(context.request.authorization.get("allow_process", False)):
             return PolicyDecision(False, "process execution was not authorized")
+        if "worker_execution" in permissions and not bool(context.request.authorization.get("allow_worker", False)):
+            return PolicyDecision(False, "isolated worker execution was not enabled for this run")
         return PolicyDecision(True, "permissions satisfied")

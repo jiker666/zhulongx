@@ -34,6 +34,7 @@ class ToolContext:
     abort_token: AbortToken
     sandbox: Sandbox
     agent_id: str = "agent_root"
+    tool_call_id: str = ""
 
 
 class ToolExecutor(Protocol):

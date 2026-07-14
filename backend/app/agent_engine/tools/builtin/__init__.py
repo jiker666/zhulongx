@@ -8,6 +8,7 @@ from app.agent_engine.tools.builtin.human import AskHumanExecutor
 from app.agent_engine.tools.builtin.process import RunPythonExecutor, RunShellExecutor
 from app.agent_engine.tools.builtin.skill import LoadSkillExecutor
 from app.agent_engine.tools.builtin.state_updates import StateUpdateExecutor
+from app.agent_engine.tools.builtin.worker import worker_definitions
 from app.agent_engine.events import EventType
 from app.agent_engine.tools.registry import ToolRegistry
 from app.agent_engine.tools.types import ToolDefinition
@@ -356,6 +357,7 @@ def build_builtin_registry(
             evidence_type="plan_revision",
         ),
     )
+    definitions = (*definitions, *worker_definitions())
     for definition in definitions:
         registry.register(definition)
     if skill_loader is not None:
