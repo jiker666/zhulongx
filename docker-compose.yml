@@ -22,6 +22,13 @@ services:
       - LLM_TIMEOUT=${LLM_TIMEOUT:-60}
       - LLM_MAX_RETRIES=${LLM_MAX_RETRIES:-2}
       - COMPETITION_MODE=${COMPETITION_MODE:-false}
+      - COMPETITION_WORKFLOW_ENABLED=${COMPETITION_WORKFLOW_ENABLED:-false}
+      - COMPETITION_PROFILE=${COMPETITION_PROFILE:-training}
+      - COMPETITION_WORKSPACE_ROOT=${COMPETITION_WORKSPACE_ROOT:-./data/competition_workspaces}
+      - COMPETITION_MAX_PARALLEL_CHALLENGES=${COMPETITION_MAX_PARALLEL_CHALLENGES:-3}
+      - COMPETITION_MAX_PARALLEL_WORKERS_PER_CHALLENGE=${COMPETITION_MAX_PARALLEL_WORKERS_PER_CHALLENGE:-2}
+      - COMPETITION_MAX_TOOL_RUNTIME=${COMPETITION_MAX_TOOL_RUNTIME:-60}
+      - WORKER_BASE_URL=${WORKER_BASE_URL:-http://worker-base:8090}
       - SCOPE_CIDRS=${SCOPE_CIDRS:-}
       - SCOPE_DOMAINS=${SCOPE_DOMAINS:-}
       - SCOPE_PORTS=${SCOPE_PORTS:-}
@@ -51,6 +58,26 @@ services:
       - VITE_API_URL=http://backend:8000
     depends_on:
       - backend
+    networks:
+      - cyberpilot-net
+
+  worker-base:
+    build:
+      context: ./worker
+    restart: unless-stopped
+    expose:
+      - "8090"
+    ports:
+      - "${WORKER_PORT:-8090}:8090"
+    volumes:
+      - ./data/worker_tasks:/workspace/tasks
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     networks:
       - cyberpilot-net
 

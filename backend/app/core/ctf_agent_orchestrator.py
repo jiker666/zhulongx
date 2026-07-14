@@ -330,6 +330,12 @@ class CtfOrchestrator:
 
         try:
             file_size = os.path.getsize(full_path)
+            from types import SimpleNamespace
+            from app.core.agent_tool_gateway import AgentToolGateway
+            gateway = AgentToolGateway(task_id=task.task_id, workspace=ws, category=task.category_hint, authorized=task.authorized, allow_network=task.allow_network)
+            def run_controlled(command: str, timeout: int):
+                out, err, ok = gateway.execute("run_shell", {"command": command, "timeout": timeout})
+                return SimpleNamespace(stdout=out, stderr=err, success=ok)
             if mode == "hex":
                 # 二进制 hexdump
                 with open(full_path, "rb") as f:
@@ -343,26 +349,26 @@ class CtfOrchestrator:
                     lines.append(f"{offset+i:08x}  {hex_part:<48s}  {ascii_part}")
                 return "\n".join(lines[:500])  # 最多 500 行
             elif mode == "strings":
-                result = self.sandbox.run_shell(
+                result = run_controlled(
                     f"strings -n 6 -t x \"{full_path}\" | head -200",
                     workdir=ws, timeout=15,
                 )
                 return result.stdout[:limit] if result.success else f"strings failed: {result.stderr[:200]}"
             elif mode == "disasm":
-                result = self.sandbox.run_shell(
+                result = run_controlled(
                     f"objdump -d \"{full_path}\" | head -500",
                     workdir=ws, timeout=15,
                 )
                 return result.stdout[:limit] if result.success else f"objdump failed: {result.stderr[:200]}"
             elif mode == "pcap":
                 # tshark 摘要
-                result = self.sandbox.run_shell(
+                result = run_controlled(
                     f"tshark -r \"{full_path}\" -T fields -e frame.number -e ip.src -e ip.dst -e _ws.col.Protocol -e frame.len 2>/dev/null | head -200",
                     workdir=ws, timeout=30,
                 )
                 return result.stdout[:limit] if result.success else f"tshark failed: {result.stderr[:200]}"
             elif mode == "image_meta":
-                result = self.sandbox.run_shell(
+                result = run_controlled(
                     f"identify verbose \"{full_path}\" 2>/dev/null || exiftool \"{full_path}\" 2>/dev/null || pngcheck \"{full_path}\" 2>/dev/null",
                     workdir=ws, timeout=15,
                 )
@@ -1627,12 +1633,13 @@ class CtfOrchestrator:
                         detail=f"正在执行 shell 命令，等待输出...",
                         code=last_cmd)
 
-        ws = self._get_or_create_workspace(task)
-        need_network = task.authorized and task.allow_network
-        sandbox = get_sandbox(allow_network=need_network) if need_network else self.sandbox
-
         try:
-            res = sandbox.run_shell(last_cmd, workdir=ws, timeout=settings.CTF_SANDBOX_TIMEOUT)
+            from types import SimpleNamespace
+            from app.core.agent_tool_gateway import AgentToolGateway
+            ws = self._get_or_create_workspace(task)
+            gateway = AgentToolGateway(task_id=task.task_id, workspace=ws, category=task.category_hint, authorized=task.authorized, allow_network=task.allow_network)
+            stdout, stderr, success = gateway.execute("run_shell", {"command": last_cmd, "timeout": settings.CTF_SANDBOX_TIMEOUT})
+            res = SimpleNamespace(exit_code=0 if success else 1, stdout=stdout, stderr=stderr, duration_ms=0, timed_out=False, success=success)
             task.shell_history[-1].update({
                 "exit_code": res.exit_code,
                 "stdout": res.stdout[:5000],
@@ -1844,11 +1851,12 @@ class CtfOrchestrator:
                         code=task.current_script[:5000])
         try:
             ws = self._get_or_create_workspace(task)
-            script_path = self.sandbox.write_script(ws, "solve.py", task.current_script)
-            need_network = task.authorized and task.allow_network
-            sandbox = get_sandbox(allow_network=need_network) if need_network else self.sandbox
-            res: SandboxResult = sandbox.run_python(script_path, workdir=ws, timeout=settings.CTF_SANDBOX_TIMEOUT)
-            run_record = res.to_dict()
+            from app.core.agent_tool_gateway import AgentToolGateway
+            gateway = AgentToolGateway(task_id=task.task_id, workspace=ws, category=task.category_hint, authorized=task.authorized, allow_network=task.allow_network)
+            stdout, stderr, success = gateway.execute("run_python", {"code": task.current_script, "filename": "solve.py", "timeout": settings.CTF_SANDBOX_TIMEOUT})
+            run_record = {"success": success, "exit_code": 0 if success else 1, "stdout": stdout, "stderr": stderr, "duration_ms": 0, "timed_out": False, "workdir": ws}
+            from types import SimpleNamespace
+            res = SimpleNamespace(**run_record)
             run_index = len(task.script_runs)
             run_record["run_index"] = run_index
             task.script_runs.append(run_record)

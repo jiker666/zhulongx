@@ -1,9 +1,0 @@
-{
-  "flag": "flag{6sabtodiswo7yqvoc}",
-  "chain": [
-    "xor_single_byte_0x48",
-    "hex",
-    "xor_single_byte_0xff",
-    "hex"
-  ]
-}

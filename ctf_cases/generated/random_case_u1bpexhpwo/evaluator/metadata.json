@@ -1,9 +1,0 @@
-{
-  "flag": "flag{zl0kalfvxr6iujvgbn6}",
-  "chain": [
-    "gzip",
-    "base64",
-    "zlib",
-    "base64"
-  ]
-}

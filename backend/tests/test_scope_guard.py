@@ -6,6 +6,12 @@ from fastapi.testclient import TestClient
 def test_default_rejects_private_and_non_http(monkeypatch):
     monkeypatch.setattr("app.core.scope_guard.settings.COMPETITION_MODE", False)
     monkeypatch.setattr("app.core.scope_guard.settings.DEV_ALLOW_PRIVATE_TARGETS", False)
+    # Deterministic DNS fixture: never depend on the host resolver (which may
+    # map example.com to a test/reserved address in CI or enterprise networks).
+    monkeypatch.setattr(
+        "app.core.scope_guard._resolve_host",
+        lambda host: ["93.184.216.34"] if host == "example.com" else [host],
+    )
     assert not scope_guard.validate_url("http://10.0.0.1").allowed
     assert not scope_guard.validate_url("file:///etc/passwd").allowed
     assert scope_guard.validate_url("https://example.com").allowed

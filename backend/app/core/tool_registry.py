@@ -22,6 +22,7 @@ from app.tools.shell import RunShellTool
 from app.tools.python_runner import RunPythonTool
 from app.tools.archive import ExtractArchiveTool
 from app.tools.flag_submit import SubmitFlagTool
+from app.tools.worker import WorkerHealthTool, WorkerCommandRunTool, WorkerCommandStatusTool, WorkerCommandCancelTool, WorkerTaskCancelTool, TerminalCreateTool, TerminalSendTool, TerminalReadTool, TerminalExpectTool, TerminalCloseTool
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,7 @@ class ToolRegistry:
             RunPythonTool(),
             ExtractArchiveTool(),
             SubmitFlagTool(),
+            WorkerHealthTool(), WorkerCommandRunTool(), WorkerCommandStatusTool(), WorkerCommandCancelTool(), WorkerTaskCancelTool(), TerminalCreateTool(), TerminalSendTool(), TerminalReadTool(), TerminalExpectTool(), TerminalCloseTool(),
         ]
         for tool in default_tools:
             self.register(tool)
