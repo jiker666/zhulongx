@@ -1,0 +1,1 @@
+{"title":"Local static endpoint","objective":"Inspect the explicitly scoped local endpoint and report a validated content exposure finding.","target_path":"/backups/","target_response":"Index of /backups app.db.bak VULN:directory_listing"}

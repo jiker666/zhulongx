@@ -14,7 +14,11 @@ ROOT = Path(__file__).resolve().parents[1]
 DIST = ROOT / "dist"
 PACKAGE_NAME = "cyberpilot-finalops-v4-submission.zip"
 TOP = "cyberpilot"
-EXCLUDED_DIRS = {".git", "node_modules", "__pycache__", ".pytest_cache", "dist", "backups", "ctf_runs"}
+EXCLUDED_DIRS = {
+    ".git", ".agents", ".claude", ".codex", ".skills",
+    "node_modules", "__pycache__", ".pytest_cache", "dist", "backups",
+    "ctf_runs", "vendor", "data",
+}
 EXCLUDED_NAMES = {".DS_Store", ".env"}
 EXCLUDED_SUFFIXES = {".pyc"}
 FORBIDDEN_ZIP_PARTS = {
@@ -26,6 +30,9 @@ FORBIDDEN_ZIP_PARTS = {
     "backups",
     "ctf_runs",
     "evaluator",
+    "vendor",
+    ".skills",
+    "data",
 }
 REQUIRED = [
     "README.md",
@@ -53,6 +60,8 @@ def excluded(path: Path) -> bool:
     if path.suffix in EXCLUDED_SUFFIXES:
         return True
     if len(parts) >= 2 and parts[0] == "data" and path.suffix == ".db":
+        return True
+    if parts[:2] == ("backend", "data"):
         return True
     if len(parts) >= 4 and parts[:4] == ("backend", "app", "storage", "uploads"):
         return True

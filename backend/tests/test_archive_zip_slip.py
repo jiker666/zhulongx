@@ -1,4 +1,6 @@
 import os
+import io
+import tarfile
 import tempfile
 import zipfile
 
@@ -79,3 +81,25 @@ def test_extract_archive_tool_metadata():
     assert tool.risk_level == "medium"
     assert "local_read" in tool.permissions
     assert "local_write" in tool.permissions
+
+
+def test_tar_slip_blocked(tmp_path):
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    archive = ws / "malicious.tar"
+    with tarfile.open(archive, "w") as tf:
+        unsafe = tarfile.TarInfo("../../../tmp/evil_tar_slip.txt")
+        unsafe_data = b"pwned"
+        unsafe.size = len(unsafe_data)
+        tf.addfile(unsafe, io.BytesIO(unsafe_data))
+        safe = tarfile.TarInfo("safe.txt")
+        safe_data = b"safe"
+        safe.size = len(safe_data)
+        tf.addfile(safe, io.BytesIO(safe_data))
+
+    result = ExtractArchiveTool().run({"workspace": str(ws), "path": "malicious.tar"})
+
+    assert result["success"] is True
+    assert result["details"]["rejected_members"] == ["../../../tmp/evil_tar_slip.txt"]
+    assert (ws / "extracted" / "malicious.tar" / "safe.txt").is_file()
+    assert not (tmp_path / "evil_tar_slip.txt").exists()

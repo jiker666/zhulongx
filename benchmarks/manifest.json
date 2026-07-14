@@ -1,0 +1,31 @@
+{
+  "version": 2,
+  "evaluator_manifest": "hidden/manifest.json",
+  "cases": [
+    {"id": "file_plain_01", "category": "file", "scenario": "ctf"},
+    {"id": "encoding_base64_02", "category": "encoding", "scenario": "ctf"},
+    {"id": "encoding_hex_03", "category": "encoding", "scenario": "ctf"},
+    {"id": "encoding_rot13_04", "category": "encoding", "scenario": "ctf"},
+    {"id": "encoding_reverse_05", "category": "encoding", "scenario": "ctf"},
+    {"id": "encoding_base32_06", "category": "encoding", "scenario": "ctf"},
+    {"id": "encoding_url_07", "category": "encoding", "scenario": "ctf"},
+    {"id": "structured_nested_08", "category": "file", "scenario": "ctf"},
+    {"id": "encoding_double_09", "category": "encoding", "scenario": "ctf"},
+    {"id": "file_multifile_10", "category": "file", "scenario": "ctf"},
+    {"id": "web_idor_11", "category": "web", "scenario": "pentest"},
+    {"id": "web_xss_12", "category": "web", "scenario": "pentest"},
+    {"id": "web_debug_13", "category": "web", "scenario": "pentest"},
+    {"id": "web_listing_14", "category": "web", "scenario": "pentest"},
+    {"id": "vuln_cmd_15", "category": "code_vulnerability", "scenario": "vuln_analysis"},
+    {"id": "vuln_sqli_16", "category": "code_vulnerability", "scenario": "vuln_analysis"},
+    {"id": "vuln_path_17", "category": "code_vulnerability", "scenario": "vuln_analysis"},
+    {"id": "reverse_hex_18", "category": "reverse", "scenario": "reverse_forensics"},
+    {"id": "reverse_b64_19", "category": "reverse", "scenario": "reverse_forensics"},
+    {"id": "reverse_reversed_20", "category": "reverse", "scenario": "reverse_forensics"},
+    {"id": "forensics_ip_21", "category": "forensics", "scenario": "reverse_forensics"},
+    {"id": "forensics_domain_22", "category": "forensics", "scenario": "reverse_forensics"},
+    {"id": "forensics_deleted_23", "category": "forensics", "scenario": "reverse_forensics"},
+    {"id": "incident_phish_24", "category": "incident_response", "scenario": "incident_response"},
+    {"id": "incident_credential_25", "category": "incident_response", "scenario": "incident_response"}
+  ]
+}

@@ -264,6 +264,8 @@ export interface CtfTask {
   flag_format?: string | null
   authorized: boolean
   allow_network: boolean
+  allowed_hosts?: string[]
+  allowed_ports?: number[]
   max_rounds: number
   max_time_sec: number
   shell_history: Array<{
@@ -275,6 +277,10 @@ export interface CtfTask {
   }>
   attachments: string[]
   state: string
+  agent_status?: string
+  agent_run_id?: string | null
+  engine?: string
+  last_event_sequence?: number
   rounds_used: number
   is_running?: boolean
   source?: string
@@ -301,6 +307,11 @@ export interface CtfTask {
     run_index?: number
   }>
   evidence: Array<{
+    event_id?: string
+    sequence?: number
+    type?: string
+    actor?: string
+    payload?: Record<string, any>
     step: string
     timestamp: number
     duration_ms: number
@@ -351,9 +362,11 @@ export const ctfCreateTask = (data: {
   flag_format?: string | null
   authorized?: boolean
   allow_network?: boolean
+  allowed_hosts?: string[]
+  allowed_ports?: number[]
   max_rounds?: number
   max_time_sec?: number
-}) => api.post<{ task_id: string; state: string }>('/ctf/tasks', data)
+}) => api.post<{ task_id: string; state: string; engine: string }>('/ctf/tasks', data)
 export const ctfUploadAttachment = (taskId: string, file: File) => {
   const formData = new FormData()
   formData.append('file', file)
@@ -363,19 +376,27 @@ export const ctfUploadAttachment = (taskId: string, file: File) => {
 }
 export const ctfSolveTask = (taskId: string, payload: { mode?: string; max_rounds?: number; max_time_sec?: number }) =>
   api.post<CtfTask>(`/ctf/tasks/${taskId}/solve`, payload)
-export const ctfGetEvents = (taskId: string) =>
+export const ctfGetEvents = (taskId: string, afterSequence = 0) =>
   api.get<{
     task_id: string
+    run_id?: string | null
     state: string
+    agent_status: string
+    is_running: boolean
+    after_sequence: number
+    last_sequence: number
     events: CtfTask['evidence']
     script_runs: CtfTask['script_runs']
+    shell_history: CtfTask['shell_history']
     candidate_flags: CtfTask['candidate_flags']
-  }>(`/ctf/tasks/${taskId}/events`)
+    best_flag?: string | null
+    current_script: string
+  }>(`/ctf/tasks/${taskId}/events`, { params: { after_sequence: afterSequence } })
 export const ctfGetWriteup = (taskId: string) =>
   api.get<string>(`/ctf/tasks/${taskId}/writeup`, { responseType: 'text' as const })
 export const ctfListDemos = () => api.get<CtfDemo[]>('/ctf/demos')
 export const ctfRunDemo = (demoId: string, maxRounds = 0, maxTimeSec = 600) =>
-  api.post<CtfTask & { expected_flag?: string | null; match?: boolean | null }>(
+  api.post<Partial<CtfTask> & { task_id: string; state: string; run_id?: string | null; agent_status?: string; match?: boolean | null }>(
     `/ctf/demos/${demoId}/run?max_rounds=${maxRounds}&max_time_sec=${maxTimeSec}`
   )
 export const ctfBenchmark = () => api.get<CtfBenchmark>('/ctf/benchmark')

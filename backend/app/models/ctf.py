@@ -23,7 +23,10 @@ class CtfTask(Base):
     flag_format = Column(String(256), nullable=True)
     authorized = Column(Boolean, default=False)
     allow_network = Column(Boolean, default=False)
+    allowed_hosts = Column(Text, default="[]")
+    allowed_ports = Column(Text, default="[]")
     max_rounds = Column(Integer, default=8)
+    max_time_sec = Column(Integer, default=600)
 
     attachments = Column(Text, default="[]")  # JSON list
 
@@ -49,6 +52,9 @@ class CtfTask(Base):
     source = Column(String(32), default="api")  # api / demo / llm_smoke
     demo_id = Column(String(64), nullable=True)
     expected_flag = Column(String(256), nullable=True)  # 仅 benchmark 用，不允许 orchestrator 读
+    engine = Column(String(32), default="legacy")
+    agent_run_id = Column(String(96), nullable=True, index=True)
+    agent_workspace = Column(String(1024), nullable=True)
 
 
 class CtfEvent(Base):

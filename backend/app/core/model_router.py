@@ -53,17 +53,17 @@ class RouteDecision:
 
 # 各 lane 默认 max_tokens（按规格第 3.3 节）
 STEP_TOKEN_BUDGET = {
-    "classify": 800,
-    "plan": 1200,
+    "classify": 400,
+    "plan": 600,
     "agent_think": 4096,
-    "generate_script": 2048,
-    "reflect_error": 1200,
+    "generate_script": 1800,
+    "reflect_error": 900,
     "generate_writeup": 2000,
     "verify_flag": 400,
     "analyze_files": 800,
     "reason": 800,
     "observer": 400,
-    "default": 2048,
+    "default": 800,
 }
 
 

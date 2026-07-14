@@ -57,8 +57,14 @@ def save_task(task_dict: Dict[str, Any]) -> None:
         row.flag_format = task_dict.get("flag_format") or None
         row.authorized = bool(task_dict.get("authorized", False))
         row.allow_network = bool(task_dict.get("allow_network", False))
+        if "allowed_hosts" in task_dict:
+            row.allowed_hosts = _j(task_dict.get("allowed_hosts", [])) or "[]"
+        if "allowed_ports" in task_dict:
+            row.allowed_ports = _j(task_dict.get("allowed_ports", [])) or "[]"
         row.max_rounds = int(task_dict.get("max_rounds", 8))
-        row.attachments = _j(task_dict.get("attachments", [])) or "[]"
+        row.max_time_sec = int(task_dict.get("max_time_sec", row.max_time_sec or 600))
+        if "attachments" in task_dict:
+            row.attachments = _j(task_dict.get("attachments", [])) or "[]"
         row.state = task_dict.get("state", row.state or "INIT")
         row.rounds_used = int(task_dict.get("rounds_used", 0))
         row.plan_json = _j(task_dict.get("plan")) or row.plan_json
@@ -77,6 +83,12 @@ def save_task(task_dict: Dict[str, Any]) -> None:
             row.demo_id = task_dict["demo_id"]
         if task_dict.get("expected_flag") and not row.expected_flag:
             row.expected_flag = task_dict["expected_flag"]
+        if task_dict.get("engine"):
+            row.engine = str(task_dict["engine"])
+        if task_dict.get("agent_run_id"):
+            row.agent_run_id = str(task_dict["agent_run_id"])
+        if task_dict.get("agent_workspace"):
+            row.agent_workspace = str(task_dict["agent_workspace"])
         # running 状态
         running = bool(task_dict.get("is_running", False))
         row.is_running = running
@@ -210,7 +222,10 @@ def load_task_view(task_id: str) -> Optional[Dict[str, Any]]:
             "flag_format": row.flag_format,
             "authorized": row.authorized,
             "allow_network": row.allow_network,
+            "allowed_hosts": _jd(row.allowed_hosts, []) or [],
+            "allowed_ports": _jd(row.allowed_ports, []) or [],
             "max_rounds": row.max_rounds,
+            "max_time_sec": row.max_time_sec,
             "attachments": _jd(row.attachments, []) or [],
             "state": row.state,
             "rounds_used": row.rounds_used,
@@ -231,6 +246,7 @@ def load_task_view(task_id: str) -> Optional[Dict[str, Any]]:
                 }
                 for a in artifacts
             ],
+            "shell_history": [],
             "evidence": [
                 {
                     "step": e.step,
@@ -261,6 +277,9 @@ def load_task_view(task_id: str) -> Optional[Dict[str, Any]]:
             "is_running": row.is_running,
             "source": row.source,
             "demo_id": row.demo_id,
+            "engine": row.engine or "legacy",
+            "agent_run_id": row.agent_run_id,
+            "agent_workspace": row.agent_workspace,
             # ⚠️ expected_flag 不返回到 API（防作弊）
             "created_at": row.created_at.timestamp() if row.created_at else 0,
             "updated_at": row.updated_at.timestamp() if row.updated_at else 0,
@@ -288,13 +307,17 @@ def list_tasks_view(limit: int = 100) -> List[Dict[str, Any]]:
                 "flag_format": row.flag_format,
                 "authorized": row.authorized,
                 "allow_network": row.allow_network,
+                "allowed_hosts": _jd(row.allowed_hosts, []) or [],
+                "allowed_ports": _jd(row.allowed_ports, []) or [],
                 "max_rounds": row.max_rounds,
+                "max_time_sec": row.max_time_sec,
                 "attachments": _jd(row.attachments, []) or [],
                 "state": row.state,
                 "rounds_used": row.rounds_used,
                 "plan": _jd(row.plan_json),
                 "analysis": _jd(row.analysis_json),
                 "current_script": row.current_script,
+                "shell_history": [],
                 # 列表页轻量字段
                 "script_runs": [],
                 "evidence": [],
@@ -305,6 +328,9 @@ def list_tasks_view(limit: int = 100) -> List[Dict[str, Any]]:
                 "is_running": row.is_running,
                 "source": row.source,
                 "demo_id": row.demo_id,
+                "engine": row.engine or "legacy",
+                "agent_run_id": row.agent_run_id,
+                "agent_workspace": row.agent_workspace,
                 "created_at": row.created_at.timestamp() if row.created_at else 0,
                 "updated_at": row.updated_at.timestamp() if row.updated_at else 0,
             })

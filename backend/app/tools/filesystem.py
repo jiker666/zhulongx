@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 
 from app.tools.base import BaseTool
 from app.core.tool_protocol import ToolSpec
+from app.core.workspace_paths import resolve_workspace_path
 
 
 class ListDirTool(BaseTool):
@@ -54,11 +55,8 @@ class ListDirTool(BaseTool):
 
     @staticmethod
     def _safe_path(workspace: str, path: str) -> Optional[str]:
-        ws = os.path.abspath(workspace)
-        full = os.path.normpath(os.path.join(ws, path))
-        if not full.startswith(ws + os.sep) and full != ws:
-            return None
-        return full
+        resolved = resolve_workspace_path(workspace, path)
+        return str(resolved) if resolved is not None else None
 
     @classmethod
     def as_spec(cls) -> ToolSpec:
@@ -94,13 +92,7 @@ class ReadFileTool(BaseTool):
             return {"success": False, "summary": "no file specified", "details": {"error": "no_file"}, "evidence": []}
         safe = ListDirTool._safe_path(workspace, path)
         if safe is None:
-            attachments = context.get("attachments", [])
-            for a in attachments:
-                if os.path.basename(a) == os.path.basename(path):
-                    safe = a
-                    break
-            else:
-                return {"success": False, "summary": f"路径超出 workspace: {path}", "details": {"error": "path_escape"}, "evidence": []}
+            return {"success": False, "summary": f"路径超出 workspace: {path}", "details": {"error": "path_escape"}, "evidence": []}
         if not os.path.isfile(safe):
             return {"success": False, "summary": f"文件不存在: {path}", "details": {"error": "not_found"}, "evidence": []}
         offset = int(context.get("offset", 0))

@@ -84,6 +84,12 @@ def _migrate_db():
             ("source", "VARCHAR(32) DEFAULT 'api'"),
             ("demo_id", "VARCHAR(64)"),
             ("expected_flag", "VARCHAR(256)"),
+            ("allowed_hosts", "TEXT DEFAULT '[]'"),
+            ("allowed_ports", "TEXT DEFAULT '[]'"),
+            ("max_time_sec", "INTEGER DEFAULT 600"),
+            ("engine", "VARCHAR(32) DEFAULT 'legacy'"),
+            ("agent_run_id", "VARCHAR(96)"),
+            ("agent_workspace", "VARCHAR(1024)"),
         ],
     }
     with engine.connect() as conn:

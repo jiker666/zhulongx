@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import os
 import re
+import signal
 import shlex
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
@@ -73,6 +75,9 @@ class CcBridgeRuntime:
         self.started_at: Optional[float] = None
         self._tool_specs: Dict[str, ToolSpec] = {}
         self._skills_text: str = ""
+        self._process_lock = threading.Lock()
+        self._process: Optional[subprocess.Popen[str]] = None
+        self._abort_event = threading.Event()
 
     def register_tool(self, spec: ToolSpec) -> None:
         self._tool_specs[spec.name] = spec
@@ -83,6 +88,29 @@ class CcBridgeRuntime:
         self._skills_text = skills_text or ""
         if self.fallback_runtime:
             self.fallback_runtime.load_skills(skills_text)
+
+    def abort(self, reason: str = "用户手动停止") -> None:
+        self._abort_event.set()
+        self.state = "human_required"
+        self.error = reason
+        if self.fallback_runtime:
+            self.fallback_runtime.abort(reason)
+        with self._process_lock:
+            proc = self._process
+        if proc is not None and proc.poll() is None:
+            try:
+                if os.name == "posix":
+                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                else:
+                    proc.terminate()
+                proc.wait(timeout=0.5)
+            except subprocess.TimeoutExpired:
+                if os.name == "posix":
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                else:
+                    proc.kill()
+            except ProcessLookupError:
+                pass
 
     def run(self) -> str:
         self.started_at = time.time()
@@ -133,18 +161,33 @@ class CcBridgeRuntime:
         env.setdefault("ZHULONGX_CC_BRIDGE", "1")
         env.setdefault("ZHULONGX_TASK_ID", self.task_id)
         env.setdefault("ZHULONGX_ALLOW_NETWORK", "1" if self.allow_network else "0")
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             final_command,
             cwd=self.workspace,
             env=env,
             text=True,
-            capture_output=True,
-            timeout=min(self.max_time_sec, int(getattr(settings, "CC_RUNTIME_TIMEOUT", self.max_time_sec))),
-            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=(os.name == "posix"),
         )
+        with self._process_lock:
+            self._process = proc
+        try:
+            timeout_seconds = min(self.max_time_sec, int(getattr(settings, "CC_RUNTIME_TIMEOUT", self.max_time_sec)))
+            try:
+                stdout, stderr = proc.communicate(timeout=timeout_seconds)
+            except subprocess.TimeoutExpired as exc:
+                self.abort(f"Claude Code 超时 {timeout_seconds}s")
+                stdout, stderr = proc.communicate(timeout=1)
+                exc.stdout = stdout
+                exc.stderr = stderr
+                raise
+        finally:
+            with self._process_lock:
+                self._process = None
         duration_ms = int((time.time() - started) * 1000)
-        output = (proc.stdout or "")[-int(getattr(settings, "CC_RUNTIME_MAX_OUTPUT_CHARS", 120000)):]
-        error = (proc.stderr or "")[-20000:]
+        output = (stdout or "")[-int(getattr(settings, "CC_RUNTIME_MAX_OUTPUT_CHARS", 120000)):]
+        error = (stderr or "")[-20000:]
         success = proc.returncode == 0
         self._record_cli_turn(output=output, error=error, success=success, duration_ms=duration_ms)
         self._extract_candidates(output + "\n" + error)

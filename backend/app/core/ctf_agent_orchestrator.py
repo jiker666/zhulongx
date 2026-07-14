@@ -206,6 +206,7 @@ class CtfOrchestrator:
         self._hypotheses: Dict[str, List[Dict[str, Any]]] = {}  # v8: hypothesis ledger
         self._no_flag_continue_streak: Dict[str, int] = {}  # v8: track no-flag continue
         self._last_route_models: Dict[str, str] = {}  # v8: track last used model per task
+        self._active_runtimes: Dict[str, Any] = {}
 
     # ---------- v8 helpers: hypothesis, expand_context, replan ----------
 
@@ -1014,7 +1015,11 @@ class CtfOrchestrator:
         runtime._orch_task = task
         runtime._orch_self = self
 
-        final_state = self._run_runtime_with_sync(runtime, task)
+        self._active_runtimes[task.task_id] = runtime
+        try:
+            final_state = self._run_runtime_with_sync(runtime, task)
+        finally:
+            self._active_runtimes.pop(task.task_id, None)
         self._sync_runtime_to_task(task, runtime)
         if final_state == "done":
             task.state = CtfState.VERIFY_FLAG
@@ -1054,8 +1059,14 @@ class CtfOrchestrator:
             from app.api.ctf import _cancel_events
             cancel_evt = _cancel_events.get(runtime.task_id)
             if cancel_evt and cancel_evt.is_set():
-                runtime.state = "human_required"
-                runtime.error = "用户手动停止"
+                abort = getattr(runtime, "abort", None)
+                if callable(abort):
+                    abort("用户手动停止")
+                else:
+                    runtime.state = "human_required"
+                    runtime.error = "用户手动停止"
+                t.join(timeout=3)
+                result_holder["state"] = "human_required"
                 break
 
         self._sync_runtime_to_task(task, runtime)
@@ -1063,6 +1074,16 @@ class CtfOrchestrator:
         if result_holder.get("error"):
             runtime.error = result_holder["error"]
         return result_holder["state"] or runtime.state
+
+    def abort_task(self, task_id: str, reason: str = "用户手动停止") -> bool:
+        runtime = self._active_runtimes.get(task_id)
+        if runtime is None:
+            return False
+        abort = getattr(runtime, "abort", None)
+        if callable(abort):
+            abort(reason)
+            return True
+        return False
 
     def _use_agent_runtime(self, task: CtfTask) -> bool:
         """判断是否使用主 Agent Runtime。

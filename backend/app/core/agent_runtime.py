@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -39,6 +40,7 @@ from app.core.scope_guard import ScopeGuard, scope_guard
 from app.core.solve_access_guard import SolveAccessGuard
 from app.core.flag_verifier import FlagVerifier
 from app.core.ws_manager import emit_agent_live
+from app.core.workspace_paths import resolve_workspace_path
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +139,7 @@ class AgentRuntime:
         self._auto_search_results: str = ""
         self._orch_task: Any = None
         self._orch_self: Any = None
+        self._abort_event = threading.Event()
 
     def register_tool(self, spec: ToolSpec) -> None:
         self._tool_specs[spec.name] = spec
@@ -151,6 +154,10 @@ class AgentRuntime:
         initial = self._build_initial_context()
         self._conversation = [{"role": "user", "content": initial}]
         while self.state == "running":
+            if self._abort_event.is_set():
+                self.state = "human_required"
+                self.error = "用户手动停止"
+                break
             if self._check_termination():
                 break
             from app.api.ctf import _cancel_events
@@ -207,6 +214,14 @@ class AgentRuntime:
             else:
                 self._consecutive_llm_failures = 0
         return self.state
+
+    def abort(self, reason: str = "用户手动停止") -> None:
+        self._abort_event.set()
+        self.state = "human_required"
+        self.error = reason
+        abort_all = getattr(self.sandbox, "abort_all", None)
+        if callable(abort_all):
+            abort_all()
 
     def _check_termination(self) -> bool:
         if self.started_at and (time.time() - self.started_at) > self.max_time_sec:
@@ -580,13 +595,8 @@ class AgentRuntime:
             return "", f"工具执行异常: {type(e).__name__}: {e}", False
 
     def _safe_path(self, path: str) -> Optional[str]:
-        full = os.path.normpath(os.path.join(self.workspace, path))
-        if full.startswith(self.workspace + os.sep) or full == self.workspace:
-            return full
-        for allowed in ("/tmp", "/proc", "/etc", "/usr", "/bin", "/lib", "/opt", "/var/tmp"):
-            if full.startswith(allowed + "/") or full == allowed:
-                return full
-        return None
+        resolved = resolve_workspace_path(self.workspace, path)
+        return str(resolved) if resolved is not None else None
 
     def _exec_run_shell(self, args: Dict[str, Any]) -> Tuple[str, str, bool]:
         command = args.get("command", "")
@@ -693,12 +703,7 @@ class AgentRuntime:
         if safe is None:
             return "", f"路径超出 workspace: {path}", False
         if not os.path.isfile(safe):
-            for a in self.attachments:
-                if os.path.basename(a) == os.path.basename(path):
-                    safe = a
-                    break
-            else:
-                return "", f"文件不存在: {path}", False
+            return "", f"文件不存在: {path}", False
         offset = int(args.get("offset", 0))
         limit = int(args.get("limit", 5000))
         try:
@@ -756,39 +761,17 @@ class AgentRuntime:
             return "", f"grep 被沙箱拒绝: {e}", False
 
     def _exec_extract_archive(self, args: Dict[str, Any]) -> Tuple[str, str, bool]:
-        path = args.get("path", "")
-        if not path:
-            return "", "no path specified", False
-        safe = self._safe_path(path)
-        if safe is None:
-            for a in self.attachments:
-                if os.path.basename(a) == os.path.basename(path):
-                    safe = a
-                    break
-            else:
-                return "", f"路径超出 workspace: {path}", False
-        if not os.path.isfile(safe):
-            return "", f"文件不存在: {path}", False
-        extract_dir = os.path.join(self.workspace, "extracted", os.path.basename(safe))
-        os.makedirs(extract_dir, exist_ok=True)
-        lower = safe.lower()
-        try:
-            if lower.endswith(".zip"):
-                self._safe_extract_zip(safe, extract_dir)
-            elif lower.endswith((".tar.gz", ".tgz")):
-                self.sandbox.run_shell(f"tar xzf '{safe}' -C '{extract_dir}'", workdir=self.workspace, timeout=30)
-            elif lower.endswith(".tar"):
-                self.sandbox.run_shell(f"tar xf '{safe}' -C '{extract_dir}'", workdir=self.workspace, timeout=30)
-            elif lower.endswith(".gz") and not lower.endswith(".tar.gz"):
-                self.sandbox.run_shell(f"gunzip -k -c '{safe}' > '{extract_dir}/{os.path.basename(safe)[:-3]}'", workdir=self.workspace, timeout=15)
-            elif lower.endswith(".7z"):
-                self.sandbox.run_shell(f"7z x '{safe}' -o'{extract_dir}' -y 2>/dev/null || echo '7z not available'", workdir=self.workspace, timeout=30)
-            else:
-                return "", f"不支持的压缩格式: {os.path.basename(path)}", False
-            tree = self._get_file_tree(extract_dir, max_depth=3)
-            return f"解压到 {os.path.basename(path)}\n{tree}", "", True
-        except Exception as e:
-            return "", f"解压失败: {e}", False
+        from app.tools.archive import ExtractArchiveTool
+
+        result = ExtractArchiveTool().run({
+            "workspace": self.workspace,
+            "path": args.get("path", ""),
+        })
+        if not result.get("success"):
+            return "", result.get("summary", "archive extraction failed"), False
+        details = result.get("details", {})
+        output = f"{result.get('summary', 'archive extracted')}\n{details.get('file_tree', '')}"
+        return output, "", True
 
     def _safe_extract_zip(self, zip_path: str, dest: str) -> None:
         import zipfile

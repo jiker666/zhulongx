@@ -2,6 +2,7 @@
 Tests for CTF API endpoints.
 """
 import os
+import re
 import sys
 
 import pytest
@@ -17,6 +18,11 @@ os.environ["CTF_DEMO_DIR"] = os.path.abspath(
 )
 
 from app.main import app
+from app.agent_engine.providers.base import AssistantTurn, ProviderToolCall
+from app.agent_engine.providers.mock import ScriptedProvider
+from app.agent_engine.sandbox.local_test import LocalTestSandbox
+from app.core.ctf_agent_orchestrator import CtfOrchestrator
+from app.scenarios.ctf.service import ctf_session_service
 
 
 @pytest.fixture
@@ -70,6 +76,7 @@ def test_create_task(client):
     data = r.json()
     assert "task_id" in data
     assert data["state"] == "INIT"
+    assert data["engine"] == "v2"
 
 
 def test_list_tasks(client):
@@ -85,8 +92,40 @@ def test_get_unknown_task_404(client):
     assert r.status_code == 404
 
 
-def test_run_demo_crypto_xor(client):
-    # Use sync=true to make this test deterministic
+def test_run_demo_crypto_xor_uses_agent_session_and_hides_evaluator(client, monkeypatch):
+    solve_code = """
+import base64
+data = base64.b64decode(open('secret.b64', 'rb').read())
+print(bytes(value ^ 0x5A for value in data).decode())
+"""
+
+    def submit_tool_candidate(messages, _tools):
+        candidates = re.findall(r"flag\{[^}]+\}", str(messages))
+        return AssistantTurn(
+            text="Submit the candidate produced by the tool.",
+            tool_calls=(ProviderToolCall("candidate", "submit_candidate", {"candidate": candidates[-1]}),),
+            finish_reason="tool_calls",
+        )
+
+    monkeypatch.setattr(ctf_session_service, "provider_factory", lambda: ScriptedProvider([
+        AssistantTurn(
+            text="Decode the supplied challenge in the sandbox.",
+            tool_calls=(ProviderToolCall("decode", "run_python", {"code": solve_code}),),
+            finish_reason="tool_calls",
+        ),
+        submit_tool_candidate,
+    ]))
+    monkeypatch.setattr(
+        ctf_session_service,
+        "sandbox_factory",
+        lambda workspace, _readonly: LocalTestSandbox(workspace),
+    )
+    monkeypatch.setattr(
+        CtfOrchestrator,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("legacy orchestrator entered default path")),
+    )
+
     r = client.post("/api/ctf/demos/crypto_xor/run?max_rounds=8&sync=true")
     assert r.status_code == 200
     data = r.json()
@@ -101,9 +140,18 @@ def test_run_demo_crypto_xor(client):
         time.sleep(0.3)
     assert state == "DONE", f"state={state}"
     assert r.json()["best_flag"] == "flag{xor_crypto_is_simple_but_classic}"
-    # Match via expected_flag
-    assert data.get("expected_flag") == "flag{xor_crypto_is_simple_but_classic}"
-    assert r.json()["best_flag"] == data["expected_flag"]
+    assert data["agent_status"] == "succeeded"
+    assert "expected_flag" not in data
+    assert r.json()["engine"] == "v2"
+
+    events = client.get(f"/api/ctf/tasks/{tid}/events?after_sequence=0").json()
+    assert events["events"][-1]["type"] == "run.succeeded"
+    assert events["last_sequence"] == events["events"][-1]["sequence"]
+    replay = client.get(
+        f"/api/ctf/tasks/{tid}/events?after_sequence={events['last_sequence']}"
+    ).json()
+    assert replay["events"] == []
+    assert replay["last_sequence"] == events["last_sequence"]
 
 
 def test_benchmark(client):

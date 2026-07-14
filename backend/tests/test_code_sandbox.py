@@ -2,7 +2,9 @@
 Tests for CodeExecutionSandbox - timeout, output limit, dangerous commands.
 """
 import os
+import subprocess
 import sys
+import threading
 import time
 
 import pytest
@@ -91,3 +93,86 @@ def test_path_escape_sanitized(sandbox):
     assert ws in sp
     assert "etc" not in sp
     assert "passwd" in sp  # filename kept
+
+
+def _process_is_running(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    status = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "stat="],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.strip()
+    return bool(status) and not status.startswith("Z")
+
+
+def _wait_for_process_exit(pid, timeout=2.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _process_is_running(pid):
+            return True
+        time.sleep(0.02)
+    return not _process_is_running(pid)
+
+
+def test_timeout_kills_process_tree(sandbox):
+    ws = sandbox.create_workspace()
+    script = sandbox.write_script(
+        ws,
+        "tree.py",
+        """\
+import pathlib
+import subprocess
+import time
+
+child = subprocess.Popen(["python3", "-c", "import time; time.sleep(60)"])
+pathlib.Path("child.pid").write_text(str(child.pid), encoding="utf-8")
+time.sleep(60)
+""",
+    )
+
+    result = sandbox.run_python(script, workdir=ws, timeout=1)
+    child_pid = int((__import__("pathlib").Path(ws) / "child.pid").read_text())
+
+    assert result.timed_out is True
+    assert _wait_for_process_exit(child_pid)
+
+
+def test_abort_kills_process_tree_within_three_seconds(sandbox):
+    ws = sandbox.create_workspace()
+    script = sandbox.write_script(
+        ws,
+        "abort_tree.py",
+        """\
+import pathlib
+import subprocess
+import time
+
+child = subprocess.Popen(["python3", "-c", "import time; time.sleep(60)"])
+pathlib.Path("abort_child.pid").write_text(str(child.pid), encoding="utf-8")
+time.sleep(60)
+""",
+    )
+    result_holder = {}
+    runner = threading.Thread(
+        target=lambda: result_holder.setdefault("result", sandbox.run_python(script, workdir=ws, timeout=30)),
+        daemon=True,
+    )
+    runner.start()
+    pid_file = __import__("pathlib").Path(ws) / "abort_child.pid"
+    deadline = time.monotonic() + 2
+    while not pid_file.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert pid_file.exists()
+    child_pid = int(pid_file.read_text())
+
+    started = time.monotonic()
+    sandbox.abort_all()
+    runner.join(timeout=3)
+
+    assert not runner.is_alive()
+    assert time.monotonic() - started < 3
+    assert _wait_for_process_exit(child_pid)

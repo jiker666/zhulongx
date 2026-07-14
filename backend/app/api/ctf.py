@@ -16,36 +16,33 @@ Endpoints:
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import shutil
-import time
 import threading
+import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
 from app.config import settings
-from app.core.ctf_agent_orchestrator import CtfOrchestrator, CtfState, get_orchestrator
-from app.core.ctf_persistence import (
-    get_expected_flag,
-    get_writeup,
-    is_task_running,
-    list_tasks_view,
-    load_task_view,
-)
-from app.core.llm_adapter import get_adapter
+from app.core.ctf_persistence import get_writeup, save_task
 from app.core.blackboard import get_blackboard
 from app.core.cost_accounting import get_cost_accounting
 from app.core.model_router import get_model_router
 from app.schemas.blackboard import HintIn, IntentUpdateIn
+from app.scenarios.ctf.service import ctf_session_service
 
 
 router = APIRouter(prefix="/ctf", tags=["ctf"])
+
+# The retired direct-call orchestrator imports this symbol. V2 endpoints never
+# use it; keeping it here prevents compatibility tests from coupling to v2.
+_cancel_events: Dict[str, threading.Event] = {}
 
 # ---------- schemas ----------
 
@@ -57,6 +54,8 @@ class TaskCreateIn(BaseModel):
     flag_format: Optional[str] = Field(None, description="例如 SCTF\\{.*\\}")
     authorized: bool = Field(False, description="是否已获授权")
     allow_network: bool = Field(False, description="是否允许联网（需 authorized=true）")
+    allowed_hosts: list[str] = Field(default_factory=list, max_length=100)
+    allowed_ports: list[int] = Field(default_factory=list, max_length=100)
     max_rounds: int = Field(0, ge=0, description="最大轮数，0=无限")
     max_time_sec: int = Field(600, ge=30, le=3600, description="最大运行时间(秒)")
 
@@ -65,55 +64,6 @@ class TaskSolveIn(BaseModel):
     mode: str = Field("auto", description="auto|assist|manual")
     max_rounds: int = Field(0, ge=0, description="最大轮数，0=无限")
     max_time_sec: int = Field(600, ge=30, le=3600, description="最大运行时间(秒)")
-
-
-# ---------- async runner ----------
-
-# 全局线程池（避免阻塞 event loop）
-_runner_lock = threading.Lock()
-_running_tasks: Dict[str, threading.Thread] = {}
-_cancel_events: Dict[str, threading.Event] = {}
-
-
-def _run_task_in_thread(task_id: str, max_rounds: int, max_time_sec: int = 600) -> None:
-    """在独立线程中运行 orchestrator（不阻塞 FastAPI event loop）。"""
-    try:
-        orch = get_orchestrator()
-        orch.run(task_id, max_rounds=max_rounds, max_time_sec=max_time_sec)
-    except Exception as e:  # noqa: BLE001
-        # 标记失败
-        import logging
-        logging.getLogger(__name__).exception("async run failed: %s", task_id)
-        try:
-            task = orch.get_task(task_id)
-            if task:
-                task.state = CtfState.FAILED
-                task.error = f"async runner error: {type(e).__name__}: {e}"
-                from app.core.ctf_persistence import save_task
-                save_task(task.to_dict())
-        except Exception:
-            pass
-    finally:
-        with _runner_lock:
-            _running_tasks.pop(task_id, None)
-
-
-def _start_async_run(task_id: str, max_rounds: int, max_time_sec: int = 600) -> None:
-    """启动后台线程执行任务。"""
-    with _runner_lock:
-        if task_id in _running_tasks:
-            return
-        if is_task_running(task_id):
-            return
-    t = threading.Thread(
-        target=_run_task_in_thread,
-        args=(task_id, max_rounds, max_time_sec),
-        daemon=True,
-        name=f"ctf-run-{task_id}",
-    )
-    with _runner_lock:
-        _running_tasks[task_id] = t
-    t.start()
 
 
 # ---------- helpers ----------
@@ -131,6 +81,8 @@ def _save_upload(upload_file: UploadFile, task_id: str) -> str:
     if safe_name == "expected_flag.txt":
         raise HTTPException(400, "expected_flag.txt is anti-cheat protected, upload rejected")
     dst = upload_dir / safe_name
+    if dst.exists():
+        dst = upload_dir / f"{dst.stem}_{uuid.uuid4().hex[:8]}{dst.suffix}"
     size_limit = settings.MAX_UPLOAD_SIZE
     with dst.open("wb") as out:
         written = 0
@@ -180,20 +132,14 @@ def _list_demos() -> List[Dict[str, Any]]:
 
 def _llm_status() -> Dict[str, Any]:
     """返回当前 LLM 模式（mock / live / disabled），不泄露 key。"""
-    adapter = get_adapter()
-    if adapter.mock_mode:
-        mode = "mock"
-    elif not adapter.enabled:
-        mode = "disabled"
-    else:
-        mode = "live"
+    configured = bool(settings.LLM_ENABLED and settings.LLM_API_KEY and settings.LLM_API_KEY != "replace_me")
     return {
-        "mode": mode,
-        "provider": adapter.provider,
-        "model": adapter.model,
-        "base_url_host": adapter.base_url.split("//")[-1].split("/")[0] if adapter.base_url else "",
-        "api_key_configured": bool(adapter.api_key and adapter.api_key != "replace_me"),
-        "enabled": adapter.enabled,
+        "mode": "live" if configured else "disabled",
+        "provider": settings.LLM_PROVIDER,
+        "model": settings.LLM_MODEL,
+        "base_url_host": settings.LLM_BASE_URL.split("//")[-1].split("/")[0] if settings.LLM_BASE_URL else "",
+        "api_key_configured": configured,
+        "enabled": configured,
     }
 
 
@@ -202,39 +148,34 @@ def _llm_status() -> Dict[str, Any]:
 
 @router.post("/tasks")
 def create_task(payload: TaskCreateIn):
-    orch = get_orchestrator()
-    task = orch.create_task(
+    task = ctf_session_service.create_task(
         title=payload.title,
         description=payload.description,
         category_hint=payload.category,
         flag_format=payload.flag_format,
         authorized=payload.authorized,
         allow_network=payload.allow_network,
+        allowed_hosts=tuple(payload.allowed_hosts),
+        allowed_ports=tuple(payload.allowed_ports),
         max_rounds=payload.max_rounds,
         max_time_sec=payload.max_time_sec,
         source="api",
     )
-    return {"task_id": task.task_id, "state": task.state.value}
+    return {"task_id": task["task_id"], "state": task["state"], "engine": "v2"}
 
 
 @router.get("/tasks")
 def list_tasks():
     """从 DB 加载所有任务（重启后仍可查）。"""
-    return list_tasks_view(limit=200)
+    return ctf_session_service.list_tasks(limit=200)
 
 
 @router.get("/tasks/{task_id}")
 def get_task(task_id: str):
-    """优先从内存取（运行中），否则从 DB 取（历史）。"""
-    orch = get_orchestrator()
-    task = orch.get_task(task_id)
-    if task:
-        return task.to_dict()
-    # 从 DB 取
-    view = load_task_view(task_id)
-    if not view:
+    try:
+        return ctf_session_service.get_task(task_id)
+    except KeyError:
         raise HTTPException(404, f"task not found: {task_id}")
-    return view
 
 
 @router.post("/tasks/{task_id}/attachments")
@@ -242,34 +183,40 @@ async def upload_attachment(
     task_id: str,
     file: UploadFile = File(...),
 ):
-    orch = get_orchestrator()
-    task = orch.get_task(task_id)
-    if not task:
-        # 也允许从 DB 恢复（但不支持再加附件）
+    try:
+        ctf_session_service.get_task(task_id)
+    except KeyError:
         raise HTTPException(404, f"task not found (or already finished): {task_id}")
     saved = _save_upload(file, task_id)
-    orch.add_attachment(task_id, saved)
+    if not ctf_session_service.add_attachment(task_id, saved):
+        Path(saved).unlink(missing_ok=True)
+        raise HTTPException(409, "attachments cannot be changed after an AgentSession run is created")
     return {"saved_path": saved, "filename": file.filename, "size": os.path.getsize(saved)}
 
 
 @router.post("/tasks/{task_id}/solve")
 def solve_task(task_id: str, payload: TaskSolveIn):
     """异步启动解题。立即返回，不阻塞。"""
-    orch = get_orchestrator()
-    task = orch.get_task(task_id)
-    if not task:
+    try:
+        task = ctf_session_service.get_task(task_id)
+    except KeyError:
         raise HTTPException(404, f"task not found: {task_id}")
     if payload.mode == "manual":
         return {"task_id": task_id, "state": "MANUAL", "note": "manual 模式：仅创建不执行"}
-    # 检查是否已在运行
-    if is_task_running(task_id):
-        return {"task_id": task_id, "state": task.state.value, "note": "任务已在运行中"}
-    # 异步启动
-    _start_async_run(task_id, payload.max_rounds, payload.max_time_sec)
+    try:
+        task, started = ctf_session_service.start(
+            task_id,
+            max_rounds=payload.max_rounds,
+            max_time_sec=payload.max_time_sec,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     return {
         "task_id": task_id,
-        "state": task.state.value,
-        "note": "已异步启动，请轮询 /events 或 /tasks/{task_id} 获取进度",
+        "run_id": task.get("agent_run_id"),
+        "state": task["state"],
+        "agent_status": task.get("agent_status"),
+        "note": "已异步启动，请增量轮询 /events" if started else "任务未启动或已在运行/终止",
         "poll_interval_ms": 1000,
     }
 
@@ -277,66 +224,33 @@ def solve_task(task_id: str, payload: TaskSolveIn):
 @router.post("/tasks/{task_id}/stop")
 def stop_task(task_id: str):
     """手动停止正在运行的任务。"""
-    _cancel_events.setdefault(task_id, threading.Event()).set()
-    orch = get_orchestrator()
-    task = orch.get_task(task_id)
-    if task and task.is_running:
-        task.state = CtfState.HUMAN_REQUIRED
-        task.error = "用户手动停止"
-        task.is_running = False
-        try:
-            save_task(task.to_dict())
-        except Exception:
-            pass
-    with _runner_lock:
-        _running_tasks.pop(task_id, None)
-    return {"task_id": task_id, "state": "HUMAN_REQUIRED", "note": "任务已停止"}
+    try:
+        ctf_session_service.get_task(task_id)
+    except KeyError:
+        raise HTTPException(404, f"task not found: {task_id}")
+    abort_requested = ctf_session_service.abort(task_id, "用户手动停止")
+    return {
+        "task_id": task_id,
+        "state": "HUMAN_REQUIRED",
+        "note": "已请求停止；运行线程完成清理后自动退出",
+        "abort_requested": abort_requested,
+    }
 
 
 @router.get("/tasks/{task_id}/events")
-def get_events(task_id: str):
-    """事件流（DB-backed，重启后仍可查）。"""
-    # 优先从内存取（运行中实时数据）
-    orch = get_orchestrator()
-    task = orch.get_task(task_id)
-    if task:
-        return {
-            "task_id": task_id,
-            "state": task.state.value,
-            "is_running": task.is_running,
-            "events": [e.to_dict() for e in task.evidence],
-            "script_runs": task.script_runs,
-            "candidate_flags": task.candidate_flags,
-            "best_flag": task.best_flag,
-            "current_script": task.current_script,
-        }
-    # 从 DB 取
-    view = load_task_view(task_id)
-    if not view:
+def get_events(task_id: str, after_sequence: int = Query(default=0, ge=0)):
+    """Canonical v2 events with a reconnect cursor and compatibility projections."""
+    try:
+        return ctf_session_service.events(task_id, after_sequence=after_sequence)
+    except KeyError:
         raise HTTPException(404, f"task not found: {task_id}")
-    return {
-        "task_id": task_id,
-        "state": view["state"],
-        "is_running": view.get("is_running", False),
-        "events": view["evidence"],
-        "script_runs": view["script_runs"],
-        "candidate_flags": view["candidate_flags"],
-        "best_flag": view["best_flag"],
-        "current_script": view["current_script"],
-    }
 
 
 @router.get("/tasks/{task_id}/writeup", response_class=PlainTextResponse)
 def get_writeup_endpoint(task_id: str):
-    # 先从 DB 取
     md = get_writeup(task_id)
     if md:
         return md
-    # 再从内存取
-    orch = get_orchestrator()
-    task = orch.get_task(task_id)
-    if task and task.writeup_md:
-        return task.writeup_md
     raise HTTPException(404, "writeup not generated yet")
 
 
@@ -362,13 +276,12 @@ def run_demo(demo_id: str, max_rounds: int = 0, max_time_sec: int = 600, sync: b
     except Exception as e:
         raise HTTPException(500, f"invalid challenge.json: {e}")
 
-    orch = get_orchestrator()
     expected_flag = None
     expected = case_dir / "expected_flag.txt"
     if expected.is_file():
         expected_flag = expected.read_text(encoding="utf-8").strip()
 
-    task = orch.create_task(
+    task = ctf_session_service.create_task(
         title=meta.get("title", demo_id),
         description=meta.get("description", ""),
         category_hint=meta.get("category", "auto"),
@@ -385,11 +298,12 @@ def run_demo(demo_id: str, max_rounds: int = 0, max_time_sec: int = 600, sync: b
     if att_dir.is_dir():
         for item in att_dir.iterdir():
             if item.is_file() and item.name != "expected_flag.txt":
-                upload_dir = Path(settings.UPLOAD_DIR) / task.task_id
+                upload_dir = Path(settings.UPLOAD_DIR) / task["task_id"]
                 upload_dir.mkdir(parents=True, exist_ok=True)
                 dst = upload_dir / item.name
-                shutil.copy2(item, dst)
-                orch.add_attachment(task.task_id, str(dst))
+                if not dst.exists():
+                    shutil.copy2(item, dst)
+                ctf_session_service.add_attachment(task["task_id"], str(dst))
 
     # Web demo 特殊处理：自动启动本地靶场
     target_url = meta.get("target_url", "")
@@ -397,25 +311,27 @@ def run_demo(demo_id: str, max_rounds: int = 0, max_time_sec: int = 600, sync: b
         from app.core.web_target_manager import ensure_target_running
         try:
             target_info = ensure_target_running(demo_id, case_dir)
-            task.description += f"\n[靶场已启动] {target_info['url']}"
-            # 更新 DB
-            from app.core.ctf_persistence import save_task
-            save_task(task.to_dict())
+            task["description"] += f"\n[靶场已启动] {target_info['url']}"
+            save_task(task)
         except Exception as e:  # noqa: BLE001
             # 靶场启动失败不阻塞，Agent 仍可分析源码
             import logging
             logging.getLogger(__name__).warning("web target start failed: %s", e)
 
     # 同步 or 异步
-    if sync:
-        orch.run(task.task_id, max_rounds=max_rounds, max_time_sec=max_time_sec)
-    else:
-        _start_async_run(task.task_id, max_rounds, max_time_sec)
+    task, _ = ctf_session_service.start(
+        task["task_id"],
+        max_rounds=max_rounds,
+        max_time_sec=max_time_sec,
+        sync=sync,
+    )
 
     return {
-        "task_id": task.task_id,
-        "state": task.state.value,
-        "expected_flag": expected_flag,  # 仅 benchmark 比对用，不返回给 orchestrator
+        "task_id": task["task_id"],
+        "run_id": task.get("agent_run_id"),
+        "state": task["state"],
+        "agent_status": task.get("agent_status"),
+        "best_flag": task.get("best_flag"),
         "note": "已异步启动" if not sync else "已完成",
     }
 
@@ -423,7 +339,7 @@ def run_demo(demo_id: str, max_rounds: int = 0, max_time_sec: int = 600, sync: b
 @router.get("/benchmark")
 def benchmark():
     """汇总所有 CTF 任务的统计指标（DB-backed）。"""
-    tasks = list_tasks_view(limit=500)
+    tasks = ctf_session_service.list_tasks(limit=500)
     total = len(tasks)
     if not total:
         return {

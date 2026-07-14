@@ -17,32 +17,50 @@
 
 「烛龙·玄枢」是一个**人机协同**的自主决策通用安全智能体，面向 CTF 实战解题场景。它能：
 
-- 自动理解 CTF 题目（题面 + 附件）
-- 识别题型（web / crypto / reverse / pwn / misc / forensics）
+- 自动理解 CTF 题目（题面 + 附件 + 富文本内容预览）
+- 识别题型（web / crypto / reverse / pwn / misc / forensics / hard_ctf）
 - 生成解题计划与执行步骤
+- **自动搜索 writeup 并提取可执行攻击步骤**（CLASSIFY 后自动注入）
 - 静态分析附件（strings / binwalk / exif / ELF...）
 - 生成 `solve.py` / `exp.py` / `analysis.py`
 - 在隔离沙箱中运行脚本
 - 读取 stdout / stderr，**自动反思修复错误**
+- **原生 tool_use**：通过 OpenAI function calling 协议让 LLM 直接调用 web_search / web_fetch / run_python / shell 等工具
+- **循环检测**：Agent 陷入重复命令时自动搜索替代攻击路径
 - 提取并校验候选 flag
 - 生成中文 WP（基于真实证据链，不编造）
 - 在前端实时展示推理链路、执行证据、候选 flag
+- **DASCTF 批量刷题**：一键拉取靶场题目并自动解题
 
 ### 与"工具平台 / Demo 作战台"的区别
 
 | 维度 | 工具平台 | 烛龙·玄枢 |
 |------|---------|----------|
-| 决策 | 用户驱动 | LLM 自主状态机 |
-| 反思 | 无 | 失败自动修复 + 重试 |
+| 决策 | 用户驱动 | LLM 自主状态机 + 原生 tool_use |
+| 反思 | 无 | 失败自动修复 + 重试 + 循环检测 |
 | 证据 | 单次结果 | 完整 evidence chain |
 | 输出 | 工具调用记录 | 中文 WP + 候选 flag + 证据链 |
 | 安全 | 单点限制 | ScopeGuard + Sandbox + 危险命令黑名单 |
+| 搜索 | 无 | 自动搜索 writeup + 循环时替代路径 |
 
 ---
 
-## Cost-aware Multi-Agent Solve Loop
+## 核心架构演进
 
-ZHULONG-X v6 引入低成本多角色解题闭环：
+### v10 关键突破：OpenAI 协议 + 原生 tool_use
+
+之前 wanqing 网关走 Anthropic 协议，API 不接受 `tools` 参数，LLM 只能靠 system prompt 输出文本模拟 JSON 工具调用，极不可靠。**根因修复**：切换到 OpenAI 协议，启用原生 function calling。
+
+```
+之前：Anthropic /messages → 无 tools 参数 → LLM 文本模拟工具调用 ❌
+现在：OpenAI /chat/completions → tools 参数 → LLM 原生选择工具 ✅
+```
+
+验证结果：模型首次调用就能正确选择 `web_search` 工具。
+
+### Cost-aware Multi-Agent Solve Loop
+
+ZHULONG-X v6+ 引入低成本多角色解题闭环：
 
 - **Manager**：保留原有 Orchestrator 状态机，负责全局推进。
 - **Blackboard**：沉淀 Fact / Intent / Hint，避免上下文污染。
@@ -51,9 +69,147 @@ ZHULONG-X v6 引入低成本多角色解题闭环：
 - **CostAccounting**：记录每题 token 与成本，支持挑战杯答辩展示。
 - **FailureAttributor**：失败归因 L1-L4，L4 信息不足直接转人工，不浪费 token。
 
-默认 mock 模式无需 API key；接入国内 API 后，可使用 DeepSeek / Qwen / GLM / OneAPI 等 OpenAI-compatible 服务。
+### v8 Hard Mode
 
-### v6 新增 API
+```dotenv
+CTF_HARD_MODE=true          # 困难题型直接升级 expert lane
+CTF_MAX_ROUNDS=0            # 0=无限，仅受 max_time_sec 限制
+CTF_MAX_TIME_SEC=1800      # 30 分钟
+CTF_VERIFY_CONTINUE_ON_NO_FLAG=true  # 无 flag 不放弃，继续尝试
+```
+
+### 自动搜索注入
+
+```
+CLASSIFY → 自动搜索 writeup（DuckDuckGo + web_fetch）
+         → LLM 提取可执行攻击步骤
+         → 注入 AgentRuntime 初始上下文
+```
+
+Agent 不再依赖 LLM "选择搜索工具"——搜索在 LLM 参与前已完成。
+
+### 循环检测 + 自动搜索
+
+```
+Agent 执行 → _detect_command_loop() 检测重复命令
+           → _auto_search_on_loop() 搜索替代攻击路径
+           → 注入动态上下文，打破循环
+```
+
+---
+
+## 2. 快速启动
+
+### 前置条件
+
+- Python 3.11+
+- Node.js 18+
+- Wanqing API Key（内部网关）
+
+### 方式 A：后端单独启动
+
+```bash
+cd backend
+pip install -r requirements.txt
+
+# 设置 API Key（推荐方式）
+export WQ_API_KEY="your_wanqing_api_key"
+
+python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+打开 <http://localhost:8000/docs> 查看 API；访问 <http://localhost:8000/api/health> 检查健康。
+
+### 方式 B：前端单独启动
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+打开 Vite 提示的地址（默认 <http://localhost:5173>）。
+
+### 方式 C：一键启动
+
+```bash
+# 后端
+cd backend && export WQ_API_KEY="your_key" && \
+  python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+# 前端（另一终端）
+cd frontend && npm run dev
+```
+
+### 接入 LLM
+
+复制 `.env.example` 为 `.env`：
+
+```bash
+cp .env.example .env
+```
+
+关键配置（`.env` 或环境变量）：
+
+```dotenv
+LLM_ENABLED=true
+LLM_PROVIDER=wanqing
+LLM_BASE_URL=https://wanqing-api.corp.kuaishou.com/api/gateway/v1
+LLM_MODEL=ep-yba64y-1782808149582099879
+LLM_MAX_TOKENS=8192
+LLM_TIMEOUT=180
+LLM_MAX_RETRIES=5
+
+# 统一 API Key（覆盖所有 lane）
+WQ_API_KEY=your_wanqing_key
+```
+
+**重要**：`CC_RUNTIME_ENABLED` 必须设为 `false`，否则会尝试调用外部 Claude Code 进程。
+
+---
+
+## 3. LLM 协议与工具调用
+
+### 协议选择
+
+`LLMAdapter` 根据 `base_url` 自动选择协议：
+
+| base_url 包含 | 协议 | supports_tools |
+|---------------|------|----------------|
+| `wanqing` | OpenAI `/chat/completions` | ✅ |
+| `anthropic` | Anthropic `/messages` | ❌ |
+| 其他 | OpenAI `/chat/completions` | ✅ |
+
+### 原生工具列表
+
+AgentRuntime 向 LLM 暴露以下工具（OpenAI function calling 格式）：
+
+| 工具 | 说明 |
+|------|------|
+| `web_search` | DuckDuckGo 搜索（优先） |
+| `web_fetch` | HTTP 获取页面 + BeautifulSoup 提取正文 |
+| `http_request` | 自定义 HTTP 请求（GET/POST/PUT/DELETE） |
+| `run_python` | 在沙箱中执行 Python 脚本 |
+| `shell` | 执行 shell 命令（受黑名单限制） |
+| `read_file` | 读取文件内容 |
+| `write_file` | 写入文件 |
+| `list_dir` | 列出目录 |
+| `flag_submit` | 提交 flag 候选 |
+
+### 模型路由
+
+```
+静态分析找到 flag → STATIC_ONLY（不调 LLM）
+普通步骤          → CHEAP lane（max_tokens=4096，节省成本）
+卡住/困难题       → EXPERT lane（max_tokens=8192，全量推理）
+超预算            → STOP → HUMAN_REQUIRED
+```
+
+升级 expert 条件（Hard Mode 下更激进）：
+- Hard Mode: 1 次重复错误 或 2 轮无候选 flag → 直接升级
+- 普通: 3 轮无候选 flag / 错误重复 2 次 / 长上下文 / Observer 循环 / 用户强制
+
+### v6+ API
 
 | 接口 | 用途 |
 |------|------|
@@ -64,149 +220,26 @@ ZHULONG-X v6 引入低成本多角色解题闭环：
 | `GET /api/ctf/tasks/{task_id}/cost/records` | 获取调用明细（脱敏） |
 | `GET /api/ctf/llm/router/status` | 获取模型路由状态（脱敏） |
 
-### v6 新增模块
-
-| 模块 | 职责 |
-|------|------|
-| `backend/app/core/context_compressor.py` | 压缩工具输出 / evidence / 文件分析 |
-| `backend/app/core/cost_accounting.py` | LLM 调用成本核算 + prompt 缓存 |
-| `backend/app/core/model_router.py` | 模型路由 STATIC_ONLY / CHEAP / EXPERT / STOP |
-| `backend/app/core/blackboard.py` | Fact / Intent / Hint 三元组黑板 |
-| `backend/app/core/observer.py` | 旁路监督循环 / drift / 预算 |
-| `backend/app/core/failure_attributor.py` | 失败归因 L1-L4 |
-| `backend/app/skills/` | 题型 Skill 提示词（ctf/web/crypto/reverse/misc/forensics/cost_control） |
-
-### 模型路由配置
-
-在 `.env` 中配置 cheap / expert / fallback 三条 lane：
-
-```dotenv
-LLM_ROUTER_ENABLED=true
-LLM_BUDGET_PER_TASK_USD=0.05
-LLM_BUDGET_DAILY_USD=1.00
-
-# Cheap: 日常分类/计划/短修复
-LLM_CHEAP_PROVIDER=deepseek
-LLM_CHEAP_BASE_URL=https://api.deepseek.com/v1
-LLM_CHEAP_MODEL=deepseek-v4-flash
-LLM_CHEAP_API_KEY=sk-your-deepseek-key
-
-# Expert: 复杂/卡住时升级
-LLM_EXPERT_PROVIDER=glm
-LLM_EXPERT_BASE_URL=https://api.z.ai/api/coding/paas/v4
-LLM_EXPERT_MODEL=glm-5.2
-LLM_EXPERT_API_KEY=sk-your-glm-key
-```
-
-升级 expert 的条件（满足任一）：
-- 连续 3 轮无候选 flag
-- 同一错误类型重复 2 次
-- 附件分析摘要 > 8000 字符（长上下文）
-- Observer 判断陷入循环
-- 用户手动 `force_expert=true`
-
 ---
 
-## 2. 快速启动
+## 4. CTF 自动解题流程
 
-### 方式 A：后端单独启动
-
-```bash
-cd cyberpilot/backend
-python3 -m pip install -r requirements.txt
-
-# Mock 模式（无需任何 LLM key 即可演示）
-LLM_ENABLED=false APP_ENV=dev \
-  python3 -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-```
-
-打开 <http://localhost:8000/docs> 查看 API；访问 <http://localhost:8000/api/health> 检查健康。
-
-### 方式 B：前端单独启动
-
-```bash
-cd cyberpilot/frontend
-npm install
-npm run dev
-```
-
-打开 Vite 提示的地址（默认 <http://localhost:5173>）。
-
-### 方式 C：一键启动（Makefile）
-
-```bash
-cd cyberpilot
-make dev          # 启动后端
-make dev-frontend # 启动前端（另一个终端）
-```
-
-### 接入真实 LLM（可选）
-
-复制 `.env.example` 为 `.env`：
-
-```bash
-cp .env.example .env
-```
-
-编辑 `.env`：
-
-```dotenv
-LLM_ENABLED=true
-LLM_PROVIDER=openai_compatible
-LLM_BASE_URL=https://api.deepseek.com/v1   # 或 OneAPI / 内网网关
-LLM_API_KEY=sk-your-real-key
-LLM_MODEL=deepseek-coder
-LLM_TEMPERATURE=0.2
-LLM_MAX_TOKENS=4096
-```
-
-支持任何 OpenAI-compatible 网关：OpenAI / DeepSeek / Qwen / GLM / Moonshot / Kimi / OneAPI / Ollama `/v1`。`provider` 会根据模型名自动识别兼容模式。
-
-### 2.4 一键启动（容器）
-
-```bash
-make podman-up    # 或 make docker-up
-make logs
-```
-
----
-
-## 3. CTF 自动解题流程
-
-### 3.1 内置 Demo 题（开箱即用）
+### 4.1 内置 Demo 题（开箱即用）
 
 ```bash
 # 运行所有 demo 的端到端 smoke 测试
 make ctf-smoke
 
-# 运行全部 11 个 demo（mock 模式）
+# 运行全部 demo（mock 模式）
 make ctf-demo-all
 
 # 或运行单个 demo
 make ctf-run-demo DEMO=crypto_xor
 ```
 
-内置 11 个本地 demo（详见 `examples/ctf_demo/`），覆盖 5 大题型：
+内置 demo 覆盖 5 大题型，详见 `examples/ctf_demo/`。
 
-| Demo | 题型 | 难度 | Mock LLM 通过 |
-|------|------|------|--------------|
-| `crypto_xor` | crypto | easy | ✅ |
-| `crypto_xor_repeating` | crypto | medium | ✅ |
-| `crypto_rsa_small_e` | crypto | medium | ❌（需真实 LLM） |
-| `crypto_base_chain` | crypto | medium | ✅ |
-| `misc_exif` | misc | easy | ✅ |
-| `misc_png_chunks` | misc | medium | ✅ |
-| `forensics_log` | forensics | easy | ✅ |
-| `forensics_pcap_http` | forensics | medium | ✅ |
-| `reverse_py` | reverse | medium | ✅ |
-| `reverse_py_bytecode` | reverse | medium | ✅ |
-| `reverse_elf_strings_xor` | reverse | hard | ✅ |
-| `web_local` | web | easy | ✅（自动启动靶场） |
-| `web_local_source_leak` | web | medium | ✅（自动启动靶场） |
-
-Mock 模式下 10/11 自动通过（`crypto_rsa_small_e` 需真实 LLM 理解整数开立方）。
-
-### 3.2 自定义 CTF 任务
+### 4.2 自定义 CTF 任务
 
 通过 API 创建：
 
@@ -220,10 +253,9 @@ curl -X POST http://localhost:8000/api/ctf/tasks \
     "category": "auto",
     "flag_format": "flag\\{[^}]+\\}",
     "authorized": true,
-    "allow_network": false,
-    "max_rounds": 8
+    "allow_network": true,
+    "max_rounds": 0
   }'
-# → {"task_id": "ctf_xxxx", "state": "INIT"}
 
 # 2. 上传附件
 curl -X POST http://localhost:8000/api/ctf/tasks/ctf_xxxx/attachments \
@@ -232,7 +264,7 @@ curl -X POST http://localhost:8000/api/ctf/tasks/ctf_xxxx/attachments \
 # 3. 启动解题
 curl -X POST http://localhost:8000/api/ctf/tasks/ctf_xxxx/solve \
   -H 'Content-Type: application/json' \
-  -d '{"mode": "auto", "max_rounds": 8}'
+  -d '{"mode": "auto", "max_rounds": 0}'
 
 # 4. 查看事件流
 curl http://localhost:8000/api/ctf/tasks/ctf_xxxx/events
@@ -241,56 +273,103 @@ curl http://localhost:8000/api/ctf/tasks/ctf_xxxx/events
 curl http://localhost:8000/api/ctf/tasks/ctf_xxxx/writeup
 ```
 
-### 3.3 前端可视化
+### 4.3 DASCTF 批量刷题
+
+```bash
+cd backend
+export WQ_API_KEY="your_key"
+export DASCTF_JWT="your_jwt_token"
+
+python3 scripts/dasctf_batch.py --help
+```
+
+脚本自动拉取 DASCTF 靶场题目，创建任务并启动解题。
+
+### 4.4 前端可视化
 
 - **作战大屏**（`/`）：核心指标卡 + 实时推理流 + 候选 flag
 - **CTF 作战**（`/ctf`）：demo 题集 + 历史任务
-- **单题作战页**（`/ctf/:taskId`）：左侧任务信息 + 中间推理时间线 + 右侧候选 flag，底部脚本与执行记录
+- **单题作战页**（`/ctf/:taskId`）：左侧任务信息 + 中间推理时间线 + 右侧候选 flag
 - **能力评测**（`/benchmark`）：成功率、题型分布、人工接管次数
+- **工具中心**（`/tools`）：工具管理与状态
+- **最终作战**（`/final-ops`）：终局作战面板
 
 ---
 
-## 4. 系统架构
-
-详见 [`docs/architecture.md`](docs/architecture.md)。
+## 5. 系统架构
 
 ```
-┌──────────────────────────────────────────────────────────┐
-│  前端（React + Vite + Tailwind + 玻璃拟态深空主题）          │
-│  Dashboard / CtfHub / CtfTaskDetail / Benchmark           │
-└────────────────────┬─────────────────────────────────────┘
-                     │ HTTP /api/ctf/*
-┌────────────────────▼─────────────────────────────────────┐
-│  FastAPI 后端                                              │
-│  ┌────────────────────────────────────────────────────┐  │
-│  │  CTF Orchestrator (状态机)                          │  │
-│  │  INIT → CLASSIFY → PLAN → ANALYZE_FILES            │  │
-│  │       → GENERATE_SCRIPT → RUN_SCRIPT                │  │
-│  │       → REFLECT_ERROR → VERIFY_FLAG                 │  │
-│  │       → GENERATE_WRITEUP → DONE / FAILED            │  │
-│  └────┬─────────────┬─────────────┬──────────────┬───┘  │
-│       │             │             │              │       │
-│  ┌────▼────┐ ┌─────▼─────┐ ┌─────▼─────┐ ┌──────▼────┐  │
-│  │LLM      │ │File       │ │Code       │ │Flag       │  │
-│  │Adapter  │ │Analyzer   │ │Sandbox    │ │Verifier   │  │
-│  │(mock/   │ │(strings/  │ │(timeout/  │ │(regex/   │  │
-│  │ real)   │ │ binwalk)  │ │ output/   │ │ confidence│  │
-│  │         │ │           │ │ rlimit)   │ │)          │  │
-│  └─────────┘ └───────────┘ └───────────┘ └───────────┘  │
-│                                                           │
-│  + ScopeGuard（授权范围、allow_network 强制校验）           │
-│  + ToolRegistry（HTTP 指纹 / 目录探测 / JS 提取 / Java 审计）│
-└──────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│  前端（React + Vite + Tailwind + 玻璃拟态深空主题）            │
+│  Dashboard / CtfHub / CtfTaskDetail / Benchmark / ToolCenter │
+└────────────────────┬─────────────────────────────────────────┘
+                     │ HTTP /api/ctf/*    WebSocket /ws
+┌────────────────────▼─────────────────────────────────────────┐
+│  FastAPI 后端                                                  │
+│  ┌────────────────────────────────────────────────────────┐  │
+│  │  CTF Orchestrator (状态机)                              │  │
+│  │  INIT → CLASSIFY → PLAN → ANALYZE_FILES                │  │
+│  │       → GENERATE_SCRIPT → RUN_SCRIPT                   │  │
+│  │       → REFLECT_ERROR → VERIFY_FLAG                     │  │
+│  │       → GENERATE_WRITEUP → DONE / FAILED                │  │
+│  │  + _auto_search_writeup()  (CLASSIFY 后自动搜索)       │  │
+│  │  + _extract_attack_steps() (LLM 提取攻击步骤)          │  │
+│  └────┬─────────────┬──────────────┬──────────────┬───────┘  │
+│       │             │              │              │           │
+│  ┌────▼────┐ ┌──────▼──────┐ ┌────▼─────┐ ┌──────▼────┐    │
+│  │LLM      │ │AgentRuntime │ │Code      │ │Flag       │    │
+│  │Adapter  │ │(OpenAI FC)  │ │Sandbox   │ │Verifier   │    │
+│  │(wanqing │ │tool_use     │ │(timeout/ │ │(regex/   │    │
+│  │ OpenAI) │ │loop detect  │ │ rlimit)  │ │confidence)│    │
+│  └─────────┘ └─────────────┘ └──────────┘ └──────────┘    │
+│                                                               │
+│  ┌────────────────────────────────────────────────────────┐  │
+│  │  工具层                                                │  │
+│  │  web_search | web_fetch | http_request | run_python    │  │
+│  │  shell | read_file | write_file | list_dir | flag_submit│
+│  └────────────────────────────────────────────────────────┘  │
+│                                                               │
+│  + ScopeGuard（授权范围、allow_network 强制校验）             │
+│  + ModelRouter（STATIC_ONLY / CHEAP / EXPERT / STOP）        │
+│  + Blackboard / Observer / FailureAttributor / CostAccounting │
+│  + Skill Prompt（web/crypto/reverse/pwn/misc/forensics/      │
+│                 hard_ctf/cost_control）                       │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### 状态机流程
+
+```
+INIT
+  │
+  ▼
+CLASSIFY ──── _auto_search_writeup() ──── _extract_attack_steps()
+  │
+  ▼
+PLAN
+  │
+  ▼
+ANALYZE_FILES ──── (strings / binwalk / exif / ELF / 附件解析)
+  │
+  ▼
+GENERATE_SCRIPT ──── (solve.py / exp.py / analysis.py)
+  │
+  ▼
+RUN_SCRIPT ──── (沙箱执行 + stdout/stderr 捕获)
+  │
+  ├── 有 flag → VERIFY_FLAG ──── 通过 → GENERATE_WRITEUP → DONE
+  │                       └── 失败 → REFLECT_ERROR
+  │
+  └── 出错 → REFLECT_ERROR ──── 修复 → GENERATE_SCRIPT (循环)
+                            └── 超限 → FAILED
 ```
 
 ---
 
-## 5. 安全边界（关键）
-
-详见 [`docs/architecture.md`](docs/architecture.md#5-安全边界) 与 `safety_audit_report.md`。
+## 6. 安全边界（关键）
 
 1. **默认禁网**：`allow_network=false` 是默认值；CTF 远程题必须 `authorized=true` + `allow_network=true` 同时满足才会放行
-2. **沙箱限制**：脚本运行受 `setrlimit`（CPU 30s / 内存 1GB / 文件 100MB / 进程 32）+ Python timeout 双重约束
+2. **沙箱限制**：脚本运行受 `setrlimit`（CPU 60s / 内存 1GB / 文件 100MB / 进程 32）+ Python timeout 双重约束
 3. **危险命令黑名单**：`rm -rf /` / `mkfs` / `dd of=/dev/` / `sudo` / fork bomb / `curl | sh` 等会被静默拒绝
 4. **API Key 安全**：Key 永不出现在日志 / 报告 / 前端；`Authorization` 头在日志中被 `mask_secret` 脱敏
 5. **路径逃逸防护**：所有上传 / 解压 / 脚本写入都会检查 `realpath` 是否落在 workspace 内
@@ -298,70 +377,96 @@ curl http://localhost:8000/api/ctf/tasks/ctf_xxxx/writeup
 
 ---
 
-## 6. LLM 配置参考
+## 7. LLM 配置参考
 
 | 字段 | 默认值 | 说明 |
 |------|--------|------|
-| `LLM_ENABLED` | `false` | 是否启用真实 LLM；关闭后自动进入 mock 模式 |
-| `LLM_PROVIDER` | `openai_compatible` | 自动检测；显式可填 `deepseek` / `qwen` / `glm` / `moonshot` / `oneapi` / `openai` / `codex` / `mock` |
-| `LLM_BASE_URL` | `http://localhost:11434/v1` | OpenAI 兼容 endpoint |
-| `LLM_API_KEY` | `replace_me` | 会被 `mask_secret` 脱敏 |
-| `LLM_MODEL` | `qwen2.5-coder` | 模型名 |
-| `LLM_TEMPERATURE` | `0.2` | |
-| `LLM_MAX_TOKENS` | `4096` | |
-| `LLM_TIMEOUT` | `60` | 单次请求超时 |
-| `LLM_MAX_RETRIES` | `2` | 失败重试次数（指数退避） |
+| `LLM_ENABLED` | `false` | 是否启用真实 LLM |
+| `LLM_PROVIDER` | `wanqing` | 当前默认走 wanqing 网关 |
+| `LLM_BASE_URL` | `https://wanqing-api.corp.kuaishou.com/api/gateway/v1` | Wanqing 网关 |
+| `LLM_API_KEY` | `replace_me` | 会被 `WQ_API_KEY` 环境变量覆盖 |
+| `LLM_MODEL` | `ep-yba64y-1782808149582099879` | GLM-5.2 |
+| `LLM_TEMPERATURE` | `0.15` | |
+| `LLM_MAX_TOKENS` | `8192` | |
+| `LLM_TIMEOUT` | `180` | 单次请求超时（秒） |
+| `LLM_MAX_RETRIES` | `5` | 失败重试次数（指数退避） |
+| `LLM_CHEAP_MAX_TOKENS` | `4096` | Cheap lane token 上限 |
+| `WQ_API_KEY` | — | 统一 API Key，覆盖所有 lane |
+| `CC_RUNTIME_ENABLED` | `false` | **必须为 false** |
 
 ---
 
-## 7. 验收命令
+## 8. 验收命令
 
 ```bash
-# 后端测试（198 个，含 v6 多角色闭环测试）
+# 后端测试
 cd backend && python3 -m pytest -q
 
 # 前端构建
 cd frontend && npm ci && npm run build
 
-# CTF smoke（4 个 demo 端到端 + scope_guard + 证据链 + WP）
+# CTF smoke
 make ctf-smoke
 
-# 全部 11 个 demo
+# 全部 demo
 make ctf-demo-all
 
-# LLM 配置检查（mock 模式会正确报告 disabled）
+# LLM 配置检查
 make llm-check
-
-# 真实 LLM smoke（需配置 .env 中的 LLM_API_KEY）
-make ctf-llm-smoke
 
 # 安全审计
 make safety-audit
-```
 
-预期输出：`198 passed` / `built in 1.6s` / `7 passed` / `10/11 demo passed`。
+# AgentSession v2 / checkpoint / policy / validator / benchmark tests
+cd backend && python3 -m pytest -q tests/test_agent_engine_*.py
+
+# Release hygiene and package manifest
+make release-check
+python3 scripts/package_release.py
+```
 
 ---
 
-## 8. 文档导航
+## Agent Engine v2 Migration Status
+
+The repository now contains a single-session v2 kernel under `backend/app/agent_engine/`. Its `AgentSession` owns lifecycle, append-only events, Tool Registry execution, policy decisions, abort/timeout, checkpoints, progressive skills, and validator-gated completion. The control-plane API is available at `/api/agent/runs`; consumers reconnect to `/events?after_sequence=N` without replaying prior actions.
+
+Migration is not yet a production release:
+
+- Existing `/api/ctf` routes still use the legacy compatibility runtime while the task adapter is completed.
+- `ContainerSandbox` now executes through Podman/Docker with no image pulls, no network, a read-only root, dropped capabilities, resource limits, and bounded abort/timeout cleanup. A runtime and the preloaded configured image are deployment prerequisites; `LocalTestSandbox` remains test-only.
+- API-created CTF runs have no authoritative evaluator by default and therefore cannot report success from a regex match alone.
+- `benchmarks/results/latest.json` is labeled `agent_session_mock`; it validates the formal 10-case/3-repeat harness, not live-model autonomous solve rate.
+- The legacy Claude Code bridge is disabled by default and has no silent fallback (`CC_RUNTIME_ENABLED=false`).
+
+Architecture truth and remaining release gates are tracked in `docs/refactor/00-current-architecture.md`, `01-target-architecture.md`, and `02-migration-plan.md`. ScopeGuard remains the compatibility control for legacy tools; v2 network tools additionally require explicit run authorization, host/port allowlists, and validated DNS results.
+
+The release archive is `dist/cyberpilot-finalops-v4-submission.zip`; packaging excludes secrets, `.git`, databases, run data, `node_modules`, recovered vendor code, and vendored skill repositories.
+
+---
+
+## 9. 文档导航
 
 - [`docs/architecture.md`](docs/architecture.md) — 系统架构 / 状态机 / 沙箱机制
 - [`docs/user_manual.md`](docs/user_manual.md) — 用户手册（评委可 10 分钟跑起来）
 - [`docs/benchmark_report.md`](docs/benchmark_report.md) — 能力评测报告
 - [`docs/challenge_cup_pitch.md`](docs/challenge_cup_pitch.md) — 挑战杯答辩口径
+- [`docs/refactor/00-current-architecture.md`](docs/refactor/00-current-architecture.md) — 当前代码审计
+- [`docs/refactor/01-target-architecture.md`](docs/refactor/01-target-architecture.md) — AgentSession v2 目标架构
+- [`docs/refactor/02-migration-plan.md`](docs/refactor/02-migration-plan.md) — 分阶段迁移与验收门槛
 
 ---
 
-## 9. 当前限制
+## 10. 当前限制
 
-- Mock LLM 仅对常见 crypto/misc/forensics 模式有效；`crypto_rsa_small_e` 等复杂题需接入真实模型
-- 沙箱基于 subprocess + rlimit，**非容器级隔离**；高危题目建议用 firejail / nsjail / docker
+- LLM 推理能力受限于模型本身，复杂 pwn / 高难度 web 题可能需要多次尝试
+- DASCTF JWT Token 有过期时间，需定期刷新
+- 靶场容器有超时销毁机制，长时间解题可能遇到靶机下线
+- 旧版兼容沙箱仍基于 subprocess + rlimit，**非容器级隔离**；高危任务应使用 v2 容器沙箱
+- v2 需要 Podman/Docker 和预加载的 `AGENT_SANDBOX_IMAGE`；镜像不会自动拉取，运行时不可用时会显式报告阻塞
 - 内存态 + DB 双写，并发可能有竞态（单线程演示无问题）
-- `/solve` 异步执行中无法取消（未来增强）
 
 ### 协作流程
-
-详见 [`docs/team_sop.md`](docs/team_sop.md)。
 
 - `main` 稳定分支、`dev` 集成分支、`feature/*` 开发分支
 - PR 必须说明修改点、测试结果、风险
@@ -370,7 +475,20 @@ make safety-audit
 
 ---
 
-## 10. License & Use
+## 11. 版本历史
+
+| 版本 | 关键变更 |
+|------|---------|
+| v6.1 | 简化 LLM 配置 — 单卡片 + provider 预设 + 主配置同步 cheap lane |
+| v6.2 | CTF 自建题目 + 题面关键词自动识别题型 |
+| v6.3 | LLMAdapter 接入 Anthropic Messages API（晚晴网关 / Claude） |
+| v6.4 | 附件上传 + 富文本内容预览 — LLM 能看懂附件内容 |
+| v8 | Hard Mode：无限轮次 + 困难题自动升级 expert + 继续尝试 |
+| v10 | **OpenAI 协议 + 原生 tool_use**；自动搜索注入；循环检测；DASCTF 批量刷题；web_search / web_fetch / shell / python_runner 等原生工具 |
+
+---
+
+## 12. License & Use
 
 仅授权使用。详见 `LICENSE`（如缺失则视为内部研究用途）。
 

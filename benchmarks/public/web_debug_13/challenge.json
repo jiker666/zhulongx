@@ -1,0 +1,1 @@
+{"title":"Local diagnostics endpoint","objective":"Inspect the explicitly scoped local endpoint and report a validated information exposure finding.","target_path":"/diagnostics","target_response":"debug-mode=true internal-trace=enabled VULN:debug_header"}

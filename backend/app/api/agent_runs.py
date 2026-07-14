@@ -1,0 +1,166 @@
+from __future__ import annotations
+
+import tempfile
+from pathlib import Path
+
+from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel, Field
+
+from app.agent_engine.budget import BudgetLimits
+from app.agent_engine.checkpoint import CheckpointStore
+from app.agent_engine.events import AppendOnlyEventStore
+from app.agent_engine.manager import run_manager
+from app.agent_engine.projections import LegacyTaskProjection
+from app.agent_engine.providers.factory import configured_provider
+from app.agent_engine.run_store import RunMetadataStore
+from app.agent_engine.sandbox.container import ContainerSandbox
+from app.agent_engine.session import AgentSession
+from app.agent_engine.skills.index import SkillIndex
+from app.agent_engine.skills.loader import SkillLoader
+from app.agent_engine.state import ModelConfig, NetworkPolicy, RunRequest
+from app.config import settings
+from app.scenarios import CTFScenario, default_scenarios
+
+
+router = APIRouter(prefix="/agent/runs", tags=["Agent Engine v2"])
+
+
+class AgentRunCreate(BaseModel):
+    task_id: str = Field(min_length=1, max_length=200)
+    title: str = Field(min_length=1, max_length=500)
+    objective: str = Field(min_length=1, max_length=20_000)
+    scenario: str = "ctf"
+    flag_pattern: str = r"flag\{[^}]+\}"
+    authorized: bool = False
+    allow_process: bool = False
+    allow_private_network: bool = False
+    allowed_hosts: list[str] = Field(default_factory=list, max_length=100)
+    allowed_ports: list[int] = Field(default_factory=list, max_length=100)
+    max_seconds: float = Field(default=600, ge=1, le=3600)
+    max_model_requests: int = Field(default=50, ge=1, le=500)
+    max_tool_calls: int = Field(default=100, ge=1, le=1000)
+
+
+def _provider():
+    return configured_provider()
+
+
+@router.post("")
+def create_agent_run(payload: AgentRunCreate):
+    scenarios = default_scenarios()
+    try:
+        scenario = scenarios.get(payload.scenario)
+    except KeyError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if payload.scenario == "ctf":
+        scenario = CTFScenario(flag_pattern=payload.flag_pattern)
+    runtime_root = Path(settings.CTF_RUN_DIR).expanduser().resolve()
+    runtime_root.mkdir(parents=True, exist_ok=True)
+    workspace = Path(tempfile.mkdtemp(prefix="agent_v2_", dir=runtime_root))
+    network_mode = "allowlist" if payload.authorized and payload.allowed_hosts else "deny"
+    request = RunRequest(
+        task_id=payload.task_id,
+        title=payload.title,
+        objective=payload.objective,
+        workspace=str(workspace),
+        scenario=payload.scenario,
+        authorization={
+            "authorized": payload.authorized,
+            "allow_process": payload.allow_process,
+            "allow_private_network": payload.allow_private_network,
+        },
+        network_policy=NetworkPolicy(
+            mode=network_mode,
+            allowed_hosts=tuple(payload.allowed_hosts),
+            allowed_ports=tuple(payload.allowed_ports),
+        ),
+        budgets=BudgetLimits(
+            max_seconds=payload.max_seconds,
+            max_model_requests=payload.max_model_requests,
+            max_tool_calls=payload.max_tool_calls,
+        ),
+        model_config=ModelConfig(provider=settings.LLM_PROVIDER, model=settings.LLM_MODEL),
+    )
+    event_store = AppendOnlyEventStore(workspace / ".agent_state" / "events.jsonl")
+    checkpoint_store = CheckpointStore(workspace / ".agent_state" / "checkpoints")
+    skill_index = SkillIndex.scan(Path(__file__).resolve().parents[1] / "skills")
+    skill_loader = SkillLoader(skill_index)
+    session = AgentSession(
+        request,
+        provider=_provider(),
+        validator=scenario.validator(),
+        events=event_store,
+        checkpoint_store=checkpoint_store,
+        sandbox=ContainerSandbox(
+            workspace,
+            runtime=settings.AGENT_SANDBOX_RUNTIME or None,
+            image=settings.AGENT_SANDBOX_IMAGE,
+        ),
+        skill_index=skill_index,
+        skill_loader=skill_loader,
+    )
+    RunMetadataStore.for_workspace(workspace).save(
+        session.run_id,
+        request,
+        scenario_config={"flag_pattern": payload.flag_pattern, "evaluator_ref": "none"},
+    )
+    run_manager.add(session)
+    return {
+        "run_id": session.run_id,
+        "status": session.state.status.value,
+        "scenario": payload.scenario,
+        "workspace": str(workspace),
+        "release_ready": session.sandbox.release_capable,
+        "release_blocker": (
+            "container runtime or preloaded sandbox image unavailable"
+            if not session.sandbox.release_capable
+            else ""
+        ),
+    }
+
+
+def _session_or_404(run_id: str) -> AgentSession:
+    session = run_manager.get(run_id)
+    if session is None:
+        raise HTTPException(404, f"run not found: {run_id}")
+    return session
+
+
+@router.post("/{run_id}/start")
+def start_agent_run(run_id: str):
+    _session_or_404(run_id)
+    started = run_manager.start(run_id)
+    return {"run_id": run_id, "started": started, "status": run_manager.state(run_id).status.value}
+
+
+@router.post("/{run_id}/stop")
+def stop_agent_run(run_id: str):
+    _session_or_404(run_id)
+    changed = run_manager.abort(run_id)
+    return {"run_id": run_id, "abort_requested": changed}
+
+
+@router.get("/{run_id}")
+def get_agent_run(run_id: str):
+    session = _session_or_404(run_id)
+    return {**session.state.to_dict(), "is_running": run_manager.is_running(run_id)}
+
+
+@router.get("/{run_id}/events")
+def get_agent_events(run_id: str, after_sequence: int = Query(default=0, ge=0)):
+    session = _session_or_404(run_id)
+    events = session.event_stream(after_sequence=after_sequence)
+    return {
+        "run_id": run_id,
+        "after_sequence": after_sequence,
+        "last_sequence": events[-1].sequence if events else after_sequence,
+        "events": [event.to_dict() for event in events],
+    }
+
+
+@router.get("/{run_id}/projection")
+def get_agent_projection(run_id: str):
+    session = _session_or_404(run_id)
+    projection = LegacyTaskProjection(run_id)
+    projection.consume(session.event_stream())
+    return projection.to_dict()

@@ -1,4 +1,7 @@
 from pathlib import Path
+
+
+DEFAULT_RUNTIME_ROOT = Path.home() / ".local" / "state" / "zhulongx"
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -16,7 +19,8 @@ class Settings(BaseSettings):
     UPLOAD_DIR: str = "./app/storage/uploads"
     REPORT_DIR: str = "./app/storage/reports"
     CTF_DEMO_DIR: str = "./examples/ctf_demo"
-    CTF_RUN_DIR: str = "./data/ctf_runs"
+    # Run workspaces must live outside the source tree by default.
+    CTF_RUN_DIR: str = str(DEFAULT_RUNTIME_ROOT / "ctf_runs")
     CTF_MAX_ROUNDS: int = 0           # v7: 0=无限，仅受 max_time_sec 限制
     CTF_MAX_TIME_SEC: int = 600       # v7: 最大运行时间(秒)
     CTF_SANDBOX_TIMEOUT: int = 15
@@ -65,17 +69,21 @@ class Settings(BaseSettings):
     LLM_FALLBACK_MODEL: str = "qwen-coder-plus"
     LLM_FALLBACK_API_KEY: str = "replace_me"
 
-    # ===== Claude Code Bridge Runtime =====
-    # 主编排优先交给 vendored / external Claude Code；不可用时可回退内部 AgentRuntime。
-    CC_RUNTIME_ENABLED: bool = True
+    # ===== Legacy Claude Code Bridge Runtime =====
+    # Compatibility use must be explicit and cannot silently change runtimes.
+    CC_RUNTIME_ENABLED: bool = False
     CC_RUNTIME_REQUIRE_EXTERNAL: bool = False
-    CC_RUNTIME_FALLBACK_INTERNAL: bool = True
+    CC_RUNTIME_FALLBACK_INTERNAL: bool = False
     CC_RUNTIME_BIN: str = ""
     CC_RUNTIME_COMMAND_TEMPLATE: str = ""
     CC_RUNTIME_VENDOR_DIR: str = "./vendor/claude-code"
     CC_RUNTIME_TIMEOUT: int = 600
     CC_RUNTIME_MAX_OUTPUT_CHARS: int = 120000
     CC_RUNTIME_SKIP_PERMISSIONS: bool = False
+
+    # ===== Agent Engine v2 container sandbox =====
+    AGENT_SANDBOX_RUNTIME: str = ""
+    AGENT_SANDBOX_IMAGE: str = "python:3.11-slim"
 
     # ===== WQ (万青/晚晴) Gateway 统一 API Key =====
     # 当设置了 WQ_API_KEY 环境变量时，自动覆盖所有 lane 的 API_KEY
