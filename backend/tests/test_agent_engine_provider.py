@@ -5,7 +5,10 @@ import pytest
 
 from app.agent_engine.abort import AbortToken, RunAborted
 from app.agent_engine.providers.base import ProviderError
+from app.agent_engine.providers.factory import configured_provider
 from app.agent_engine.providers.openai_compatible import OpenAICompatibleProvider
+from app.agent_engine.state import ModelConfig
+from app.config import settings
 
 
 def test_openai_provider_parses_native_tool_calls_and_usage():
@@ -114,3 +117,29 @@ def test_openai_provider_honors_preexisting_abort():
 
     with pytest.raises(RunAborted, match="stop now"):
         provider.complete([], [], timeout_seconds=5, abort_token=token)
+
+
+def test_configured_provider_rejects_untrusted_per_run_base_url(monkeypatch):
+    monkeypatch.setattr(settings, "LLM_ENABLED", True)
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "openai_compatible")
+    monkeypatch.setattr(settings, "LLM_BASE_URL", "https://gateway.example/v1")
+    monkeypatch.setattr(settings, "LLM_MODEL", "configured-model")
+    monkeypatch.setattr(settings, "LLM_API_KEY", "configured-secret")
+
+    with pytest.raises(ValueError, match="base URL is not allowed"):
+        configured_provider(ModelConfig(
+            provider="openai_compatible",
+            model="requested-model",
+            base_url="https://untrusted.example/v1",
+        ))
+
+
+def test_configured_provider_fails_visibly_when_profile_key_is_missing(monkeypatch):
+    monkeypatch.setattr(settings, "LLM_ENABLED", True)
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "openai_compatible")
+    monkeypatch.setattr(settings, "LLM_BASE_URL", "https://gateway.example/v1")
+    monkeypatch.setattr(settings, "LLM_MODEL", "configured-model")
+    monkeypatch.setattr(settings, "LLM_API_KEY", "replace_me")
+
+    with pytest.raises(ValueError, match="no configured API key"):
+        configured_provider(ModelConfig(provider="openai_compatible", model="requested-model"))

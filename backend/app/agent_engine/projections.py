@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 from app.agent_engine.events import AgentEvent, EventType
+from app.agent_engine.reducer import StateReducer
 
 
 @dataclass
@@ -86,15 +87,27 @@ class LegacyTaskProjection:
                     "status": "detected",
                     "evidence_event_ids": list(event.payload.get("evidence_event_ids", [])),
                 })
-        elif event.type in {EventType.CANDIDATE_VALIDATED.value, EventType.CANDIDATE_REJECTED.value}:
+        elif event.type in {
+            EventType.CANDIDATE_VALIDATED.value,
+            EventType.CANDIDATE_REJECTED.value,
+            EventType.CANDIDATE_PENDING_EXTERNAL.value,
+            EventType.CANDIDATE_EXTERNALLY_ACCEPTED.value,
+            EventType.CANDIDATE_EXTERNALLY_REJECTED.value,
+        }:
             value = str(event.payload.get("candidate", ""))
-            status = "validated" if event.type == EventType.CANDIDATE_VALIDATED.value else "rejected"
+            status = {
+                EventType.CANDIDATE_VALIDATED.value: "validated",
+                EventType.CANDIDATE_REJECTED.value: "rejected",
+                EventType.CANDIDATE_PENDING_EXTERNAL.value: "pending_external",
+                EventType.CANDIDATE_EXTERNALLY_ACCEPTED.value: "accepted",
+                EventType.CANDIDATE_EXTERNALLY_REJECTED.value: "rejected",
+            }[event.type]
             for item in self.candidate_flags:
                 if item["flag"] == value:
                     item["status"] = status
                     item["validation"] = event.payload.get("reason", "")
                     break
-            if status == "validated":
+            if status in {"validated", "accepted"}:
                 self.best_flag = value
                 for item in self.candidate_flags:
                     if item["flag"] == value:
@@ -123,4 +136,60 @@ class LegacyTaskProjection:
             "candidate_flags": self.candidate_flags,
             "best_flag": self.best_flag,
             "current_script": self.current_script,
+        }
+
+
+@dataclass
+class CanonicalRunProjection:
+    run_id: str
+    objective: str
+    after_sequence: int = 0
+    source: list[AgentEvent] = field(default_factory=list)
+
+    def consume(self, events: Iterable[AgentEvent]) -> int:
+        for event in sorted(events, key=lambda item: item.sequence):
+            if event.run_id != self.run_id or event.sequence <= self.after_sequence:
+                continue
+            self.source.append(event)
+            self.after_sequence = event.sequence
+        return self.after_sequence
+
+    def to_dict(self) -> dict[str, Any]:
+        state = StateReducer().replay(self.run_id, self.objective, self.source)
+        verification = [
+            event.to_dict() for event in self.source
+            if event.type in {
+                EventType.VALIDATION_REQUESTED.value,
+                EventType.VALIDATION_COMPLETED.value,
+                EventType.CANDIDATE_VALIDATED.value,
+                EventType.CANDIDATE_REJECTED.value,
+                EventType.CANDIDATE_PENDING_EXTERNAL.value,
+            }
+        ]
+        tool_activity = [
+            event.to_dict() for event in self.source
+            if event.type.startswith("tool.") or event.type.startswith("policy.")
+        ]
+        return {
+            "run_id": self.run_id,
+            "state": state.status.value,
+            "after_sequence": self.after_sequence,
+            "plan": state.current_plan,
+            "plan_history": state.plan_history,
+            "tasks": state.tasks,
+            "agent_lanes": state.agents,
+            "facts": state.confirmed_facts,
+            "open_hypotheses": state.open_hypotheses,
+            "failed_hypotheses": state.failed_hypotheses,
+            "evidence": state.evidence,
+            "artifacts": state.artifacts,
+            "contradictions": state.contradictions,
+            "decisions": state.decisions,
+            "candidate_answers": state.candidate_answers,
+            "verification": verification,
+            "tool_activity": tool_activity,
+            "budget": state.budget_usage,
+            "human_handoff": state.human_handoff,
+            "final_output": state.final_output,
+            "error": state.error,
         }

@@ -40,8 +40,8 @@ from app.scenarios.ctf.service import ctf_session_service
 
 router = APIRouter(prefix="/ctf", tags=["ctf"])
 
-# The retired direct-call orchestrator imports this symbol. V2 endpoints never
-# use it; keeping it here prevents compatibility tests from coupling to v2.
+# The retired direct-call orchestrator imports this symbol. Formal endpoints never
+# use it; keeping it here prevents compatibility tests from coupling to v3.
 _cancel_events: Dict[str, threading.Event] = {}
 
 # ---------- schemas ----------
@@ -161,7 +161,7 @@ def create_task(payload: TaskCreateIn):
         max_time_sec=payload.max_time_sec,
         source="api",
     )
-    return {"task_id": task["task_id"], "state": task["state"], "engine": "v2"}
+    return {"task_id": task["task_id"], "state": task["state"], "engine": "v3"}
 
 
 @router.get("/tasks")
@@ -239,7 +239,7 @@ def stop_task(task_id: str):
 
 @router.get("/tasks/{task_id}/events")
 def get_events(task_id: str, after_sequence: int = Query(default=0, ge=0)):
-    """Canonical v2 events with a reconnect cursor and compatibility projections."""
+    """Canonical v3 events with a reconnect cursor and compatibility projections."""
     try:
         return ctf_session_service.events(task_id, after_sequence=after_sequence)
     except KeyError:

@@ -1,4 +1,4 @@
-"""ZHULONG-X v2 single-session agent engine."""
+"""ZHULONG-X Agent Engine v3."""
 
 from app.agent_engine.session import AgentSession
 from app.agent_engine.state import RunRequest, RunStatus, SessionState

@@ -1,22 +1,20 @@
 from __future__ import annotations
 
 import tempfile
+import json
+import shutil
+import time
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.agent_engine.budget import BudgetLimits
-from app.agent_engine.checkpoint import CheckpointStore
-from app.agent_engine.events import AppendOnlyEventStore
 from app.agent_engine.manager import run_manager
-from app.agent_engine.projections import LegacyTaskProjection
-from app.agent_engine.providers.factory import configured_provider
-from app.agent_engine.run_store import RunMetadataStore
-from app.agent_engine.sandbox.container import ContainerSandbox
+from app.agent_engine.projections import CanonicalRunProjection
+from app.agent_engine.service import agent_run_service
 from app.agent_engine.session import AgentSession
-from app.agent_engine.skills.index import SkillIndex
-from app.agent_engine.skills.loader import SkillLoader
 from app.agent_engine.state import ModelConfig, NetworkPolicy, RunRequest
 from app.config import settings
 from app.scenarios import CTFScenario, default_scenarios
@@ -61,10 +59,6 @@ class ExternalValidationRequest(BaseModel):
     resume_on_rejection: bool = True
 
 
-def _provider(config: ModelConfig):
-    return configured_provider(config)
-
-
 @router.post("")
 def create_agent_run(payload: AgentRunCreate):
     scenarios = default_scenarios()
@@ -76,7 +70,7 @@ def create_agent_run(payload: AgentRunCreate):
         scenario = CTFScenario(flag_pattern=payload.flag_pattern)
     runtime_root = Path(settings.CTF_RUN_DIR).expanduser().resolve()
     runtime_root.mkdir(parents=True, exist_ok=True)
-    workspace = Path(tempfile.mkdtemp(prefix="agent_v2_", dir=runtime_root))
+    workspace = Path(tempfile.mkdtemp(prefix="agent_v3_", dir=runtime_root))
     network_mode = "allowlist" if payload.authorized and payload.allowed_hosts else "deny"
     request = RunRequest(
         task_id=payload.task_id,
@@ -110,30 +104,15 @@ def create_agent_run(payload: AgentRunCreate):
             parallel_tool_calls=payload.parallel_tool_calls,
         ),
     )
-    event_store = AppendOnlyEventStore(workspace / ".agent_state" / "events.jsonl")
-    checkpoint_store = CheckpointStore(workspace / ".agent_state" / "checkpoints")
-    skill_index = SkillIndex.scan(Path(__file__).resolve().parents[1] / "skills")
-    skill_loader = SkillLoader(skill_index)
-    session = AgentSession(
-        request,
-        provider=_provider(request.model_config),
-        validator=scenario.validator(),
-        events=event_store,
-        checkpoint_store=checkpoint_store,
-        sandbox=ContainerSandbox(
-            workspace,
-            runtime=settings.AGENT_SANDBOX_RUNTIME or None,
-            image=settings.AGENT_SANDBOX_IMAGE,
-        ),
-        skill_index=skill_index,
-        skill_loader=skill_loader,
-    )
-    RunMetadataStore.for_workspace(workspace).save(
-        session.run_id,
-        request,
-        scenario_config={"flag_pattern": payload.flag_pattern, "evaluator_ref": "none"},
-    )
-    run_manager.add(session)
+    try:
+        session = agent_run_service.create_session(
+            request,
+            scenario.validator(),
+            scenario_config={"flag_pattern": payload.flag_pattern, "evaluator_ref": "none"},
+        )
+    except ValueError as exc:
+        shutil.rmtree(workspace, ignore_errors=True)
+        raise HTTPException(400, str(exc)) from exc
     return {
         "run_id": session.run_id,
         "status": session.state.status.value,
@@ -214,9 +193,52 @@ def get_agent_events(run_id: str, after_sequence: int = Query(default=0, ge=0)):
     }
 
 
+@router.get("/{run_id}/events/stream")
+def stream_agent_events(run_id: str, after_sequence: int = Query(default=0, ge=0)):
+    session = _session_or_404(run_id)
+
+    def generate():
+        cursor = after_sequence
+        while True:
+            events = session.event_stream(after_sequence=cursor)
+            for event in events:
+                cursor = event.sequence
+                yield f"id: {event.sequence}\nevent: {event.type}\ndata: {json.dumps(event.to_dict(), ensure_ascii=False)}\n\n"
+            if not run_manager.is_running(run_id) and cursor >= session.state.last_event_sequence:
+                yield f"event: stream.closed\ndata: {json.dumps({'run_id': run_id, 'last_sequence': cursor})}\n\n"
+                break
+            time.sleep(0.5)
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+
 @router.get("/{run_id}/projection")
 def get_agent_projection(run_id: str):
     session = _session_or_404(run_id)
-    projection = LegacyTaskProjection(run_id)
+    projection = CanonicalRunProjection(run_id, session.request.objective)
     projection.consume(session.event_stream())
     return projection.to_dict()
+
+
+@router.get("/{run_id}/workflow")
+def get_agent_workflow(run_id: str):
+    session = _session_or_404(run_id)
+    scenario = default_scenarios().get(session.request.scenario)
+    return {
+        "run_id": run_id,
+        "scenario": scenario.manifest().to_dict(),
+        "plan": scenario.build_plan(session.request.objective).to_dict(),
+        "workflow": scenario.workflow(session.request.objective).to_dict(),
+    }
+
+
+@router.get("/{run_id}/audit")
+def get_agent_audit(run_id: str):
+    session = _session_or_404(run_id)
+    projection = CanonicalRunProjection(run_id, session.request.objective)
+    projection.consume(session.event_stream())
+    return {
+        "schema_version": 1,
+        "run": projection.to_dict(),
+        "events": [event.to_dict() for event in session.event_stream()],
+    }

@@ -28,7 +28,7 @@ _TYPES = {
 
 
 def validate_arguments(schema: Mapping[str, Any], value: Any) -> None:
-    """Validate the JSON Schema subset used by registered v2 tools."""
+    """Validate the JSON Schema subset used by registered v3 tools."""
 
     issues: list[SchemaIssue] = []
     _validate(schema, value, "$", issues)

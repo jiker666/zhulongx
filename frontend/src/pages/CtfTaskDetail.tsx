@@ -13,12 +13,18 @@ import {
   ctfSolveTask,
   ctfStopTask,
   ctfUploadAttachment,
+  answerAgentRun,
+  getAgentRunAudit,
+  getAgentRunProjection,
+  validateAgentRunExternally,
+  type AgentRunProjection,
   type BlackboardSnapshot,
   type CtfTask,
   type TaskCostSummary,
 } from '../api'
 import {
   AgentDecisionTrace,
+  AgentRunOverview,
   FlagCandidateStack,
   ReasoningTimeline,
   RetryReflectionCard,
@@ -95,6 +101,8 @@ export default function CtfTaskDetail() {
   const [hintError, setHintError] = useState<string | null>(null)
   const [liveEvents, setLiveEvents] = useState<AgentLiveEvent[]>([])
   const [streamConnected, setStreamConnected] = useState(false)
+  const [agentProjection, setAgentProjection] = useState<AgentRunProjection | null>(null)
+  const [agentRefreshing, setAgentRefreshing] = useState(false)
 
   const fileInputRef = useRef<HTMLInputElement>(null)
   const liveLogRef = useRef<HTMLDivElement>(null)
@@ -115,6 +123,13 @@ export default function CtfTaskDetail() {
         setTask(next)
         setLiveEvents(next.evidence.slice(-200).map((event) => toLiveEvent(event, taskId)))
         setStreamConnected(true)
+        if (next.agent_run_id) {
+          getAgentRunProjection(next.agent_run_id)
+            .then((projection) => setAgentProjection(projection.data))
+            .catch(() => setAgentProjection(null))
+        } else {
+          setAgentProjection(null)
+        }
       })
       .catch((e) => setError(e?.response?.data?.detail || e.message || '无法加载任务'))
       .finally(() => {
@@ -159,13 +174,18 @@ export default function CtfTaskDetail() {
             current_script: data.current_script,
           })
         })
+        if (task?.agent_run_id) {
+          getAgentRunProjection(task.agent_run_id)
+            .then((projection) => setAgentProjection(projection.data))
+            .catch(() => undefined)
+        }
       })
       .catch(() => setStreamConnected(false))
       .finally(() => { pollingRef.current = false })
-  }, [taskId])
+  }, [taskId, task?.agent_run_id])
 
   useEffect(() => {
-    if (!task || ['DONE', 'FAILED', 'HUMAN_REQUIRED'].includes(task.state)) return
+    if (!task || ['DONE', 'FAILED', 'HUMAN_REQUIRED', 'PENDING_EXTERNAL'].includes(task.state)) return
     pollEvents()
     const timer = setInterval(pollEvents, 1000)
     return () => clearInterval(timer)
@@ -228,11 +248,51 @@ export default function CtfTaskDetail() {
       })
   }
 
+  const refreshAgentProjection = () => {
+    if (!task?.agent_run_id) return
+    setAgentRefreshing(true)
+    getAgentRunProjection(task.agent_run_id)
+      .then((response) => setAgentProjection(response.data))
+      .catch(() => undefined)
+      .finally(() => setAgentRefreshing(false))
+  }
+
+  const handleHumanAnswer = async (answer: string) => {
+    if (!task?.agent_run_id) return
+    await answerAgentRun(task.agent_run_id, { answer })
+    refreshAgentProjection()
+    setTimeout(refresh, 200)
+  }
+
+  const handleExternalValidation = async (accepted: boolean) => {
+    if (!task?.agent_run_id) return
+    await validateAgentRunExternally(
+      task.agent_run_id,
+      accepted,
+      accepted ? 'external judge accepted candidate' : 'external judge rejected candidate',
+    )
+    refreshAgentProjection()
+    setTimeout(refresh, 200)
+  }
+
+  const handleAudit = () => {
+    if (!task?.agent_run_id) return
+    getAgentRunAudit(task.agent_run_id).then((response) => {
+      const blob = new Blob([JSON.stringify(response.data, null, 2)], { type: 'application/json' })
+      const url = URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      anchor.href = url
+      anchor.download = `${task.task_id}-agent-audit.json`
+      anchor.click()
+      URL.revokeObjectURL(url)
+    })
+  }
+
   if (loading) return <div className="mx-auto max-w-[1500px] p-6"><LoadingState message="加载单题推理驾驶舱" /></div>
   if (error && !task) return <div className="mx-auto max-w-[1500px] p-6"><ErrorState title="作战中枢暂时离线" detail={error} onRetry={refresh} /></div>
   if (!task) return <div className="mx-auto max-w-[1500px] p-6"><DataEmpty title="任务不存在" description="该任务可能已被删除，或后端暂时不可用。" /></div>
 
-  const canSolve = !task.is_running && task.state !== 'DONE'
+  const canSolve = !task.is_running && !['DONE', 'PENDING_EXTERNAL'].includes(task.state)
   const canStop = task.is_running && !['DONE', 'FAILED', 'HUMAN_REQUIRED'].includes(task.state)
   const stateTone = toneForState(task.is_running ? 'RUNNING' : task.state)
   const latestRun = task.script_runs[task.script_runs.length - 1]
@@ -255,9 +315,6 @@ export default function CtfTaskDetail() {
               <div className="min-w-0">
                 <h1 className="text-2xl font-black text-white md:text-4xl">{task.title}</h1>
                 <p className="mt-2 break-all font-mono text-xs text-slate-500">ID: {task.task_id}</p>
-                <p className="mt-3 max-w-4xl text-sm leading-6 text-slate-300">
-                  单题驾驶舱把题面、计划、实时推理、沙箱输出、证据、候选 flag 和人工提示放在同一视野中，方便复核每一步为什么可信。
-                </p>
               </div>
             </div>
           </div>
@@ -312,7 +369,18 @@ export default function CtfTaskDetail() {
 
       <RetryReflectionCard task={task} />
 
-      <div className="grid gap-6 xl:grid-cols-[320px_minmax(0,1fr)_380px]">
+      {agentProjection && (
+        <AgentRunOverview
+          projection={agentProjection}
+          refreshing={agentRefreshing}
+          onRefresh={refreshAgentProjection}
+          onHumanAnswer={handleHumanAnswer}
+          onExternalValidation={handleExternalValidation}
+          onAudit={handleAudit}
+        />
+      )}
+
+      <div className="grid grid-cols-[minmax(0,1fr)] gap-6 xl:grid-cols-[320px_minmax(0,1fr)_380px]">
         <TaskContextPanel
           task={task}
           canUpload={canSolve}

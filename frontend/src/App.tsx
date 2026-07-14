@@ -51,7 +51,7 @@ export default function App() {
       <div className="flex min-h-screen text-slate-100">
         <ObsidianBackground />
         <Sidebar />
-        <main id="main-content" tabIndex={-1} className="relative z-10 flex-1 md:ml-64 min-h-screen p-4 md:p-6 lg:p-8">
+        <main id="main-content" tabIndex={-1} className="relative z-10 min-w-0 flex-1 md:ml-64 min-h-screen p-4 md:p-6 lg:p-8">
           <ErrorBoundary>
             <Routes>
               <Route path="/" element={<Dashboard />} />

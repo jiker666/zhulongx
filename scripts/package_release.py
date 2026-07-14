@@ -18,6 +18,7 @@ EXCLUDED_DIRS = {
     ".git", ".agents", ".claude", ".codex", ".skills",
     "node_modules", "__pycache__", ".pytest_cache", "dist", "backups",
     "ctf_runs", "vendor", "data",
+    ".agent_state", ".agent_subagents", ".agent_artifacts",
 }
 EXCLUDED_NAMES = {".DS_Store", ".env"}
 EXCLUDED_SUFFIXES = {".pyc"}
@@ -33,6 +34,9 @@ FORBIDDEN_ZIP_PARTS = {
     "vendor",
     ".skills",
     "data",
+    ".agent_state",
+    ".agent_subagents",
+    ".agent_artifacts",
 }
 REQUIRED = [
     "README.md",
@@ -54,6 +58,10 @@ def excluded(path: Path) -> bool:
     if any(part in EXCLUDED_DIRS or part == "__MACOSX" for part in parts):
         return True
     if "evaluator" in parts:
+        return True
+    if parts[:2] == ("ctf_cases", "generated"):
+        return True
+    if parts[:2] in {("benchmarks", "hidden"), ("benchmarks", "results")}:
         return True
     if path.name in EXCLUDED_NAMES:
         return True

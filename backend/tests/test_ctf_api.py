@@ -76,7 +76,7 @@ def test_create_task(client):
     data = r.json()
     assert "task_id" in data
     assert data["state"] == "INIT"
-    assert data["engine"] == "v2"
+    assert data["engine"] == "v3"
 
 
 def test_list_tasks(client):
@@ -142,7 +142,7 @@ print(bytes(value ^ 0x5A for value in data).decode())
     assert r.json()["best_flag"] == "flag{xor_crypto_is_simple_but_classic}"
     assert data["agent_status"] == "succeeded"
     assert "expected_flag" not in data
-    assert r.json()["engine"] == "v2"
+    assert r.json()["engine"] == "v3"
 
     events = client.get(f"/api/ctf/tasks/{tid}/events?after_sequence=0").json()
     assert events["events"][-1]["type"] == "run.succeeded"

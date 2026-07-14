@@ -46,7 +46,7 @@ def _cleanup_ghost_tasks():
         db = SessionLocal()
         ghosts = db.query(CtfTaskModel).filter(
             CtfTaskModel.is_running == True,
-            (CtfTaskModel.engine != "v2") | (CtfTaskModel.engine.is_(None)),
+            CtfTaskModel.engine.notin_(("v2", "v3")) | (CtfTaskModel.engine.is_(None)),
         ).all()
         for g in ghosts:
             g.is_running = False

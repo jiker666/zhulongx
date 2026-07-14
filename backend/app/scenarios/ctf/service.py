@@ -12,12 +12,10 @@ from app.agent_engine.manager import run_manager
 from app.agent_engine.projections import LegacyTaskProjection
 from app.agent_engine.providers.base import ModelProvider
 from app.agent_engine.providers.factory import configured_provider
-from app.agent_engine.run_store import RunMetadataStore
+from app.agent_engine.service import agent_run_service
 from app.agent_engine.sandbox.base import Sandbox
 from app.agent_engine.sandbox.container import ContainerSandbox
 from app.agent_engine.session import AgentSession
-from app.agent_engine.skills.index import SkillIndex
-from app.agent_engine.skills.loader import SkillLoader
 from app.agent_engine.state import ModelConfig
 from app.config import settings
 from app.core.ctf_persistence import get_expected_flag, list_tasks_view, load_task_view, save_task
@@ -43,6 +41,7 @@ class CTFSessionService:
         "timed_out": "HUMAN_REQUIRED",
         "cancelled": "HUMAN_REQUIRED",
         "human_required": "HUMAN_REQUIRED",
+        "pending_external": "PENDING_EXTERNAL",
     }
 
     def __init__(
@@ -90,7 +89,7 @@ class CTFSessionService:
             "source": source,
             "demo_id": demo_id,
             "expected_flag": expected_flag,
-            "engine": "v2",
+            "engine": "v3",
         }
         save_task(task)
         return self.get_task(task_id)
@@ -192,8 +191,6 @@ class CTFSessionService:
         )
         event_store = AppendOnlyEventStore(workspace / ".agent_state" / "events.jsonl")
         checkpoint_store = CheckpointStore(workspace / ".agent_state" / "checkpoints")
-        skill_index = SkillIndex.scan(Path(__file__).resolve().parents[2] / "skills")
-        skill_loader = SkillLoader(skill_index)
         expected = get_expected_flag(str(task["task_id"])) if task.get("source") == "demo" else None
         evaluator = (lambda candidate, answer=expected: hmac.compare_digest(candidate, answer)) if expected else None
         validator = CTFScenario(
@@ -212,44 +209,24 @@ class CTFSessionService:
             )
         )
         provider = self.provider_factory() if self.provider_factory is not None else build_provider(request.model_config)
-        if checkpoint_store.exists(run_id):
-            session = AgentSession.resume(
-                request,
-                run_id=run_id,
-                provider=provider,
-                validator=validator,
-                events=event_store,
-                checkpoint_store=checkpoint_store,
-                sandbox=sandbox,
-                skill_index=skill_index,
-                skill_loader=skill_loader,
-            )
-        else:
-            session = AgentSession(
-                request,
-                run_id=run_id,
-                provider=provider,
-                validator=validator,
-                events=event_store,
-                checkpoint_store=checkpoint_store,
-                sandbox=sandbox,
-                skill_index=skill_index,
-                skill_loader=skill_loader,
-            )
-        RunMetadataStore.for_workspace(workspace).save(
-            run_id,
+        session = agent_run_service.create_session(
             request,
+            validator,
+            run_id=run_id,
+            provider=provider,
+            sandbox=sandbox,
+            events=event_store,
+            checkpoint_store=checkpoint_store,
             scenario_config={
                 "flag_pattern": str(task.get("flag_format") or r"flag\{[^}]+\}"),
                 "evaluator_ref": "ctf_task_expected" if expected else "none",
             },
         )
-        run_manager.add(session)
         save_task({
             **task,
             "agent_run_id": run_id,
             "agent_workspace": str(workspace),
-            "engine": "v2",
+            "engine": "v3",
         })
         return session
 

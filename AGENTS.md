@@ -2,16 +2,19 @@
 
 You are operating inside the ZHULONG-X CTF/security agent project.
 
-Primary goal: use Codex as the orchestration core instead of the older Python-only agent loop.
+Primary goal: evolve and operate Agent Engine v3 as the canonical native orchestration core.
 
 Important paths:
-- `backend/app/core/cc_bridge_runtime.py` — bridge runtime that invokes Codex CLI.
-- `backend/app/core/ctf_agent_orchestrator.py` — now prefers `CcBridgeRuntime` when `CC_RUNTIME_ENABLED=true`.
-- `backend/vendor/Codex/` — vendored user-provided unofficial Codex source tree.
-- `backend/scripts/cc-bridge-runner.sh` — helper wrapper after `vendor/Codex` is built.
+- `backend/app/agent_engine/session.py` — single-Agent lifecycle authority.
+- `backend/app/agent_engine/orchestration/` — Coordinator, subagents, workflow, replan, and verification.
+- `backend/app/agent_engine/service.py` — canonical session construction path for all formal APIs.
+- `backend/app/scenarios/` — five executable scenario manifests, plans, workflows, and validators.
+- `backend/app/core/cc_bridge_runtime.py` — explicit research compatibility only; never a formal API fallback.
 
 Safety and solve constraints:
 - Treat CTF solve workspaces as sandboxed task directories.
 - Do not leak API keys or `.env` values into reports.
 - Do not enable network unless the task is explicitly authorized and scoped.
 - Do not overwrite uploaded original attachments.
+- Keep formal API modules free of imports from the old orchestrator, old runtime, and bridge.
+- Label mock, offline, and live-model benchmark results separately.

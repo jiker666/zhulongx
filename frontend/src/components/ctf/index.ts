@@ -8,4 +8,5 @@ export { default as ReasoningTimeline, type AgentLiveEvent } from './ReasoningTi
 export { default as FlagCandidateStack } from './FlagCandidateStack'
 export { default as SandboxConsole } from './SandboxConsole'
 export { default as AgentDecisionTrace } from './AgentDecisionTrace'
+export { default as AgentRunOverview } from './AgentRunOverview'
 export { default as RetryReflectionCard } from './RetryReflectionCard'

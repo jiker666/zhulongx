@@ -69,8 +69,8 @@ class Settings(BaseSettings):
     LLM_FALLBACK_MODEL: str = "qwen-coder-plus"
     LLM_FALLBACK_API_KEY: str = "replace_me"
 
-    # ===== Legacy Claude Code Bridge Runtime =====
-    # Compatibility use must be explicit and cannot silently change runtimes.
+    # ===== Experimental bridge compatibility =====
+    # Formal APIs never read these options. Legacy research tests must opt in explicitly.
     CC_RUNTIME_ENABLED: bool = False
     CC_RUNTIME_REQUIRE_EXTERNAL: bool = False
     CC_RUNTIME_FALLBACK_INTERNAL: bool = False
@@ -81,7 +81,7 @@ class Settings(BaseSettings):
     CC_RUNTIME_MAX_OUTPUT_CHARS: int = 120000
     CC_RUNTIME_SKIP_PERMISSIONS: bool = False
 
-    # ===== Agent Engine v2 container sandbox =====
+    # ===== Agent Engine v3 container sandbox =====
     AGENT_SANDBOX_RUNTIME: str = ""
     AGENT_SANDBOX_IMAGE: str = "python:3.11-slim"
 

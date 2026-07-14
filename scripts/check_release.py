@@ -43,6 +43,13 @@ REQUIRED_DOCS = [
     "docs/refactor/01-target-architecture.md",
     "docs/refactor/02-migration-plan.md",
     "docs/refactor/03-secret-rotation.md",
+    "docs/refactor/05-agent-engine-v3-adr.md",
+    "docs/refactor/07-provider-tool-protocol.md",
+    "docs/refactor/08-scenario-workflows.md",
+    "docs/refactor/09-threat-model.md",
+    "docs/refactor/10-legacy-runtime-migration.md",
+    "docs/refactor/11-operator-guide.md",
+    "docs/refactor/12-verification-report.md",
     "docs/architecture_v3.md",
     "docs/security_boundary.md",
     "docs/developer_guide.md",
@@ -164,6 +171,35 @@ def check_docs() -> list[str]:
     return missing
 
 
+def check_runtime_authority() -> list[str]:
+    formal_files = list((ROOT / "backend" / "app" / "api").glob("*.py")) + [
+        ROOT / "backend" / "app" / "main.py",
+        ROOT / "backend" / "app" / "agent_engine" / "service.py",
+        ROOT / "backend" / "app" / "scenarios" / "ctf" / "service.py",
+    ]
+    forbidden = (
+        "app.core.ctf_agent_orchestrator",
+        "app.core.agent_runtime",
+        "app.core.cc_bridge_runtime",
+    )
+    findings: list[str] = []
+    for path in formal_files:
+        source = path.read_text(encoding="utf-8", errors="ignore")
+        for module in forbidden:
+            if module in source:
+                findings.append(f"formal runtime import in {path.relative_to(ROOT)}: {module}")
+    env_example = (ROOT / ".env.example").read_text(encoding="utf-8", errors="ignore")
+    if "CC_RUNTIME_ENABLED" in env_example:
+        findings.append(".env.example advertises experimental bridge selection")
+    if findings:
+        print("FAIL: 正式运行时权威检查失败:")
+        for item in findings:
+            print(f"  - {item}")
+    else:
+        print("OK: 正式 API 仅使用 Agent Engine v3，无旧运行时导入或默认桥接配置")
+    return findings
+
+
 def main() -> int:
     os.chdir(ROOT)
     failures: list[str] = []
@@ -171,6 +207,7 @@ def main() -> int:
     check_local_artifacts()
     failures.extend(check_secrets())
     failures.extend(check_docs())
+    failures.extend(check_runtime_authority())
     if failures:
         print(f"release check failed: {len(failures)} issue(s)")
         return 1

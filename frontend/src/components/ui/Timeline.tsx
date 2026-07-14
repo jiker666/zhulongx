@@ -25,7 +25,7 @@ export default function Timeline({ items, empty, className }: TimelineProps) {
       {items.map((item) => {
         const tone = toneClass[item.tone ?? 'slate']
         return (
-          <li key={item.id} className="relative grid grid-cols-[18px_1fr] gap-3">
+          <li key={item.id} className="relative grid grid-cols-[18px_minmax(0,1fr)] gap-3">
             <div className="flex flex-col items-center">
               <span className={cn('mt-1 h-2.5 w-2.5 rounded-full ring-4', tone.dot, tone.ring, item.active && 'animate-pulse')} />
               <span className="mt-2 h-full w-px bg-slate-700/60" aria-hidden="true" />

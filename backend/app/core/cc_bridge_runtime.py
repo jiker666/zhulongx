@@ -1,12 +1,11 @@
 """
-CC Bridge Runtime — use the vendored Claude Code agent as ZHULONG-X's primary
-CTF solve orchestrator.
+Experimental CC Bridge Runtime for explicit compatibility research only.
 
 This bridge intentionally keeps the public AgentRuntime surface used by
 CtfOrchestrator (turns / ledger / candidate_flags / best_flag / state / error),
 while delegating the solve loop to an external Claude Code CLI when available.
-If the CLI is not built or not configured, it can fall back to the original
-Python AgentRuntime so the project remains runnable in dev/CI.
+It is not imported by formal APIs. Compatibility fallback requires a dedicated
+opt-in flag and is disabled by default.
 """
 from __future__ import annotations
 
@@ -114,7 +113,7 @@ class CcBridgeRuntime:
 
     def run(self) -> str:
         self.started_at = time.time()
-        if not getattr(settings, "CC_RUNTIME_ENABLED", True):
+        if not getattr(settings, "CC_RUNTIME_ENABLED", False):
             return self._run_fallback("CC_RUNTIME_ENABLED=false")
 
         try:
@@ -366,7 +365,7 @@ class CcBridgeRuntime:
         )
 
     def _run_fallback(self, reason: str) -> str:
-        if not getattr(settings, "CC_RUNTIME_FALLBACK_INTERNAL", True) or self.fallback_runtime is None:
+        if not getattr(settings, "CC_RUNTIME_FALLBACK_INTERNAL", False) or self.fallback_runtime is None:
             self.state = "human_required"
             self.error = f"CC bridge 不可用，且未启用内部回退: {reason}"
             self._record_cli_turn(output="", error=self.error, success=False, duration_ms=0)

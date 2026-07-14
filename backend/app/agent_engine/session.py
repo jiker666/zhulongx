@@ -115,6 +115,8 @@ class AgentSession:
             EventType.CHECKPOINT_RESTORED,
             actor="agent_session",
             payload={"checkpoint_sequence": snapshot.event_offset},
+            agent_id="agent_root",
+            task_id=request.task_id,
         )
         session.reducer.apply(session.state, restored)
         return session

@@ -52,6 +52,7 @@ class AgentMailbox:
             EventType.MAILBOX_MESSAGE,
             actor=sender_id,
             agent_id=recipient_id,
+            task_id=str(payload.get("task_id") or "") or None,
             payload={"message": message.to_dict()},
         )
         return message
