@@ -22,6 +22,7 @@ class ValidationResult:
     level: str
     reason: str
     authoritative: bool = False
+    disposition: str = "rejected"
 
 
 class Validator(ABC):
@@ -73,4 +74,4 @@ class PredicateValidator(Validator):
             return ValidationResult(False, self.level, "offline evaluator rejected candidate", self.authoritative)
         if not self.authoritative:
             return ValidationResult(False, self.level, "non-authoritative validator cannot complete a run", False)
-        return ValidationResult(True, self.level, "offline evaluator accepted candidate", True)
+        return ValidationResult(True, self.level, "offline evaluator accepted candidate", True, "accepted")

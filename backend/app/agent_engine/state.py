@@ -15,6 +15,7 @@ class RunStatus(str, Enum):
     TIMED_OUT = "timed_out"
     CANCELLED = "cancelled"
     HUMAN_REQUIRED = "human_required"
+    PENDING_EXTERNAL = "pending_external"
 
 
 TERMINAL_STATUSES = {
@@ -24,6 +25,8 @@ TERMINAL_STATUSES = {
     RunStatus.CANCELLED,
     RunStatus.HUMAN_REQUIRED,
 }
+
+PAUSED_STATUSES = {RunStatus.HUMAN_REQUIRED, RunStatus.PENDING_EXTERNAL}
 
 
 @dataclass(frozen=True)
@@ -45,8 +48,16 @@ class NetworkPolicy:
 class ModelConfig:
     provider: str = "mock"
     model: str = "scripted"
+    gateway_profile: str = "default"
+    base_url: str = ""
     temperature: float = 0.0
     max_tokens: int = 4096
+    timeout_seconds: float = 60.0
+    parallel_tool_calls: bool = True
+    cheap_model: str = ""
+    expert_model: str = ""
+    reviewer_model: str = ""
+    degradation_policy: str = "fail_visible"
 
 
 @dataclass(frozen=True)
@@ -84,16 +95,24 @@ class SessionState:
     run_id: str
     objective: str
     status: RunStatus = RunStatus.CREATED
-    current_plan: list[str] = field(default_factory=list)
+    current_plan: dict[str, Any] = field(default_factory=dict)
+    plan_history: list[dict[str, Any]] = field(default_factory=list)
+    tasks: list[dict[str, Any]] = field(default_factory=list)
+    agents: list[dict[str, Any]] = field(default_factory=list)
     confirmed_facts: list[dict[str, Any]] = field(default_factory=list)
     open_hypotheses: list[dict[str, Any]] = field(default_factory=list)
     failed_hypotheses: list[dict[str, Any]] = field(default_factory=list)
+    evidence: list[dict[str, Any]] = field(default_factory=list)
+    contradictions: list[dict[str, Any]] = field(default_factory=list)
+    decisions: list[dict[str, Any]] = field(default_factory=list)
     artifacts: list[dict[str, Any]] = field(default_factory=list)
     important_tool_results: list[dict[str, Any]] = field(default_factory=list)
     candidate_answers: list[dict[str, Any]] = field(default_factory=list)
     budget_usage: dict[str, Any] = field(default_factory=dict)
     last_event_sequence: int = 0
     final_output: Optional[dict[str, Any]] = None
+    human_handoff: Optional[dict[str, Any]] = None
+    history_summary: dict[str, Any] = field(default_factory=dict)
     error: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -105,4 +124,14 @@ class SessionState:
     def from_dict(cls, raw: Mapping[str, Any]) -> "SessionState":
         values = dict(raw)
         values["status"] = RunStatus(values.get("status", RunStatus.CREATED.value))
+        if isinstance(values.get("current_plan"), list):
+            values["current_plan"] = {
+                "plan_id": "legacy",
+                "version": 1,
+                "goal": values.get("objective", ""),
+                "nodes": [
+                    {"task_id": f"legacy_{index}", "title": str(step), "status": "pending"}
+                    for index, step in enumerate(values["current_plan"])
+                ],
+            }
         return cls(**values)

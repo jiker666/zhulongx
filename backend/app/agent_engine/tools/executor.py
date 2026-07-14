@@ -43,6 +43,8 @@ class ToolExecutionService:
             actor="model",
             parent_event_id=parent_event_id,
             payload={"tool_call_id": call.id, "name": call.name, "arguments": dict(call.arguments)},
+            agent_id=context.agent_id,
+            task_id=context.request.task_id,
         )
         definition = self.registry.get(call.name)
         if definition is None:
@@ -60,6 +62,8 @@ class ToolExecutionService:
             actor="policy",
             parent_event_id=requested.event_id,
             payload={"tool_call_id": call.id, "name": call.name, "reason": decision.reason},
+            agent_id=context.agent_id,
+            task_id=context.request.task_id,
         )
         if not decision.allowed:
             return self._failure(call, context, decision_event.event_id, "policy_denied", decision.reason)
@@ -70,6 +74,8 @@ class ToolExecutionService:
             actor="tool_executor",
             parent_event_id=decision_event.event_id,
             payload={"tool_call_id": call.id, "name": call.name},
+            agent_id=context.agent_id,
+            task_id=context.request.task_id,
         )
         began = time.monotonic()
         try:
@@ -96,6 +102,8 @@ class ToolExecutionService:
                 "metadata": dict(result.metadata),
                 "duration_ms": duration_ms,
             },
+            agent_id=context.agent_id,
+            task_id=context.request.task_id,
         )
         return ToolExecution(result, result_event)
 
@@ -120,6 +128,8 @@ class ToolExecutionService:
                 "error": message,
                 "metadata": {"code": code},
             },
+            agent_id=context.agent_id,
+            task_id=context.request.task_id,
         )
         return ToolExecution(result, event)
 

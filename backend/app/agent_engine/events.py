@@ -16,19 +16,54 @@ class EventType(str, Enum):
     RUN_STARTED = "run.started"
     MODEL_REQUESTED = "model.requested"
     MODEL_RESPONDED = "model.responded"
+    PLAN_PROPOSED = "plan.proposed"
+    PLAN_ACCEPTED = "plan.accepted"
+    PLAN_NODE_STARTED = "plan.node_started"
+    PLAN_NODE_BLOCKED = "plan.node_blocked"
+    PLAN_REVISED = "plan.revised"
+    PLAN_COMPLETED = "plan.completed"
+    TASK_SCHEDULED = "task.scheduled"
+    TASK_STARTED = "task.started"
+    TASK_BLOCKED = "task.blocked"
+    TASK_COMPLETED = "task.completed"
+    AGENT_SPAWNED = "agent.spawned"
+    AGENT_RESUMED = "agent.resumed"
+    AGENT_CANCELLED = "agent.cancelled"
+    AGENT_COMPLETED = "agent.completed"
+    MAILBOX_MESSAGE = "mailbox.message"
     TOOL_REQUESTED = "tool.requested"
     POLICY_ALLOWED = "policy.allowed"
     POLICY_DENIED = "policy.denied"
     TOOL_STARTED = "tool.started"
     TOOL_FINISHED = "tool.finished"
     TOOL_FAILED = "tool.failed"
+    FACT_CONFIRMED = "fact.confirmed"
+    FACT_RETRACTED = "fact.retracted"
+    HYPOTHESIS_PROPOSED = "hypothesis.proposed"
+    HYPOTHESIS_CONFIRMED = "hypothesis.confirmed"
+    HYPOTHESIS_REFUTED = "hypothesis.refuted"
+    EVIDENCE_RECORDED = "evidence.recorded"
+    CONTRADICTION_RECORDED = "contradiction.recorded"
+    DECISION_RECORDED = "decision.recorded"
+    ARTIFACT_INGESTED = "artifact.ingested"
     SKILL_LOADED = "skill.loaded"
     STATE_UPDATED = "state.updated"
+    CONTEXT_COMPACTED = "context.compacted"
     CHECKPOINT_SAVED = "checkpoint.saved"
+    CHECKPOINT_RESTORED = "checkpoint.restored"
     CANDIDATE_DETECTED = "candidate.detected"
     CANDIDATE_VALIDATED = "candidate.validated"
     CANDIDATE_REJECTED = "candidate.rejected"
+    CANDIDATE_PENDING_EXTERNAL = "candidate.pending_external"
+    CANDIDATE_EXTERNALLY_ACCEPTED = "candidate.externally_accepted"
+    CANDIDATE_EXTERNALLY_REJECTED = "candidate.externally_rejected"
+    VALIDATION_REQUESTED = "validation.requested"
+    VALIDATION_COMPLETED = "validation.completed"
+    BUDGET_WARNING = "budget.warning"
+    BUDGET_EXCEEDED = "budget.exceeded"
     HUMAN_REQUESTED = "human.requested"
+    HUMAN_ANSWERED = "human.answered"
+    COMPLETION_DECIDED = "completion.decided"
     RUN_SUCCEEDED = "run.succeeded"
     RUN_FAILED = "run.failed"
     RUN_CANCELLED = "run.cancelled"
@@ -59,13 +94,20 @@ class AgentEvent:
     parent_event_id: Optional[str]
     payload: Mapping[str, Any] = field(default_factory=dict)
     redaction_metadata: Mapping[str, Any] = field(default_factory=dict)
+    schema_version: int = 1
+    agent_id: Optional[str] = None
+    task_id: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> "AgentEvent":
-        return cls(**dict(raw))
+        values = dict(raw)
+        values.setdefault("schema_version", 1)
+        values.setdefault("agent_id", None)
+        values.setdefault("task_id", None)
+        return cls(**values)
 
 
 def _redact(value: Any, path: str, redacted: list[str]) -> Any:
@@ -122,6 +164,9 @@ class AppendOnlyEventStore:
         actor: str,
         payload: Mapping[str, Any] | None = None,
         parent_event_id: str | None = None,
+        agent_id: str | None = None,
+        task_id: str | None = None,
+        schema_version: int = 1,
     ) -> AgentEvent:
         type_value = event_type.value if isinstance(event_type, EventType) else str(event_type)
         with self._lock:
@@ -142,6 +187,9 @@ class AppendOnlyEventStore:
                 parent_event_id=parent_event_id,
                 payload=safe_payload,
                 redaction_metadata={"redacted_paths": redacted_paths},
+                schema_version=schema_version,
+                agent_id=agent_id,
+                task_id=task_id,
             )
             events.append(event)
             if self.path:

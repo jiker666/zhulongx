@@ -18,6 +18,7 @@ from app.agent_engine.sandbox.container import ContainerSandbox
 from app.agent_engine.session import AgentSession
 from app.agent_engine.skills.index import SkillIndex
 from app.agent_engine.skills.loader import SkillLoader
+from app.agent_engine.state import ModelConfig
 from app.config import settings
 from app.core.ctf_persistence import get_expected_flag, list_tasks_view, load_task_view, save_task
 from app.scenarios.ctf import CTFRunRequestAdapter, CTFScenario
@@ -27,8 +28,8 @@ ProviderFactory = Callable[[], ModelProvider]
 SandboxFactory = Callable[[Path, tuple[Path, ...]], Sandbox]
 
 
-def build_provider() -> ModelProvider:
-    return configured_provider()
+def build_provider(config: ModelConfig | None = None) -> ModelProvider:
+    return configured_provider(config)
 
 
 class CTFSessionService:
@@ -210,7 +211,7 @@ class CTFSessionService:
                 image=settings.AGENT_SANDBOX_IMAGE,
             )
         )
-        provider = self.provider_factory() if self.provider_factory is not None else build_provider()
+        provider = self.provider_factory() if self.provider_factory is not None else build_provider(request.model_config)
         if checkpoint_store.exists(run_id):
             session = AgentSession.resume(
                 request,

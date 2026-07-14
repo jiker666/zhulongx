@@ -49,7 +49,7 @@ def session_from_metadata(metadata: RunMetadata) -> AgentSession:
         image=settings.AGENT_SANDBOX_IMAGE,
     )
     common: dict[str, Any] = {
-        "provider": configured_provider(),
+        "provider": configured_provider(metadata.request.model_config),
         "validator": _validator(metadata),
         "events": events,
         "checkpoint_store": checkpoints,

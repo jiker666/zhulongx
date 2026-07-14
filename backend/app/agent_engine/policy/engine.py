@@ -27,6 +27,10 @@ class PolicyEngine:
 
     def authorize(self, definition: ToolDefinition, context: PolicyContext) -> PolicyDecision:
         permissions = set(definition.permissions)
+        if definition.requires_approval and context.request.authorization.get("approval_mode") == "required":
+            approved = set(context.request.authorization.get("approved_tools", ()))
+            if definition.name not in approved:
+                return PolicyDecision(False, "tool requires an explicit per-run approval")
         if "network_access" in permissions:
             if not bool(context.request.authorization.get("authorized", False)):
                 return PolicyDecision(False, "run is not authorized for network access")

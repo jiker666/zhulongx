@@ -49,5 +49,5 @@ class StructuredOutputValidator(Validator):
                 return ValidationResult(False, "authoritative", f"evaluator failed: {type(exc).__name__}")
             if not accepted:
                 return ValidationResult(False, "authoritative", "evaluator rejected structured result", True)
-            return ValidationResult(True, "authoritative", f"validated {self.result_type} output", True)
-        return ValidationResult(True, "local_schema_and_evidence", f"validated {self.result_type} output", True)
+            return ValidationResult(True, "authoritative", f"validated {self.result_type} output", True, "accepted")
+        return ValidationResult(True, "local_schema_and_evidence", f"validated {self.result_type} output", True, "accepted")

@@ -5,6 +5,7 @@ import uuid
 from pathlib import Path
 
 from app.agent_engine.abort import AbortToken, RunAborted
+from app.agent_engine.artifacts.ingest import ArtifactIngestor
 from app.agent_engine.budget import BudgetExceeded, BudgetTracker, BudgetUsage
 from app.agent_engine.checkpoint import CheckpointSnapshot, CheckpointStore
 from app.agent_engine.context import ContextBuilder
@@ -12,11 +13,12 @@ from app.agent_engine.events import AppendOnlyEventStore, EventType
 from app.agent_engine.loop import AgentLoop, LoopOutcome
 from app.agent_engine.policy.engine import PolicyEngine
 from app.agent_engine.providers.base import ModelProvider
+from app.agent_engine.reducer import StateReducer
 from app.agent_engine.sandbox.base import Sandbox
 from app.agent_engine.sandbox.container import ContainerSandbox
 from app.agent_engine.skills.index import SkillIndex
 from app.agent_engine.skills.loader import SkillLoader
-from app.agent_engine.state import RunRequest, RunStatus, SessionState, TERMINAL_STATUSES
+from app.agent_engine.state import PAUSED_STATUSES, RunRequest, RunStatus, SessionState, TERMINAL_STATUSES
 from app.agent_engine.tools.builtin import build_builtin_registry
 from app.agent_engine.tools.executor import ToolExecutionService
 from app.agent_engine.tools.registry import ToolRegistry
@@ -25,7 +27,7 @@ from app.agent_engine.validation.base import Validator
 
 
 class AgentSession:
-    """The sole lifecycle and terminal-state owner for one v2 run."""
+    """The sole lifecycle and terminal-state owner for one Agent Engine v3 run."""
 
     def __init__(
         self,
@@ -60,6 +62,7 @@ class AgentSession:
         self.abort_token = AbortToken()
         self._timed_out = False
         self.budget = BudgetTracker(request.budgets)
+        self.reducer = StateReducer()
         self.state = SessionState(run_id=self.run_id, objective=request.objective)
         self.checkpoint_store = checkpoint_store or CheckpointStore(self.workspace / ".agent_state" / "checkpoints")
         self.executor = ToolExecutionService(self.registry, self.policy, self.events)
@@ -69,6 +72,7 @@ class AgentSession:
             executor=self.executor,
             validator=self.validator,
             context_builder=ContextBuilder(skill_index=skill_index),
+            reducer=self.reducer,
             checkpoint_callback=self._save_checkpoint,
         )
 
@@ -106,14 +110,22 @@ class AgentSession:
         session.budget = BudgetTracker(request.budgets, BudgetUsage.from_dict(snapshot.budget_usage))
         if session.state.last_event_sequence > events.last_sequence(run_id):
             raise ValueError("checkpoint references events that are not present")
+        restored = events.append(
+            run_id,
+            EventType.CHECKPOINT_RESTORED,
+            actor="agent_session",
+            payload={"checkpoint_sequence": snapshot.event_offset},
+        )
+        session.reducer.apply(session.state, restored)
         return session
 
     def run(self) -> SessionState:
         if self.state.status in TERMINAL_STATUSES:
             return self.state
+        if self.state.status in PAUSED_STATUSES:
+            return self.state
         if self.state.status == RunStatus.CREATED:
-            created = self.events.append(
-                self.run_id,
+            created = self._append(
                 EventType.RUN_CREATED,
                 actor="control_plane",
                 payload={
@@ -125,24 +137,21 @@ class AgentSession:
             )
             if self.abort_token.is_aborted:
                 return self._finish(LoopOutcome(RunStatus.CANCELLED, self.abort_token.reason), created.event_id)
-            started = self.events.append(
-                self.run_id,
+            started = self._append(
                 EventType.RUN_STARTED,
                 actor="agent_session",
                 parent_event_id=created.event_id,
                 payload={"sandbox": type(self.sandbox).__name__, "release_capable": self.sandbox.release_capable},
             )
-            self.state.status = RunStatus.RUNNING
-            self.state.last_event_sequence = started.sequence
+            self._ingest_inputs(started.event_id)
+            self._ensure_initial_plan(started.event_id)
             self._save_checkpoint()
         else:
-            resumed = self.events.append(
-                self.run_id,
+            self._append(
                 EventType.STATE_UPDATED,
                 actor="agent_session",
                 payload={"changes": {"resumed": True, "checkpoint_sequence": self.state.last_event_sequence}},
             )
-            self.state.last_event_sequence = resumed.sequence
         tool_context = ToolContext(
             run_id=self.run_id,
             request=self.request,
@@ -168,8 +177,22 @@ class AgentSession:
                 status = RunStatus.TIMED_OUT if self._timed_out else RunStatus.CANCELLED
                 outcome = LoopOutcome(status, str(exc))
             except BudgetExceeded as exc:
+                self._append(
+                    EventType.BUDGET_EXCEEDED,
+                    actor="budget_tracker",
+                    payload={"dimension": exc.dimension, "usage": self.budget.usage.to_dict()},
+                )
                 status = RunStatus.TIMED_OUT if exc.dimension == "time" else RunStatus.HUMAN_REQUIRED
-                outcome = LoopOutcome(status, str(exc))
+                output = None
+                if status == RunStatus.HUMAN_REQUIRED:
+                    output = {
+                        "handoff": self.loop._human_handoff(
+                            self.state,
+                            "Increase the exhausted budget or choose a narrower strategy.",
+                            str(exc),
+                        )
+                    }
+                outcome = LoopOutcome(status, str(exc), output)
             except Exception as exc:
                 outcome = LoopOutcome(RunStatus.FAILED, f"{type(exc).__name__}: {exc}")
         finally:
@@ -190,11 +213,31 @@ class AgentSession:
         return self.events.read(self.run_id, after_sequence=after_sequence)
 
     def _finish(self, outcome: LoopOutcome, parent_event_id: str | None) -> SessionState:
-        if self.state.status in TERMINAL_STATUSES:
+        if self.state.status in TERMINAL_STATUSES and outcome.status != self.state.status:
             return self.state
-        self.state.status = outcome.status
-        self.state.error = outcome.error
-        self.state.final_output = outcome.output
+        active_node = next(
+            (node for node in self.state.current_plan.get("nodes", []) if node.get("status") == "running"),
+            None,
+        )
+        if active_node:
+            plan_event_type = EventType.PLAN_COMPLETED if outcome.status == RunStatus.SUCCEEDED else EventType.PLAN_NODE_BLOCKED
+            plan_event = self._append(
+                plan_event_type,
+                actor="agent_session",
+                parent_event_id=parent_event_id,
+                payload={"task_id": active_node.get("task_id"), "reason": outcome.error},
+            )
+            parent_event_id = plan_event.event_id
+        decided = self._append(
+            EventType.COMPLETION_DECIDED,
+            actor="completion_policy",
+            parent_event_id=parent_event_id,
+            payload={"status": outcome.status.value, "error": outcome.error, "output": outcome.output or {}},
+        )
+        if outcome.status == RunStatus.PENDING_EXTERNAL:
+            self.state.status = RunStatus.PENDING_EXTERNAL
+            self._persist_checkpoint()
+            return self.state
         event_type = {
             RunStatus.SUCCEEDED: EventType.RUN_SUCCEEDED,
             RunStatus.FAILED: EventType.RUN_FAILED,
@@ -202,21 +245,17 @@ class AgentSession:
             RunStatus.TIMED_OUT: EventType.RUN_TIMED_OUT,
             RunStatus.HUMAN_REQUIRED: EventType.HUMAN_REQUESTED,
         }[outcome.status]
-        terminal = self.events.append(
-            self.run_id,
+        payload = {"status": outcome.status.value, "error": outcome.error, "output": outcome.output or {}}
+        if outcome.output and isinstance(outcome.output.get("handoff"), dict):
+            payload["handoff"] = outcome.output["handoff"]
+        self._append(
             event_type,
             actor="agent_session",
-            parent_event_id=parent_event_id,
-            payload={"status": outcome.status.value, "error": outcome.error, "output": outcome.output or {}},
+            parent_event_id=decided.event_id,
+            payload=payload,
         )
-        self.state.last_event_sequence = terminal.sequence
         self.state.budget_usage = self.budget.usage.to_dict()
-        self.checkpoint_store.save(CheckpointSnapshot(
-            run_id=self.run_id,
-            state=self.state.to_dict(),
-            budget_usage=self.state.budget_usage,
-            event_offset=self.state.last_event_sequence,
-        ))
+        self._persist_checkpoint()
         return self.state
 
     def _last_event_id(self) -> str | None:
@@ -224,18 +263,157 @@ class AgentSession:
         return events[-1].event_id if events else None
 
     def _save_checkpoint(self) -> None:
-        checkpoint_event = self.events.append(
-            self.run_id,
+        self._append(
             EventType.CHECKPOINT_SAVED,
             actor="agent_session",
             parent_event_id=self._last_event_id(),
             payload={"state_sequence": self.state.last_event_sequence},
         )
-        self.state.last_event_sequence = checkpoint_event.sequence
         self.state.budget_usage = self.budget.usage.to_dict()
+        self._persist_checkpoint()
+
+    def _persist_checkpoint(self) -> None:
         self.checkpoint_store.save(CheckpointSnapshot(
             run_id=self.run_id,
             state=self.state.to_dict(),
             budget_usage=self.state.budget_usage,
             event_offset=self.state.last_event_sequence,
         ))
+
+    def answer_human(
+        self,
+        public_response: dict[str, object] | None = None,
+        *,
+        secure_input_refs: tuple[str, ...] = (),
+    ) -> SessionState:
+        if self.state.status != RunStatus.HUMAN_REQUIRED:
+            raise ValueError("run is not waiting for human input")
+        self._append(
+            EventType.HUMAN_ANSWERED,
+            actor="human",
+            payload={
+                "public_response": public_response or {},
+                "secure_input_refs": list(secure_input_refs),
+            },
+        )
+        self.state.error = ""
+        self._save_checkpoint()
+        return self.state
+
+    def submit_external_validation(self, *, accepted: bool, reason: str) -> SessionState:
+        if self.state.status != RunStatus.PENDING_EXTERNAL:
+            raise ValueError("run has no candidate pending external validation")
+        pending = next(
+            (item for item in reversed(self.state.candidate_answers) if item.get("status") == "submitted_pending_external"),
+            None,
+        )
+        if pending is None:
+            raise ValueError("pending candidate is missing")
+        event_type = (
+            EventType.CANDIDATE_EXTERNALLY_ACCEPTED if accepted else EventType.CANDIDATE_EXTERNALLY_REJECTED
+        )
+        event = self._append(
+            event_type,
+            actor="external_validator",
+            payload={
+                "candidate": pending.get("candidate", ""),
+                "reason": reason,
+                "authoritative": True,
+            },
+        )
+        if accepted:
+            return self._finish(
+                LoopOutcome(
+                    RunStatus.SUCCEEDED,
+                    output={
+                        "candidate": pending.get("candidate", ""),
+                        "validation_level": "external",
+                    },
+                ),
+                event.event_id,
+            )
+        self._save_checkpoint()
+        return self.state
+
+    def _append(
+        self,
+        event_type: EventType,
+        *,
+        actor: str,
+        payload: dict[str, object] | None = None,
+        parent_event_id: str | None = None,
+    ):
+        event = self.events.append(
+            self.run_id,
+            event_type,
+            actor=actor,
+            payload=payload,
+            parent_event_id=parent_event_id,
+            agent_id="agent_root",
+            task_id=self.request.task_id,
+        )
+        self.reducer.apply(self.state, event)
+        return event
+
+    def _ingest_inputs(self, parent_event_id: str) -> None:
+        if any(event.type == EventType.ARTIFACT_INGESTED.value for event in self.event_stream()):
+            return
+        ingestor = ArtifactIngestor(self.workspace)
+        previous = parent_event_id
+        for item in self.request.inputs:
+            try:
+                artifact = ingestor.ingest(item.path, visibility="run")
+            except (OSError, ValueError):
+                continue
+            event = self._append(
+                EventType.ARTIFACT_INGESTED,
+                actor="artifact_ingestor",
+                parent_event_id=previous,
+                payload={"artifact": artifact.to_dict()},
+            )
+            previous = event.event_id
+
+    def _ensure_initial_plan(self, parent_event_id: str) -> None:
+        if self.state.current_plan:
+            return
+        task_id = f"{self.request.task_id}:execute"
+        plan = {
+            "plan_id": f"plan_{self.run_id}",
+            "version": 1,
+            "goal": self.request.objective,
+            "nodes": [{
+                "task_id": task_id,
+                "title": "Execute the scenario strategy and collect evidence",
+                "role": "executor",
+                "dependencies": [],
+                "expected_output": "evidence-backed candidate or structured handoff",
+                "success_criteria": ["completion policy accepts evidence-backed output"],
+                "allowed_tools": [definition.name for definition in self.registry.definitions()],
+                "status": "pending",
+            }],
+            "alternatives": ["review_refute", "switch_hypothesis"],
+            "risks": ["budget exhaustion", "insufficient evidence"],
+            "assumptions": [],
+            "unknowns": [],
+            "critical_path": [task_id],
+            "rationale": "start with one bounded evidence-driven execution before replanning",
+            "revision_reason": "",
+        }
+        proposed = self._append(
+            EventType.PLAN_PROPOSED,
+            actor="planner",
+            parent_event_id=parent_event_id,
+            payload={"plan": plan, "reason": plan["rationale"]},
+        )
+        accepted = self._append(
+            EventType.PLAN_ACCEPTED,
+            actor="coordinator",
+            parent_event_id=proposed.event_id,
+            payload={"plan": plan, "reason": "validated initial bounded plan"},
+        )
+        self._append(
+            EventType.PLAN_NODE_STARTED,
+            actor="coordinator",
+            parent_event_id=accepted.event_id,
+            payload={"task_id": task_id},
+        )

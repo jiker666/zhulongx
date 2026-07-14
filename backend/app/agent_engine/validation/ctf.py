@@ -54,11 +54,17 @@ class CTFValidator(Validator):
                 return ValidationResult(False, "reproduction", "candidate reproduction failed")
 
         if self.evaluator is None:
-            return ValidationResult(False, "authoritative", "no authoritative or offline evaluator is configured")
+            return ValidationResult(
+                False,
+                "authoritative",
+                "candidate is locally evidenced and awaits external validation",
+                False,
+                "pending_external",
+            )
         try:
             accepted = bool(self.evaluator(candidate.value))
         except Exception as exc:
             return ValidationResult(False, "authoritative", f"evaluator failed: {type(exc).__name__}")
         if not accepted:
             return ValidationResult(False, "authoritative", "evaluator rejected candidate", True)
-        return ValidationResult(True, "authoritative", "evaluator accepted candidate", True)
+        return ValidationResult(True, "authoritative", "evaluator accepted candidate", True, "accepted")

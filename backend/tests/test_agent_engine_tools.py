@@ -40,12 +40,15 @@ def _context(tmp_path, *, allow_process=False):
 
 def test_builtin_registry_schema_and_executor_share_definition():
     registry = build_builtin_registry()
-    assert len(registry.definitions()) == 10
+    assert len(registry.definitions()) == 15
     assert {item["function"]["name"] for item in registry.schemas()} == {
         definition.name for definition in registry.definitions()
     }
     assert all(definition.executor is not None for definition in registry.definitions())
-    assert {"list_dir", "read_file", "write_file", "grep", "run_shell", "run_python", "submit_candidate"}.issubset(
+    assert {
+        "list_dir", "read_file", "write_file", "grep", "run_shell", "run_python", "submit_candidate",
+        "record_evidence", "record_fact", "record_hypothesis", "refute_hypothesis", "revise_plan",
+    }.issubset(
         {definition.name for definition in registry.definitions()}
     )
 

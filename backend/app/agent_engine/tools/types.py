@@ -33,6 +33,7 @@ class ToolContext:
     workspace: Path
     abort_token: AbortToken
     sandbox: Sandbox
+    agent_id: str = "agent_root"
 
 
 class ToolExecutor(Protocol):
@@ -49,3 +50,9 @@ class ToolDefinition:
     permissions: tuple[str, ...]
     timeout_seconds: int
     executor: ToolExecutor
+    idempotency: str = "non_idempotent"
+    side_effect_level: str = "write"
+    resource_locks: tuple[str, ...] = ()
+    parallel_safe: bool = False
+    requires_approval: bool = False
+    evidence_type: str = "tool_result"

@@ -22,7 +22,7 @@ from app.config import settings
 from app.scenarios import CTFScenario, default_scenarios
 
 
-router = APIRouter(prefix="/agent/runs", tags=["Agent Engine v2"])
+router = APIRouter(prefix="/agent/runs", tags=["Agent Engine v3"])
 
 
 class AgentRunCreate(BaseModel):
@@ -39,10 +39,30 @@ class AgentRunCreate(BaseModel):
     max_seconds: float = Field(default=600, ge=1, le=3600)
     max_model_requests: int = Field(default=50, ge=1, le=500)
     max_tool_calls: int = Field(default=100, ge=1, le=1000)
+    provider: str = Field(default=settings.LLM_PROVIDER, min_length=1, max_length=100)
+    model: str = Field(default=settings.LLM_MODEL, min_length=1, max_length=200)
+    gateway_profile: str = Field(default="default", max_length=50)
+    base_url: str = Field(default="", max_length=2000)
+    temperature: float = Field(default=settings.LLM_TEMPERATURE, ge=0, le=2)
+    max_tokens: int = Field(default=settings.LLM_MAX_TOKENS, ge=1, le=200_000)
+    model_timeout_seconds: float = Field(default=settings.LLM_TIMEOUT, ge=1, le=600)
+    parallel_tool_calls: bool = True
 
 
-def _provider():
-    return configured_provider()
+class HumanAnswerRequest(BaseModel):
+    public_response: dict[str, object] = Field(default_factory=dict)
+    secure_input_refs: list[str] = Field(default_factory=list, max_length=50)
+    resume: bool = True
+
+
+class ExternalValidationRequest(BaseModel):
+    accepted: bool
+    reason: str = Field(min_length=1, max_length=10_000)
+    resume_on_rejection: bool = True
+
+
+def _provider(config: ModelConfig):
+    return configured_provider(config)
 
 
 @router.post("")
@@ -79,7 +99,16 @@ def create_agent_run(payload: AgentRunCreate):
             max_model_requests=payload.max_model_requests,
             max_tool_calls=payload.max_tool_calls,
         ),
-        model_config=ModelConfig(provider=settings.LLM_PROVIDER, model=settings.LLM_MODEL),
+        model_config=ModelConfig(
+            provider=payload.provider,
+            model=payload.model,
+            gateway_profile=payload.gateway_profile,
+            base_url=payload.base_url,
+            temperature=payload.temperature,
+            max_tokens=payload.max_tokens,
+            timeout_seconds=payload.model_timeout_seconds,
+            parallel_tool_calls=payload.parallel_tool_calls,
+        ),
     )
     event_store = AppendOnlyEventStore(workspace / ".agent_state" / "events.jsonl")
     checkpoint_store = CheckpointStore(workspace / ".agent_state" / "checkpoints")
@@ -87,7 +116,7 @@ def create_agent_run(payload: AgentRunCreate):
     skill_loader = SkillLoader(skill_index)
     session = AgentSession(
         request,
-        provider=_provider(),
+        provider=_provider(request.model_config),
         validator=scenario.validator(),
         events=event_store,
         checkpoint_store=checkpoint_store,
@@ -138,6 +167,33 @@ def stop_agent_run(run_id: str):
     _session_or_404(run_id)
     changed = run_manager.abort(run_id)
     return {"run_id": run_id, "abort_requested": changed}
+
+
+@router.post("/{run_id}/human-answer")
+def answer_agent_run(run_id: str, payload: HumanAnswerRequest):
+    session = _session_or_404(run_id)
+    try:
+        state = session.answer_human(
+            payload.public_response,
+            secure_input_refs=tuple(payload.secure_input_refs),
+        )
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    started = run_manager.start(run_id) if payload.resume else False
+    return {"run_id": run_id, "status": state.status.value, "resumed": started}
+
+
+@router.post("/{run_id}/external-validation")
+def validate_agent_run(run_id: str, payload: ExternalValidationRequest):
+    session = _session_or_404(run_id)
+    try:
+        state = session.submit_external_validation(accepted=payload.accepted, reason=payload.reason)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    started = False
+    if not payload.accepted and payload.resume_on_rejection:
+        started = run_manager.start(run_id)
+    return {"run_id": run_id, "status": state.status.value, "resumed": started}
 
 
 @router.get("/{run_id}")

@@ -20,12 +20,18 @@ class OpenAICompatibleProvider(ModelProvider):
         base_url: str,
         api_key: str,
         model: str,
+        temperature: float = 0.0,
+        max_tokens: int = 4096,
+        parallel_tool_calls: bool = True,
         max_retries: int = 2,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.endpoint = self._endpoint(base_url)
         self._api_key = api_key
         self.model = model
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        self.parallel_tool_calls = parallel_tool_calls
         self.max_retries = max(0, max_retries)
         self.transport = transport
 
@@ -48,10 +54,13 @@ class OpenAICompatibleProvider(ModelProvider):
         payload: dict[str, Any] = {
             "model": self.model,
             "messages": [dict(message) for message in messages],
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
         }
         if tools:
             payload["tools"] = [dict(tool) for tool in tools]
             payload["tool_choice"] = "auto"
+            payload["parallel_tool_calls"] = self.parallel_tool_calls
         last_error: ProviderError | None = None
         for attempt in range(self.max_retries + 1):
             abort_token.raise_if_aborted()
