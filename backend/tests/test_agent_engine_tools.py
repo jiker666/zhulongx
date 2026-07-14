@@ -40,7 +40,16 @@ def _context(tmp_path, *, allow_process=False):
 
 def test_builtin_registry_schema_and_executor_share_definition():
     registry = build_builtin_registry()
-    assert len(registry.definitions()) == 15
+    assert len(registry.definitions()) == 26
+    names = {definition.name for definition in registry.definitions()}
+    assert {
+        "worker.health",
+        "worker.command.run",
+        "worker.task.cancel",
+        "terminal.create",
+        "terminal.expect",
+        "terminal.close",
+    } <= names
     assert {item["function"]["name"] for item in registry.schemas()} == {
         definition.name for definition in registry.definitions()
     }
