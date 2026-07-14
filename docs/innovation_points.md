@@ -1,3 +1,11 @@
-# Innovation points
+# Integrated capabilities
 
-Implemented foundations: evidence-grounded decisions, hypothesis competition records, capability-aware tool dispatch, and independent verification. The remaining innovations require durable persistence and the controller-to-legacy-runtime adapter before they can be represented as completed competition capabilities.
+The teammate merge contributes an isolated Linux command and PTY backend,
+typed Worker transport, process-group cancellation, capability discovery, and
+task ownership checks. These capabilities are registered as v3 tools and emit
+the same policy and execution events as local tools.
+
+Existing v3 planning, hypotheses, bounded subagents, evidence, verification,
+checkpoint/replay, and audit export remain the only orchestration
+implementations. Duplicate controller, broker, repository, replay, and
+cancellation prototypes were not retained.
