@@ -22,6 +22,7 @@ class EventType(str, Enum):
     PLAN_ACCEPTED = "plan.accepted"
     PLAN_NODE_STARTED = "plan.node_started"
     PLAN_NODE_BLOCKED = "plan.node_blocked"
+    PLAN_PATCH_PROPOSED = "plan.patch_proposed"
     PLAN_REVISED = "plan.revised"
     PLAN_COMPLETED = "plan.completed"
     TASK_SCHEDULED = "task.scheduled"

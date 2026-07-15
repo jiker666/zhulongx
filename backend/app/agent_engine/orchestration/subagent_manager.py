@@ -402,6 +402,7 @@ class SubagentManager:
                         artifacts=tuple(summary_raw.get("artifacts", ())),
                         recommendations=tuple(str(item) for item in summary_raw.get("recommendations", ())),
                         error=str(summary_raw.get("error") or ""),
+                        verdict=str(summary_raw.get("verdict") or ""),
                     )
                 record = SubagentRecord(
                     root_run_id=self.run_id,

@@ -39,6 +39,7 @@ class AgentSummary:
     artifacts: tuple[Mapping[str, Any], ...] = ()
     recommendations: tuple[str, ...] = ()
     error: str = ""
+    verdict: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -58,6 +59,7 @@ class AgentHandoff:
     unresolved_questions: tuple[str, ...] = ()
     recommended_next_actions: tuple[str, ...] = ()
     confidence: float = 0.0
+    verdict: str = ""
 
     def __post_init__(self) -> None:
         if not self.task_id or not 0 <= self.confidence <= 1:

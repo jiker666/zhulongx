@@ -41,12 +41,25 @@ class TaskNode:
     status: TaskStatus = TaskStatus.PENDING
     fallback_strategies: tuple[str, ...] = ()
     trigger_conditions: tuple[str, ...] = ()
+    objective: str = ""
+    context_refs: tuple[str, ...] = ()
+    expected_outputs: tuple[str, ...] = ()
+    failure_signals: tuple[str, ...] = ()
+    priority: int = 0
+    parallel_group: str = ""
+    workspace_policy: str = "isolated"
+    verification_policy: str = "evidence_required"
+    attempt: int = 1
 
     def __post_init__(self) -> None:
         if not self.task_id or not self.title or not self.role:
             raise ValueError("task id, title, and role are required")
         if not self.success_criteria:
             raise ValueError(f"task {self.task_id} has no success criteria")
+        if self.attempt < 1:
+            raise ValueError(f"task {self.task_id} has invalid attempt")
+        if self.workspace_policy not in {"isolated", "shared_readonly", "worktree"}:
+            raise ValueError(f"task {self.task_id} has invalid workspace policy")
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
@@ -62,6 +75,9 @@ class TaskNode:
         value["success_criteria"] = tuple(value.get("success_criteria", ()))
         value["fallback_strategies"] = tuple(value.get("fallback_strategies", ()))
         value["trigger_conditions"] = tuple(value.get("trigger_conditions", ()))
+        value["context_refs"] = tuple(value.get("context_refs", ()))
+        value["expected_outputs"] = tuple(value.get("expected_outputs", ()))
+        value["failure_signals"] = tuple(value.get("failure_signals", ()))
         value["budget"] = TaskBudget(**dict(value.get("budget", {})))
         value["status"] = TaskStatus(value.get("status", TaskStatus.PENDING.value))
         return cls(**value)

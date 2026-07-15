@@ -11,12 +11,19 @@ from app.agent_engine.artifacts.ingest import ArtifactIngestor
 from app.agent_engine.budget import BudgetExceeded, BudgetTracker, BudgetUsage
 from app.agent_engine.checkpoint import CheckpointSnapshot, CheckpointStore
 from app.agent_engine.contracts.plan import Plan
+from app.agent_engine.contracts.completion import CompletionDecision
 from app.agent_engine.events import AppendOnlyEventStore, EventType
+from app.agent_engine.orchestration.completion_policy import CoordinatorCompletionPolicy
+from app.agent_engine.orchestration.dynamic_scheduler import DynamicTaskScheduler, SchedulerOutcome
+from app.agent_engine.orchestration.graph_replanner import EvidenceDrivenGraphReplanner
+from app.agent_engine.orchestration.planner import DynamicPlanner, PlanningError
 from app.agent_engine.orchestration.scheduler import TaskDispatcher, WorkflowResult, WorkflowScheduler
 from app.agent_engine.orchestration.subagent_manager import SubagentManager
 from app.agent_engine.orchestration.task_graph import TaskGraph
+from app.agent_engine.orchestration.task_graph_store import PlanPatch, TaskGraphStore
 from app.agent_engine.orchestration.workflow import WorkflowSpec, WorkflowValidator
 from app.agent_engine.policy.engine import PolicyEngine
+from app.agent_engine.providers.base import ProviderError
 from app.agent_engine.reducer import StateReducer
 from app.agent_engine.sandbox.base import Sandbox
 from app.agent_engine.sandbox.container import ContainerSandbox
@@ -99,6 +106,9 @@ class CoordinatorSession:
         registry: ToolRegistry | None = None,
         policy: PolicyEngine | None = None,
         sandbox: Sandbox | None = None,
+        dynamic_planner: DynamicPlanner | None = None,
+        graph_replanner: EvidenceDrivenGraphReplanner | None = None,
+        completion_policy: CoordinatorCompletionPolicy | None = None,
     ) -> None:
         self.request = request
         self.plan = plan
@@ -123,10 +133,19 @@ class CoordinatorSession:
         self.abort_token = AbortToken()
         self.budget = BudgetTracker(request.budgets)
         self.executor = ToolExecutionService(self.registry, self.policy, self.events)
+        self.dynamic_planner = dynamic_planner
+        self.graph_replanner = graph_replanner or EvidenceDrivenGraphReplanner()
+        self.completion_policy = completion_policy
+        self.dynamic_scheduler: DynamicTaskScheduler | None = None
         self._abort = threading.Event()
         self._timed_out = False
         self._lock = threading.RLock()
         self.graph = TaskGraph(
+            plan,
+            allowed_roles=workflow.allowed_roles,
+            available_tools=workflow.allowed_tools,
+        )
+        self.graph_store = TaskGraphStore(
             plan,
             allowed_roles=workflow.allowed_roles,
             available_tools=workflow.allowed_tools,
@@ -152,6 +171,9 @@ class CoordinatorSession:
         registry: ToolRegistry | None = None,
         policy: PolicyEngine | None = None,
         sandbox: Sandbox | None = None,
+        dynamic_planner: DynamicPlanner | None = None,
+        graph_replanner: EvidenceDrivenGraphReplanner | None = None,
+        completion_policy: CoordinatorCompletionPolicy | None = None,
     ) -> "CoordinatorSession":
         snapshot = checkpoint_store.load(run_id)
         session = cls(
@@ -166,6 +188,9 @@ class CoordinatorSession:
             registry=registry,
             policy=policy,
             sandbox=sandbox,
+            dynamic_planner=dynamic_planner,
+            graph_replanner=graph_replanner,
+            completion_policy=completion_policy,
         )
         session.state = SessionState.from_dict(snapshot.state)
         session.budget = BudgetTracker(request.budgets, BudgetUsage.from_dict(snapshot.budget_usage))
@@ -179,7 +204,20 @@ class CoordinatorSession:
             agent_id="agent_root",
             task_id=request.task_id,
         )
-        session.reducer.apply(session.state, restored)
+        session.state = session.reducer.replay(
+            run_id,
+            request.objective,
+            events.read(run_id),
+        )
+        if session.state.current_plan:
+            restored_plan = Plan.from_dict(session.state.current_plan)
+            session.plan = restored_plan
+            session.graph_store = TaskGraphStore(
+                restored_plan,
+                allowed_roles=workflow.allowed_roles,
+                available_tools=workflow.allowed_tools,
+            )
+            session.graph = session.graph_store.graph
         return session
 
     def run(self) -> SessionState:
@@ -203,11 +241,48 @@ class CoordinatorSession:
                     created.event_id,
                 )
                 self._ingest_inputs(started.event_id)
+                plan_source = "scenario_macro"
+                if self.dynamic_planner is not None:
+                    try:
+                        planner_result = self.dynamic_planner.propose(
+                            self.request,
+                            self.plan,
+                            self.events,
+                            self.run_id,
+                            self.abort_token,
+                        )
+                    except (PlanningError, ProviderError, ValueError) as exc:
+                        self.state = self.reducer.replay(
+                            self.run_id,
+                            self.request.objective,
+                            self.events.read(self.run_id),
+                        )
+                        handoff = self._human_handoff(f"dynamic planner failed: {type(exc).__name__}")
+                        return self._finish(RunStatus.HUMAN_REQUIRED, handoff["minimal_blocker"], {"handoff": handoff})
+                    self.plan = planner_result.plan
+                    self.graph_store = TaskGraphStore(
+                        self.plan,
+                        allowed_roles=self.workflow.allowed_roles,
+                        available_tools=self.workflow.allowed_tools,
+                        max_total_tool_calls=max(
+                            self.request.budgets.max_tool_calls,
+                            sum(node.budget.max_tool_calls for node in self.plan.nodes),
+                        ),
+                    )
+                    self.graph = self.graph_store.graph
+                    plan_source = planner_result.source
+                    self.state = self.reducer.replay(
+                        self.run_id,
+                        self.request.objective,
+                        self.events.read(self.run_id),
+                    )
                 proposed = self._append(EventType.PLAN_PROPOSED, "planner", {
-                    "plan": self.plan.to_dict(), "reason": self.plan.rationale,
+                    "plan": self.plan.to_dict(), "reason": self.plan.rationale, "source": plan_source,
                 })
                 self._append(EventType.PLAN_ACCEPTED, "coordinator", {
-                    "plan": self.plan.to_dict(), "reason": "DAG, roles, tools, termination, and budget validated",
+                    "plan": self.plan.to_dict(),
+                    "reason": "DAG, roles, tools, completion contract, and aggregate budget validated",
+                    "source": plan_source,
                 }, proposed.event_id)
                 self._save_checkpoint()
             else:
@@ -218,15 +293,20 @@ class CoordinatorSession:
         if self._abort.is_set():
             status = RunStatus.TIMED_OUT if self._timed_out else RunStatus.CANCELLED
             return self._finish(status, "coordinator deadline exceeded" if self._timed_out else "coordinator cancelled", {})
-        dispatcher = SubagentTaskDispatcher(self.run_id, self.plan, self.manager, self.events)
         remaining_seconds = max(0.01, self.request.budgets.max_seconds - self.budget.usage.elapsed_seconds)
         deadline = threading.Timer(remaining_seconds, self._timeout_abort)
         deadline.daemon = True
         deadline.start()
         try:
-            result = WorkflowScheduler(dispatcher).execute(self.workflow)
+            if self.dynamic_planner is not None:
+                return self._run_dynamic()
+            return self._run_static()
         finally:
             deadline.cancel()
+
+    def _run_static(self) -> SessionState:
+        dispatcher = SubagentTaskDispatcher(self.run_id, self.plan, self.manager, self.events)
+        result = WorkflowScheduler(dispatcher).execute(self.workflow)
         self.state = self.reducer.replay(self.run_id, self.request.objective, self.events.read(self.run_id))
         evidence_ids = self._evidence_ids(result)
         if self._abort.is_set():
@@ -238,12 +318,137 @@ class CoordinatorSession:
                 "workflow completed with evidence",
                 {"workflow": self.workflow.workflow_id, "result": result.value, "evidence_ids": list(evidence_ids)},
             )
-        handoff = {
+        handoff = self._human_handoff("workflow did not produce independently verified evidence")
+        return self._finish(RunStatus.HUMAN_REQUIRED, handoff["minimal_blocker"], {"handoff": handoff})
+
+    def _run_dynamic(self) -> SessionState:
+        self.dynamic_scheduler = self.dynamic_scheduler or DynamicTaskScheduler(
+            self.run_id,
+            self.graph_store.graph,
+            self.manager,
+            self.events,
+            max_concurrency=self.request.max_parallel_agents,
+            abort_token=self.abort_token,
+        )
+        for _revision_attempt in range(4):
+            outcome = self.dynamic_scheduler.execute_until_blocked()
+            self.state = self.reducer.replay(self.run_id, self.request.objective, self.events.read(self.run_id))
+            self._persist_checkpoint()
+            if self._abort.is_set():
+                status = RunStatus.TIMED_OUT if self._timed_out else RunStatus.CANCELLED
+                return self._finish(
+                    status,
+                    "coordinator deadline exceeded" if self._timed_out else "coordinator cancelled",
+                    {},
+                )
+            if not outcome.success:
+                replan = self.graph_replanner.propose(self.graph_store, outcome)
+                if replan.patch is None:
+                    handoff = self._human_handoff(replan.reason)
+                    return self._finish(RunStatus.HUMAN_REQUIRED, handoff["minimal_blocker"], {"handoff": handoff})
+                self._apply_patch(replan.patch, outcome)
+                continue
+            if self.completion_policy is None:
+                handoff = self._human_handoff("dynamic completion policy is not configured")
+                return self._finish(RunStatus.HUMAN_REQUIRED, handoff["minimal_blocker"], {"handoff": handoff})
+            decision = self.completion_policy.decide(
+                self.request,
+                self.graph_store.plan,
+                outcome,
+                self.state,
+                self.events,
+                self.workspace,
+            )
+            self.state = self.reducer.replay(self.run_id, self.request.objective, self.events.read(self.run_id))
+            if decision.status == "succeeded":
+                return self._finish(RunStatus.SUCCEEDED, decision.reason, decision.output or {})
+            if decision.status == "pending_external":
+                output = decision.output or {}
+                self._append(EventType.CANDIDATE_PENDING_EXTERNAL, "completion_policy", {
+                    "candidate": output.get("candidate", ""),
+                    "reason": decision.reason,
+                    "authoritative": False,
+                })
+                return self._finish(RunStatus.PENDING_EXTERNAL, decision.reason, output)
+            replan_task_id = self._completion_replan_task(decision, outcome)
+            if not replan_task_id:
+                handoff = self._human_handoff(decision.reason)
+                return self._finish(RunStatus.HUMAN_REQUIRED, handoff["minimal_blocker"], {"handoff": handoff})
+            synthetic = SchedulerOutcome(
+                False,
+                outcome.completed_task_ids,
+                (replan_task_id,),
+                outcome.cancelled_task_ids,
+                outcome.summaries,
+                outcome.evidence_ids,
+                decision.reason,
+            )
+            replan = self.graph_replanner.propose(self.graph_store, synthetic)
+            if replan.patch is None:
+                handoff = self._human_handoff(replan.reason)
+                return self._finish(RunStatus.HUMAN_REQUIRED, handoff["minimal_blocker"], {"handoff": handoff})
+            self._apply_patch(replan.patch, synthetic)
+        handoff = self._human_handoff("dynamic replanning limit reached")
+        return self._finish(RunStatus.HUMAN_REQUIRED, handoff["minimal_blocker"], {"handoff": handoff})
+
+    def _apply_patch(self, patch: PlanPatch, outcome: SchedulerOutcome) -> None:
+        proposed = self._append(EventType.PLAN_PATCH_PROPOSED, "replanner", {
+            "patch": patch.model_dump(),
+            "reason": patch.reason,
+            "evidence_refs": list(patch.evidence_refs),
+            "old_version": self.graph_store.plan.version,
+        })
+        accepted_evidence = {
+            str(evidence_id)
+            for candidate in self.state.candidate_answers
+            if candidate.get("status") in {"validated", "externally_accepted"}
+            for evidence_id in candidate.get("evidence_event_ids", ())
+        }
+        protected = {
+            event.task_id
+            for event in self.events.read(self.run_id)
+            if event.event_id in accepted_evidence and event.task_id
+        }
+        revision = self.graph_store.apply(
+            patch,
+            protected_task_ids=protected,
+            completed_task_ids=set(outcome.completed_task_ids),
+            failed_task_ids=set(outcome.failed_task_ids),
+        )
+        self.plan = revision.plan
+        self.graph = self.graph_store.graph
+        self._append(EventType.PLAN_REVISED, "replanner", {
+            "plan": revision.plan.to_dict(),
+            "reason": revision.reason,
+            "old_version": revision.old_version,
+            "new_version": revision.new_version,
+            "diff": list(revision.diff),
+            "evidence_refs": list(revision.evidence_refs),
+        }, proposed.event_id)
+        assert self.dynamic_scheduler is not None
+        self.dynamic_scheduler.update_graph(self.graph)
+        self._save_checkpoint()
+
+    def _completion_replan_task(self, decision: CompletionDecision, outcome: SchedulerOutcome) -> str:
+        preferred_role = "verifier" if decision.status == "rejected" else "synthesizer"
+        candidates = [
+            node for node in self.graph_store.plan.nodes
+            if node.role == preferred_role and node.task_id in outcome.completed_task_ids
+        ]
+        if not candidates and preferred_role != "verifier":
+            candidates = [
+                node for node in self.graph_store.plan.nodes
+                if node.role == "verifier" and node.task_id in outcome.completed_task_ids
+            ]
+        return candidates[-1].task_id if candidates else ""
+
+    def _human_handoff(self, blocker: str) -> dict[str, Any]:
+        return {
             "completed_work": [item.summary.summary for item in self.manager.records() if item.summary],
             "confirmed_facts": list(self.state.confirmed_facts),
             "evidence": list(self.state.evidence),
             "failed_paths": [item.error for item in self.manager.records() if item.error],
-            "minimal_blocker": "workflow did not produce independently verified evidence",
+            "minimal_blocker": blocker,
             "questions": [{
                 "id": "coordinator_blocker",
                 "type": "text",
@@ -253,7 +458,6 @@ class CoordinatorSession:
             "risk": "No final conclusion is accepted without evidence.",
             "checkpoint_sequence": self.state.last_event_sequence,
         }
-        return self._finish(RunStatus.HUMAN_REQUIRED, handoff["minimal_blocker"], {"handoff": handoff})
 
     def abort(self, reason: str = "cancelled by user") -> bool:
         if self._abort.is_set():
@@ -405,6 +609,9 @@ class CoordinatorSession:
         decided = self._append(EventType.COMPLETION_DECIDED, "completion_policy", {
             "status": status.value, "error": reason, "output": output,
         })
+        if status == RunStatus.PENDING_EXTERNAL:
+            self._persist_checkpoint()
+            return self.state
         event_type = {
             RunStatus.SUCCEEDED: EventType.RUN_SUCCEEDED,
             RunStatus.FAILED: EventType.RUN_FAILED,

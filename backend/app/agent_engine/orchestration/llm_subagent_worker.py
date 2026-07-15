@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import threading
 from dataclasses import replace
@@ -52,6 +53,11 @@ class ChildEventProjector:
         EventType.SKILL_LOADED.value,
         EventType.BUDGET_WARNING.value,
         EventType.BUDGET_EXCEEDED.value,
+        EventType.CANDIDATE_DETECTED.value,
+        EventType.CANDIDATE_VALIDATED.value,
+        EventType.CANDIDATE_REJECTED.value,
+        EventType.VALIDATION_REQUESTED.value,
+        EventType.VALIDATION_COMPLETED.value,
     }
 
     def __init__(
@@ -82,6 +88,12 @@ class ChildEventProjector:
                 self._cursor = event.sequence
                 if event.type not in self.PROJECTED_TYPES:
                     continue
+                payload = dict(event.payload)
+                if isinstance(payload.get("evidence_event_ids"), list):
+                    payload["evidence_event_ids"] = [
+                        self._event_map.get(str(event_id), str(event_id))
+                        for event_id in payload["evidence_event_ids"]
+                    ]
                 projected = self.root_events.append(
                     self.record.root_run_id,
                     event.type,
@@ -90,7 +102,7 @@ class ChildEventProjector:
                     agent_id=self.record.agent_id,
                     task_id=self.record.task.task_id,
                     payload={
-                        **dict(event.payload),
+                        **payload,
                         "lineage": {
                             "root_run_id": self.record.root_run_id,
                             "parent_run_id": self.record.root_run_id,
@@ -159,12 +171,16 @@ class LLMSubagentWorker:
             self.root_request,
             task_id=record.task.task_id,
             title=record.task.title,
-            objective=self._objective(record, execution_profile),
+            objective=self._objective(record, execution_profile, mailbox),
             workspace=str(record.workspace),
             inputs=inputs,
             budgets=BudgetLimits(
                 max_seconds=min(self.root_request.budgets.max_seconds, record.budget.max_seconds),
-                max_model_requests=max(1, min(execution_profile.max_tool_rounds, record.budget.max_tool_calls)),
+                max_model_requests=max(1, min(
+                    self.root_request.budgets.max_model_requests,
+                    execution_profile.max_tool_rounds,
+                    record.budget.max_tool_calls,
+                )),
                 max_tool_calls=record.budget.max_tool_calls,
                 max_tokens=record.budget.max_tokens,
                 max_cost_usd=record.budget.max_cost_usd,
@@ -263,6 +279,7 @@ class LLMSubagentWorker:
                 )
             ),
             confidence=float(final_handoff.get("confidence", 1.0 if status == "completed" else 0.0)),
+            verdict=str(final_handoff.get("verdict") or ""),
         )
         mailbox.send(
             record.agent_id,
@@ -297,6 +314,7 @@ class LLMSubagentWorker:
             artifacts=tuple(state.artifacts),
             recommendations=handoff.recommended_next_actions,
             error=state.error if status != "completed" else "",
+            verdict=handoff.verdict,
         )
 
     def abort_all(self, reason: str) -> None:
@@ -337,8 +355,20 @@ class LLMSubagentWorker:
         return tuple(inputs)
 
     @staticmethod
-    def _objective(record: SubagentRecord, profile: RoleExecutionProfile) -> str:
-        return (
+    def _objective(record: SubagentRecord, profile: RoleExecutionProfile, mailbox: AgentMailbox) -> str:
+        dependency_handoffs = [
+            {
+                "task_id": message.payload.get("task_id"),
+                "status": message.payload.get("status"),
+                "summary": message.payload.get("summary"),
+                "facts": list(message.payload.get("facts", []))[:20],
+                "evidence_refs": list(message.payload.get("evidence_refs", []))[:50],
+                "artifact_refs": list(message.payload.get("artifact_refs", []))[:50],
+            }
+            for message in mailbox.receive("agent_root")
+            if message.message_type == "agent_handoff" and message.payload.get("task_id") in set(record.task.dependencies)
+        ]
+        objective = (
             f"Role: {record.role}. {profile.system_prompt} Task: {record.task.title}. "
             f"Expected output: {record.task.expected_output}. "
             f"Success criteria: {'; '.join(record.task.success_criteria)}. "
@@ -346,6 +376,9 @@ class LLMSubagentWorker:
             + ("Reproduce from an independent context and do not trust executor wording. " if profile.review_independence else "")
             + "Return evidence-backed results."
         )
+        if dependency_handoffs:
+            objective += " Dependency handoffs: " + json.dumps(dependency_handoffs, ensure_ascii=False, sort_keys=True)
+        return objective
 
     @staticmethod
     def _summary_text(record: SubagentRecord, status: RunStatus, error: str) -> str:

@@ -8,12 +8,16 @@ from app.agent_engine.checkpoint import CheckpointStore
 from app.agent_engine.events import AppendOnlyEventStore, EventType
 from app.agent_engine.managed_run import ManagedRun
 from app.agent_engine.orchestration.coordinator import CoordinatorSession
+from app.agent_engine.orchestration.completion_policy import CoordinatorCompletionPolicy
+from app.agent_engine.orchestration.graph_replanner import EvidenceDrivenGraphReplanner
 from app.agent_engine.orchestration.llm_subagent_worker import LLMSubagentWorker
+from app.agent_engine.orchestration.planner import DynamicPlanner
 from app.agent_engine.orchestration.subagent_manager import SubagentManager
 from app.agent_engine.policy.engine import PolicyEngine
 from app.agent_engine.providers.base import ModelProvider
 from app.agent_engine.providers.factory import configured_provider
 from app.agent_engine.providers.routing import ModelRoutePolicy
+from app.agent_engine.providers.mock import ScriptedProvider
 from app.agent_engine.sandbox.base import Sandbox
 from app.agent_engine.sandbox.container import ContainerSandbox
 from app.agent_engine.session import AgentSession
@@ -135,6 +139,17 @@ class RunSessionFactory:
                 provider_for_role,
                 sandbox_for_workspace=sandbox_for_workspace,
             )
+            planner_provider = (
+                configured_provider(route_policy.for_role(request.model_config, "planner"))
+                if provider is None
+                else ScriptedProvider([])
+            )
+            dynamic_planner = DynamicPlanner(
+                planner_provider,
+                allowed_roles=workflow.allowed_roles,
+                allowed_tools=workflow.allowed_tools,
+                required_outputs=scenario.manifest().required_outputs,
+            )
             manager = SubagentManager(
                 selected_run_id,
                 workspace,
@@ -150,6 +165,9 @@ class RunSessionFactory:
                 "registry": selected_registry,
                 "policy": selected_policy,
                 "sandbox": selected_sandbox,
+                "dynamic_planner": dynamic_planner,
+                "graph_replanner": EvidenceDrivenGraphReplanner(),
+                "completion_policy": CoordinatorCompletionPolicy(validator),
             }
             if checkpoints.exists(selected_run_id):
                 session = CoordinatorSession.resume(request, plan, workflow, manager, **coordinator_kwargs)
