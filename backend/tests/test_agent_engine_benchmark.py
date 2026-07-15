@@ -41,3 +41,18 @@ def test_benchmark_report_is_honestly_labeled():
     assert "not a live-model solve rate" in report["claim"]
     assert report["repetitions"] == 3
     assert len(report["results"]) == 75
+    assert report["scope"]["provider"] == "deterministic_mock"
+    assert report["scope"]["orchestration"].startswith("single AgentSession")
+    assert {
+        "pass_at_1",
+        "pass_at_3",
+        "mean_plan_revisions",
+        "useful_evidence_per_tool_call",
+        "duplicate_tool_call_rate",
+        "validator_rejection_rate",
+        "independent_verifier_rejection_rate",
+        "mean_agents",
+        "mean_peak_tool_concurrency",
+        "timeout_cancel_cleanup",
+    } <= set(report["metrics"])
+    assert report["metrics"]["timeout_cancel_cleanup"]["status"] == "not_exercised"

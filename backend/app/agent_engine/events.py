@@ -175,10 +175,9 @@ class AppendOnlyEventStore:
         type_value = event_type.value if isinstance(event_type, EventType) else str(event_type)
         with self._lock:
             events = self._events.setdefault(run_id, [])
-            if type_value in TERMINAL_EVENT_TYPES:
-                for existing in events:
-                    if existing.type in TERMINAL_EVENT_TYPES:
-                        return existing
+            terminal = next((event for event in reversed(events) if event.type in TERMINAL_EVENT_TYPES), None)
+            if terminal is not None:
+                return terminal
             redacted_paths: list[str] = []
             safe_payload = _redact(payload or {}, "payload", redacted_paths)
             event = AgentEvent(

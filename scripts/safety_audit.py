@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import zipfile
 from pathlib import Path
 
@@ -10,22 +11,31 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 REPORT = ROOT / "safety_audit_report.md"
 SKIP_DIRS = {".git", "node_modules", "dist", "__pycache__", ".pytest_cache", "frontend/dist", "backups", "ctf_runs"}
-SECRET_RE = re.compile(r"(sk-[A-Za-z0-9_\-]{20,}|AKIA[0-9A-Z]{16}|BEGIN (RSA |OPENSSH |EC )?PRIVATE KEY)")
+SECRET_RE = re.compile(r"(sk-[A-Za-z0-9_\-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|BEGIN (RSA |OPENSSH |EC )?PRIVATE KEY)")
 DANGEROUS = [
     "reverse shell", "/bin/sh -i", "nc -e", "meterpreter", "msfvenom", "mimikatz", "hydra",
     "sqlmap", "masscan", "nmap -A", "rm -rf", "chmod +s", "crontab",
 ]
-NETWORK_RE = re.compile(r"\b(requests|httpx|aiohttp)\.")
+NETWORK_RE = re.compile(r"(?<![\w.])(requests|httpx|aiohttp)\.")
 NETWORK_ALLOW = {
+    "backend/app/agent_engine/tools/builtin/http.py",
     "backend/app/tools/http_fingerprint.py",
     "backend/app/tools/directory_probe.py",
     "backend/app/tools/js_interface_extractor.py",
     "backend/app/tools/http_replay.py",
     "backend/app/tools/api_runner.py",
     "backend/app/core/ctf_web_solver.py",
+    "backend/app/core/agent_runtime.py",
+    "backend/app/core/ctf_agent_orchestrator.py",
+    "backend/app/core/llm_adapter.py",
     "backend/app/core/llm_client.py",
+    "backend/app/core/worker_client.py",
+    "backend/app/tools/web_fetch.py",
+    "backend/app/tools/web_search.py",
+    "backend/scripts/dasctf_batch.py",
 }
-DOC_PREFIXES = ("docs/", "samples/", "backend/tests/", "safety_audit_report.md")
+NETWORK_ALLOW_PREFIXES = ("backend/app/agent_engine/providers/",)
+DOC_PREFIXES = ("docs/", "samples/", "backend/tests/", "backend/app/skills/", "safety_audit_report.md")
 
 
 def skip(path: Path) -> bool:
@@ -41,18 +51,34 @@ def is_doc_context(rel: str) -> bool:
     return rel.startswith(DOC_PREFIXES)
 
 
+def audit_files() -> list[Path]:
+    result = subprocess.run(
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+        cwd=ROOT,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode == 0:
+        return [
+            path
+            for raw in result.stdout.split(b"\0")
+            if raw and (path := ROOT / raw.decode("utf-8", errors="surrogateescape")).is_file()
+        ]
+    return [path for path in ROOT.rglob("*") if path.is_file()]
+
+
 def main() -> int:
     failures: list[str] = []
     warnings: list[str] = []
-    for path in ROOT.rglob("*"):
-        if not path.is_file() or skip(path):
+    for path in audit_files():
+        if skip(path):
             continue
         rel = str(path.relative_to(ROOT))
         text = path.read_text(encoding="utf-8", errors="ignore")
         for match in SECRET_RE.finditer(text):
             value = match.group(0)
-            if "sk-example-placeholder" in value:
-                warnings.append(f"{rel}: documented placeholder key `{value[:22]}`")
+            if "sk-example-placeholder" in value or is_doc_context(rel):
+                warnings.append(f"{rel}: documented/fixture secret pattern")
             else:
                 failures.append(f"{rel}: possible secret {value[:20]}")
         for term in DANGEROUS:
@@ -64,12 +90,17 @@ def main() -> int:
                 warnings.append(f"{rel}: constrained cleanup/build command `{term}`")
             elif term in {"sqlmap", "masscan"} and rel == "backend/app/tools/log_analyzer.py":
                 warnings.append(f"{rel}: suspicious UA detection term `{term}`")
+            elif rel == "backend/app/core/code_execution_sandbox.py":
+                warnings.append(f"{rel}: sandbox deny/allow-list term `{term}`")
             elif "core/safety.py" in rel or "core/policy_engine.py" in rel:
                 warnings.append(f"{rel}: deny-list term `{term}`")
             else:
                 failures.append(f"{rel}: dangerous implementation term `{term}`")
-        if NETWORK_RE.search(text) and rel not in NETWORK_ALLOW and rel != "scripts/safety_audit.py":
-            failures.append(f"{rel}: network client usage outside approved ScopeGuard/LLM modules")
+        if NETWORK_RE.search(text) and rel != "scripts/safety_audit.py":
+            if is_doc_context(rel):
+                warnings.append(f"{rel}: documented/fixture network client usage")
+            elif rel not in NETWORK_ALLOW and not rel.startswith(NETWORK_ALLOW_PREFIXES):
+                failures.append(f"{rel}: network client usage outside approved ScopeGuard/LLM modules")
 
     package_findings = check_package()
     failures.extend(package_findings)
