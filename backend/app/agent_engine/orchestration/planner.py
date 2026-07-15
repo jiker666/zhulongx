@@ -11,6 +11,7 @@ from app.agent_engine.abort import AbortToken
 from app.agent_engine.contracts.plan import Plan
 from app.agent_engine.contracts.task import TaskBudget, TaskNode
 from app.agent_engine.events import AppendOnlyEventStore, EventType
+from app.agent_engine.hooks import HookContext, HookPipeline
 from app.agent_engine.orchestration.task_graph import TaskGraph
 from app.agent_engine.providers.base import ModelProvider, ProviderError
 from app.agent_engine.state import RunRequest
@@ -165,12 +166,14 @@ class DynamicPlanner:
         allowed_tools: tuple[str, ...],
         required_outputs: tuple[str, ...],
         max_repairs: int = 2,
+        hooks: HookPipeline | None = None,
     ) -> None:
         self.provider = provider
         self.allowed_roles = allowed_roles
         self.allowed_tools = allowed_tools
         self.required_outputs = required_outputs
         self.max_repairs = max(0, max_repairs)
+        self.hooks = hooks or HookPipeline()
 
     def propose(
         self,
@@ -225,6 +228,13 @@ class DynamicPlanner:
                     "tool_count": 0,
                 },
             )
+            self.hooks.run("before_model", HookContext(
+                run_id,
+                request.task_id,
+                "agent_root",
+                "planner",
+                {"purpose": "plan_proposal", "attempt": attempt},
+            ))
             turn = self.provider.complete(
                 messages,
                 [],

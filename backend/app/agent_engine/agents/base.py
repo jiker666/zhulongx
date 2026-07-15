@@ -13,6 +13,7 @@ class ContextPolicy:
     evidence_ids: tuple[str, ...] = ()
     artifact_ids: tuple[str, ...] = ()
     max_events: int = 30
+    context_budget_tokens: int = 128_000
 
 
 @dataclass(frozen=True)

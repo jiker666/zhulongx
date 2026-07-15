@@ -12,6 +12,7 @@ from app.agent_engine.agents.roles import RoleExecutionProfile, default_role_exe
 from app.agent_engine.budget import BudgetLimits
 from app.agent_engine.checkpoint import CheckpointStore
 from app.agent_engine.events import AppendOnlyEventStore, EventType
+from app.agent_engine.hooks import HookPipeline
 from app.agent_engine.orchestration.mailbox import AgentMailbox
 from app.agent_engine.orchestration.subagent_manager import SubagentRecord
 from app.agent_engine.policy.engine import PolicyEngine
@@ -21,6 +22,8 @@ from app.agent_engine.sandbox.container import ContainerSandbox
 from app.agent_engine.session import AgentSession
 from app.agent_engine.state import InputReference, ModelConfig, RunRequest, RunStatus
 from app.agent_engine.tools.registry import ToolRegistry
+from app.agent_engine.tools.resource_locks import ResourceLockManager
+from app.agent_engine.tools.selector import ToolCapabilitySelector
 from app.agent_engine.validation.base import Validator
 
 
@@ -142,6 +145,9 @@ class LLMSubagentWorker:
         *,
         sandbox_for_workspace: SandboxForWorkspace | None = None,
         role_execution_profiles: Mapping[str, RoleExecutionProfile] | None = None,
+        hooks: HookPipeline | None = None,
+        resource_locks: ResourceLockManager | None = None,
+        tool_selector: ToolCapabilitySelector | None = None,
     ) -> None:
         self.root_request = root_request
         self.validator = validator
@@ -150,6 +156,9 @@ class LLMSubagentWorker:
         self.provider_for_role = provider_for_role
         self.sandbox_for_workspace = sandbox_for_workspace
         self.role_execution_profiles = dict(role_execution_profiles or default_role_execution_profiles())
+        self.hooks = hooks or HookPipeline()
+        self.resource_locks = resource_locks or ResourceLockManager()
+        self.tool_selector = tool_selector or ToolCapabilitySelector()
         self._lock = threading.RLock()
         self._active: dict[str, AgentSession] = {}
 
@@ -214,6 +223,9 @@ class LLMSubagentWorker:
             "policy": self.policy,
             "sandbox": sandbox,
             "checkpoint_store": checkpoint_store,
+            "hooks": self.hooks,
+            "resource_locks": self.resource_locks,
+            "tool_selector": self.tool_selector,
         }
         if checkpoint_store.exists(record.child_run_id):
             session = AgentSession.resume(child_request, run_id=record.child_run_id, **common)

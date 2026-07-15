@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 from app.agent_engine.abort import AbortToken
@@ -8,6 +8,7 @@ from app.agent_engine.budget import BudgetTracker
 from app.agent_engine.context import ContextBuilder
 from app.agent_engine.compaction import ContextCompactor
 from app.agent_engine.events import AgentEvent, AppendOnlyEventStore, EventType
+from app.agent_engine.hooks import HookContext, HookPipeline
 from app.agent_engine.providers.base import ModelProvider, ProviderError
 from app.agent_engine.orchestration.replanner import Replanner
 from app.agent_engine.orchestration.stuck_detector import StuckDetector
@@ -16,6 +17,7 @@ from app.agent_engine.state import RunRequest, RunStatus, SessionState
 from app.agent_engine.tools.batch import BoundedToolBatchExecutor
 from app.agent_engine.tools.executor import ToolExecutionService
 from app.agent_engine.tools.registry import ToolRegistry
+from app.agent_engine.tools.selector import ToolCapabilitySelector
 from app.agent_engine.tools.types import ToolCall, ToolContext
 from app.agent_engine.validation.base import CandidateSubmission, ValidationResult, Validator
 
@@ -40,6 +42,8 @@ class AgentLoop:
         max_no_progress: int = 3,
         max_tool_concurrency: int = 4,
         checkpoint_callback: Callable[[], None] | None = None,
+        tool_selector: ToolCapabilitySelector | None = None,
+        hooks: HookPipeline | None = None,
     ) -> None:
         self.provider = provider
         self.registry = registry
@@ -61,6 +65,8 @@ class AgentLoop:
             max_concurrency=max_tool_concurrency,
         )
         self.checkpoint_callback = checkpoint_callback
+        self.tool_selector = tool_selector or ToolCapabilitySelector()
+        self.hooks = hooks or HookPipeline()
 
     def run(
         self,
@@ -77,8 +83,31 @@ class AgentLoop:
             abort_token.raise_if_aborted()
             budget.check()
             self._warn_budget_if_needed(state, events, budget)
-            self._compact_if_needed(state, events)
-            messages = self.context_builder.build(request, state, events)
+            self._compact_if_needed(request, state, events)
+            pack = self.context_builder.build_pack(request, state, events)
+            messages = [dict(message) for message in pack.messages]
+            hook_context = HookContext(
+                state.run_id,
+                request.task_id,
+                "agent_root",
+                request.agent_role,
+                {"context": pack.stats.to_dict()},
+            )
+            self.hooks.run("before_model", hook_context)
+            self.hooks.run("before_tool_selection", hook_context)
+            selection = self.tool_selector.select(request, state, self.registry)
+            toolset = self._append(
+                events,
+                state,
+                EventType.TOOLSET_SELECTED,
+                actor="tool_selector",
+                payload={
+                    "tools": list(selection.names),
+                    "reasons": dict(selection.reasons),
+                    "count": len(selection.names),
+                    "limit": self.tool_selector.max_functions,
+                },
+            )
             requested = self._append(
                 events,
                 state,
@@ -86,15 +115,17 @@ class AgentLoop:
                 actor="agent_loop",
                 payload={
                     "message_count": len(messages),
-                    "tool_count": len(self.registry.definitions()),
+                    "tool_count": len(selection.definitions),
                     "provider": request.model_config.provider,
                     "model": request.model_config.model,
+                    "context": pack.stats.to_dict(),
                 },
+                parent_event_id=toolset.event_id,
             )
             try:
                 turn = self.provider.complete(
                     messages,
-                    self.registry.schemas(),
+                    selection.schemas(),
                     timeout_seconds=min(request.model_config.timeout_seconds, request.budgets.max_seconds, 120),
                     abort_token=abort_token,
                 )
@@ -197,8 +228,9 @@ class AgentLoop:
 
             no_progress = 0
             calls = [ToolCall(call.id, call.name, call.arguments) for call in turn.tool_calls]
+            selected_tool_context = replace(tool_context, exposed_tools=selection.names)
             executions = sorted(
-                self.batch_executor.execute(calls, tool_context, parent_event_id=responded.event_id),
+                self.batch_executor.execute(calls, selected_tool_context, parent_event_id=responded.event_id),
                 key=lambda item: item.execution.result_event.sequence,
             )
             for item in executions:
@@ -238,6 +270,14 @@ class AgentLoop:
                         parent_event_id=execution.result_event.event_id,
                         payload=state_event_payload,
                     )
+                    if state_event_type in {EventType.EVIDENCE_RECORDED.value, EventType.FACT_CONFIRMED.value}:
+                        self.hooks.run("after_evidence_extraction", HookContext(
+                            state.run_id,
+                            request.task_id,
+                            "agent_root",
+                            request.agent_role,
+                            {"event_type": state_event_type, "source_event_id": execution.result_event.event_id},
+                        ))
                 self._checkpoint()
 
                 if provider_call.name == "ask_human" and execution.result.success:
@@ -317,6 +357,13 @@ class AgentLoop:
             events=events,
             workspace=tool_context.workspace,
         )
+        self.hooks.run("after_evidence_extraction", HookContext(
+            state.run_id,
+            self._task_id or "",
+            "agent_root",
+            tool_context.request.agent_role,
+            {"candidate": candidate.value, "accepted": validation.accepted, "level": validation.level},
+        ))
         event_type = self._validation_event_type(validation)
         validation_event = self._append(
             events,
@@ -439,12 +486,14 @@ class AgentLoop:
         if self.checkpoint_callback is not None:
             self.checkpoint_callback()
 
-    def _compact_if_needed(self, state: SessionState, events: AppendOnlyEventStore) -> None:
-        source = events.read(state.run_id)
-        if len(source) <= self.context_builder.max_events * 2:
-            return
+    def _compact_if_needed(
+        self,
+        request: RunRequest,
+        state: SessionState,
+        events: AppendOnlyEventStore,
+    ) -> None:
         prior_sequence = int(state.history_summary.get("through_sequence", 0) or 0)
-        compactable = source[:-self.context_builder.max_events]
+        compactable = self.context_builder.compactable_events(request, state, events)
         if not compactable or compactable[-1].sequence <= prior_sequence:
             return
         summary = self.compactor.compact(state, compactable).to_dict()

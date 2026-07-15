@@ -7,6 +7,7 @@ from pathlib import Path
 from app.agent_engine.checkpoint import CheckpointStore
 from app.agent_engine.events import AppendOnlyEventStore, EventType
 from app.agent_engine.managed_run import ManagedRun
+from app.agent_engine.hooks import HookPipeline
 from app.agent_engine.orchestration.coordinator import CoordinatorSession
 from app.agent_engine.orchestration.completion_policy import CoordinatorCompletionPolicy
 from app.agent_engine.orchestration.graph_replanner import EvidenceDrivenGraphReplanner
@@ -26,6 +27,8 @@ from app.agent_engine.skills.loader import SkillLoader
 from app.agent_engine.state import RunRequest
 from app.agent_engine.tools.builtin import build_builtin_registry
 from app.agent_engine.tools.registry import ToolRegistry
+from app.agent_engine.tools.resource_locks import ResourceLockManager
+from app.agent_engine.tools.selector import ToolCapabilitySelector
 from app.agent_engine.validation.base import Validator
 from app.config import settings
 from app.scenarios import default_scenarios
@@ -86,6 +89,9 @@ class RunSessionFactory:
         checkpoints = checkpoint_store or CheckpointStore(workspace / ".agent_state" / "checkpoints")
         selected_registry = registry or build_builtin_registry(skill_loader)
         selected_policy = policy or PolicyEngine()
+        hooks = HookPipeline()
+        resource_locks = ResourceLockManager()
+        tool_selector = ToolCapabilitySelector()
         selected_sandbox = sandbox or ContainerSandbox(
             workspace,
             readonly_paths=[item.path for item in request.inputs if item.readonly],
@@ -105,6 +111,9 @@ class RunSessionFactory:
                 "skill_loader": skill_loader,
                 "registry": selected_registry,
                 "policy": selected_policy,
+                "hooks": hooks,
+                "resource_locks": resource_locks,
+                "tool_selector": tool_selector,
             }
             if checkpoints.exists(selected_run_id):
                 session: ManagedRun = AgentSession.resume(request, run_id=selected_run_id, **common)
@@ -138,6 +147,9 @@ class RunSessionFactory:
                 selected_policy,
                 provider_for_role,
                 sandbox_for_workspace=sandbox_for_workspace,
+                hooks=hooks,
+                resource_locks=resource_locks,
+                tool_selector=tool_selector,
             )
             planner_provider = (
                 configured_provider(route_policy.for_role(request.model_config, "planner"))
@@ -149,6 +161,7 @@ class RunSessionFactory:
                 allowed_roles=workflow.allowed_roles,
                 allowed_tools=workflow.allowed_tools,
                 required_outputs=scenario.manifest().required_outputs,
+                hooks=hooks,
             )
             manager = SubagentManager(
                 selected_run_id,
@@ -168,6 +181,8 @@ class RunSessionFactory:
                 "dynamic_planner": dynamic_planner,
                 "graph_replanner": EvidenceDrivenGraphReplanner(),
                 "completion_policy": CoordinatorCompletionPolicy(validator),
+                "hooks": hooks,
+                "resource_locks": resource_locks,
             }
             if checkpoints.exists(selected_run_id):
                 session = CoordinatorSession.resume(request, plan, workflow, manager, **coordinator_kwargs)

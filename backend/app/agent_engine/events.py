@@ -35,6 +35,7 @@ class EventType(str, Enum):
     AGENT_COMPLETED = "agent.completed"
     MAILBOX_MESSAGE = "mailbox.message"
     TOOL_REQUESTED = "tool.requested"
+    TOOLSET_SELECTED = "toolset.selected"
     POLICY_ALLOWED = "policy.allowed"
     POLICY_DENIED = "policy.denied"
     TOOL_STARTED = "tool.started"

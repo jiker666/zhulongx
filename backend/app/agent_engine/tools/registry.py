@@ -23,6 +23,10 @@ class ToolRegistry:
         validate_arguments(definition.input_schema, arguments)
 
     def schemas(self) -> list[dict[str, object]]:
+        return self.schemas_for(self.definitions())
+
+    @staticmethod
+    def schemas_for(definitions) -> list[dict[str, object]]:
         return [
             {
                 "type": "function",
@@ -32,7 +36,7 @@ class ToolRegistry:
                     "parameters": dict(definition.input_schema),
                 },
             }
-            for definition in sorted(self._definitions.values(), key=lambda item: item.name)
+            for definition in sorted(definitions, key=lambda item: item.name)
         ]
 
     def definitions(self) -> tuple[ToolDefinition, ...]:

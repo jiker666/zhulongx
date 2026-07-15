@@ -107,7 +107,9 @@ class StateReducer:
             _upsert(state.agents, agent, "agent_id")
 
         if event_type == EventType.FACT_CONFIRMED.value:
-            _upsert(state.confirmed_facts, payload.get("fact") or payload, "fact_id")
+            fact = payload.get("fact") or payload
+            if fact.get("evidence_ids") or fact.get("source_event_ids"):
+                _upsert(state.confirmed_facts, fact, "fact_id")
         elif event_type == EventType.FACT_RETRACTED.value:
             fact_id = payload.get("fact_id")
             state.confirmed_facts = [item for item in state.confirmed_facts if item.get("fact_id") != fact_id]
@@ -115,6 +117,11 @@ class StateReducer:
             _upsert(state.open_hypotheses, payload.get("hypothesis") or payload, "hypothesis_id")
         elif event_type in {EventType.HYPOTHESIS_CONFIRMED.value, EventType.HYPOTHESIS_REFUTED.value}:
             hypothesis = dict(payload.get("hypothesis") or payload)
+            if event_type == EventType.HYPOTHESIS_CONFIRMED.value and not (
+                hypothesis.get("evidence_ids") or hypothesis.get("source_event_ids")
+            ):
+                state.last_event_sequence = event.sequence
+                return state
             hypothesis_id = hypothesis.get("hypothesis_id")
             state.open_hypotheses = [
                 item for item in state.open_hypotheses if item.get("hypothesis_id") != hypothesis_id

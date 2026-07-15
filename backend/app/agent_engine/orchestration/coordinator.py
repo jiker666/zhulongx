@@ -13,6 +13,7 @@ from app.agent_engine.checkpoint import CheckpointSnapshot, CheckpointStore
 from app.agent_engine.contracts.plan import Plan
 from app.agent_engine.contracts.completion import CompletionDecision
 from app.agent_engine.events import AppendOnlyEventStore, EventType
+from app.agent_engine.hooks import HookContext, HookPipeline
 from app.agent_engine.orchestration.completion_policy import CoordinatorCompletionPolicy
 from app.agent_engine.orchestration.dynamic_scheduler import DynamicTaskScheduler, SchedulerOutcome
 from app.agent_engine.orchestration.graph_replanner import EvidenceDrivenGraphReplanner
@@ -31,6 +32,7 @@ from app.agent_engine.state import PAUSED_STATUSES, RunRequest, RunStatus, Sessi
 from app.agent_engine.tools.builtin import build_builtin_registry
 from app.agent_engine.tools.executor import ToolExecutionService
 from app.agent_engine.tools.registry import ToolRegistry
+from app.agent_engine.tools.resource_locks import ResourceLockManager
 from app.agent_engine.tools.types import ToolCall, ToolContext
 from app.agent_engine.validation.base import Validator
 
@@ -109,6 +111,8 @@ class CoordinatorSession:
         dynamic_planner: DynamicPlanner | None = None,
         graph_replanner: EvidenceDrivenGraphReplanner | None = None,
         completion_policy: CoordinatorCompletionPolicy | None = None,
+        hooks: HookPipeline | None = None,
+        resource_locks: ResourceLockManager | None = None,
     ) -> None:
         self.request = request
         self.plan = plan
@@ -132,10 +136,18 @@ class CoordinatorSession:
         )
         self.abort_token = AbortToken()
         self.budget = BudgetTracker(request.budgets)
-        self.executor = ToolExecutionService(self.registry, self.policy, self.events)
         self.dynamic_planner = dynamic_planner
         self.graph_replanner = graph_replanner or EvidenceDrivenGraphReplanner()
         self.completion_policy = completion_policy
+        self.hooks = hooks or HookPipeline()
+        self.resource_locks = resource_locks or ResourceLockManager()
+        self.executor = ToolExecutionService(
+            self.registry,
+            self.policy,
+            self.events,
+            hooks=self.hooks,
+            resource_locks=self.resource_locks,
+        )
         self.dynamic_scheduler: DynamicTaskScheduler | None = None
         self._abort = threading.Event()
         self._timed_out = False
@@ -174,6 +186,8 @@ class CoordinatorSession:
         dynamic_planner: DynamicPlanner | None = None,
         graph_replanner: EvidenceDrivenGraphReplanner | None = None,
         completion_policy: CoordinatorCompletionPolicy | None = None,
+        hooks: HookPipeline | None = None,
+        resource_locks: ResourceLockManager | None = None,
     ) -> "CoordinatorSession":
         snapshot = checkpoint_store.load(run_id)
         session = cls(
@@ -191,6 +205,8 @@ class CoordinatorSession:
             dynamic_planner=dynamic_planner,
             graph_replanner=graph_replanner,
             completion_policy=completion_policy,
+            hooks=hooks,
+            resource_locks=resource_locks,
         )
         session.state = SessionState.from_dict(snapshot.state)
         session.budget = BudgetTracker(request.budgets, BudgetUsage.from_dict(snapshot.budget_usage))
@@ -392,6 +408,11 @@ class CoordinatorSession:
         return self._finish(RunStatus.HUMAN_REQUIRED, handoff["minimal_blocker"], {"handoff": handoff})
 
     def _apply_patch(self, patch: PlanPatch, outcome: SchedulerOutcome) -> None:
+        self.hooks.run("before_plan_patch", self._hook_context({
+            "reason": patch.reason,
+            "operation_count": len(patch.operations),
+            "evidence_refs": list(patch.evidence_refs),
+        }))
         proposed = self._append(EventType.PLAN_PATCH_PROPOSED, "replanner", {
             "patch": patch.model_dump(),
             "reason": patch.reason,
@@ -465,6 +486,7 @@ class CoordinatorSession:
         had_active_children = any(record.status in {"queued", "running"} for record in self.manager.records())
         self._abort.set()
         self.abort_token.abort(reason)
+        self.hooks.run("on_abort", self._hook_context({"reason": reason}))
         for record in self.manager.records():
             self.manager.cancel(record.agent_id, reason)
         worker_abort = getattr(self.manager.worker, "abort_all", None)
@@ -481,6 +503,7 @@ class CoordinatorSession:
         self._timed_out = True
         self._abort.set()
         self.abort_token.abort("coordinator deadline exceeded")
+        self.hooks.run("on_abort", self._hook_context({"reason": "coordinator deadline exceeded"}))
         for record in self.manager.records():
             self.manager.cancel(record.agent_id, "coordinator deadline exceeded")
         worker_abort = getattr(self.manager.worker, "abort_all", None)
@@ -606,6 +629,10 @@ class CoordinatorSession:
     def _finish(self, status: RunStatus, reason: str, output: dict[str, Any]) -> SessionState:
         if self.state.status in TERMINAL_STATUSES - {RunStatus.HUMAN_REQUIRED}:
             return self.state
+        self.hooks.run("before_completion", self._hook_context({
+            "status": status.value,
+            "evidence_count": len(self.state.evidence),
+        }))
         decided = self._append(EventType.COMPLETION_DECIDED, "completion_policy", {
             "status": status.value, "error": reason, "output": output,
         })
@@ -659,6 +686,18 @@ class CoordinatorSession:
             self.state.budget_usage,
             event_offset if event_offset is not None else self.state.last_event_sequence,
         ))
+        self.hooks.run("on_checkpoint", self._hook_context({
+            "event_offset": event_offset if event_offset is not None else self.state.last_event_sequence,
+        }))
+
+    def _hook_context(self, data: dict[str, object]) -> HookContext:
+        return HookContext(
+            self.run_id,
+            self.request.task_id,
+            "agent_root",
+            "coordinator",
+            data,
+        )
 
     def _ingest_inputs(self, parent_event_id: str) -> None:
         if any(event.type == EventType.ARTIFACT_INGESTED.value for event in self.event_stream()):

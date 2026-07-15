@@ -10,6 +10,7 @@ from app.agent_engine.budget import BudgetExceeded, BudgetTracker, BudgetUsage
 from app.agent_engine.checkpoint import CheckpointSnapshot, CheckpointStore
 from app.agent_engine.context import ContextBuilder
 from app.agent_engine.events import AppendOnlyEventStore, EventType
+from app.agent_engine.hooks import HookContext, HookPipeline
 from app.agent_engine.loop import AgentLoop, LoopOutcome
 from app.agent_engine.policy.engine import PolicyEngine
 from app.agent_engine.providers.base import ModelProvider
@@ -22,6 +23,8 @@ from app.agent_engine.state import PAUSED_STATUSES, RunRequest, RunStatus, Sessi
 from app.agent_engine.tools.builtin import build_builtin_registry
 from app.agent_engine.tools.executor import ToolExecutionService
 from app.agent_engine.tools.registry import ToolRegistry
+from app.agent_engine.tools.resource_locks import ResourceLockManager
+from app.agent_engine.tools.selector import ToolCapabilitySelector
 from app.agent_engine.tools.types import ToolCall, ToolContext
 from app.agent_engine.validation.base import Validator
 
@@ -43,6 +46,10 @@ class AgentSession:
         checkpoint_store: CheckpointStore | None = None,
         skill_index: SkillIndex | None = None,
         skill_loader: SkillLoader | None = None,
+        hooks: HookPipeline | None = None,
+        resource_locks: ResourceLockManager | None = None,
+        tool_selector: ToolCapabilitySelector | None = None,
+        context_builder: ContextBuilder | None = None,
     ) -> None:
         self.request = request
         self.run_id = run_id or f"run_{uuid.uuid4().hex}"
@@ -62,22 +69,33 @@ class AgentSession:
         if callable(bind_private_transcript):
             bind_private_transcript(str(self.workspace / ".agent_state" / "private" / "provider_transcript.json"))
         self.validator = validator
+        self.hooks = hooks or HookPipeline()
+        self.resource_locks = resource_locks or ResourceLockManager()
+        self.tool_selector = tool_selector or ToolCapabilitySelector()
         self.abort_token = AbortToken()
         self._timed_out = False
         self.budget = BudgetTracker(request.budgets)
         self.reducer = StateReducer()
         self.state = SessionState(run_id=self.run_id, objective=request.objective)
         self.checkpoint_store = checkpoint_store or CheckpointStore(self.workspace / ".agent_state" / "checkpoints")
-        self.executor = ToolExecutionService(self.registry, self.policy, self.events)
+        self.executor = ToolExecutionService(
+            self.registry,
+            self.policy,
+            self.events,
+            hooks=self.hooks,
+            resource_locks=self.resource_locks,
+        )
         self.loop = AgentLoop(
             provider=self.provider,
             registry=self.registry,
             executor=self.executor,
             validator=self.validator,
-            context_builder=ContextBuilder(skill_index=skill_index),
+            context_builder=context_builder or ContextBuilder(skill_index=skill_index),
             reducer=self.reducer,
             max_tool_concurrency=request.model_config.max_parallel_tools,
             checkpoint_callback=self._save_checkpoint,
+            tool_selector=self.tool_selector,
+            hooks=self.hooks,
         )
 
     @classmethod
@@ -95,6 +113,10 @@ class AgentSession:
         sandbox: Sandbox | None = None,
         skill_index: SkillIndex | None = None,
         skill_loader: SkillLoader | None = None,
+        hooks: HookPipeline | None = None,
+        resource_locks: ResourceLockManager | None = None,
+        tool_selector: ToolCapabilitySelector | None = None,
+        context_builder: ContextBuilder | None = None,
     ) -> "AgentSession":
         snapshot = checkpoint_store.load(run_id)
         session = cls(
@@ -109,6 +131,10 @@ class AgentSession:
             checkpoint_store=checkpoint_store,
             skill_index=skill_index,
             skill_loader=skill_loader,
+            hooks=hooks,
+            resource_locks=resource_locks,
+            tool_selector=tool_selector,
+            context_builder=context_builder,
         )
         session.state = SessionState.from_dict(snapshot.state)
         session.budget = BudgetTracker(request.budgets, BudgetUsage.from_dict(snapshot.budget_usage))
@@ -209,6 +235,7 @@ class AgentSession:
         changed = self.abort_token.abort(reason)
         self.sandbox.abort_all()
         if changed and self.state.status not in TERMINAL_STATUSES - {RunStatus.HUMAN_REQUIRED}:
+            self.hooks.run("on_abort", self._hook_context({"reason": reason}))
             self._append(
                 EventType.RUN_CANCELLED,
                 actor="control_plane",
@@ -297,6 +324,7 @@ class AgentSession:
     def _timeout_abort(self) -> None:
         self._timed_out = True
         self.abort_token.abort("run exceeded time budget")
+        self.hooks.run("on_abort", self._hook_context({"reason": "run exceeded time budget"}))
         self.sandbox.abort_all()
 
     def event_stream(self, *, after_sequence: int = 0):
@@ -305,6 +333,10 @@ class AgentSession:
     def _finish(self, outcome: LoopOutcome, parent_event_id: str | None) -> SessionState:
         if self.state.status in TERMINAL_STATUSES:
             return self.state
+        self.hooks.run("before_completion", self._hook_context({
+            "status": outcome.status.value,
+            "evidence_count": len(self.state.evidence),
+        }))
         active_node = next(
             (node for node in self.state.current_plan.get("nodes", []) if node.get("status") == "running"),
             None,
@@ -381,6 +413,18 @@ class AgentSession:
             budget_usage=self.state.budget_usage,
             event_offset=self.state.last_event_sequence,
         ))
+        self.hooks.run("on_checkpoint", self._hook_context({
+            "event_offset": self.state.last_event_sequence,
+        }))
+
+    def _hook_context(self, data: dict[str, object]) -> HookContext:
+        return HookContext(
+            self.run_id,
+            self.request.task_id,
+            "agent_root",
+            self.request.agent_role,
+            data,
+        )
 
     def answer_human(
         self,

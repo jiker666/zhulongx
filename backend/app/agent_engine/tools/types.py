@@ -35,6 +35,7 @@ class ToolContext:
     sandbox: Sandbox
     agent_id: str = "agent_root"
     tool_call_id: str = ""
+    exposed_tools: tuple[str, ...] = ()
 
 
 class ToolExecutor(Protocol):
