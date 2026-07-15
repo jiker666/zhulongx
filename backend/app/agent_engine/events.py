@@ -17,6 +17,7 @@ class EventType(str, Enum):
     RUN_MODE_SELECTED = "run.mode_selected"
     MODEL_REQUESTED = "model.requested"
     MODEL_RESPONDED = "model.responded"
+    PROVIDER_CAPABILITY_NEGOTIATED = "provider.capability_negotiated"
     PLAN_PROPOSED = "plan.proposed"
     PLAN_ACCEPTED = "plan.accepted"
     PLAN_NODE_STARTED = "plan.node_started"

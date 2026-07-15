@@ -43,10 +43,21 @@ class AgentRunCreate(BaseModel):
     model: str = Field(default=settings.LLM_MODEL, min_length=1, max_length=200)
     gateway_profile: str = Field(default="default", max_length=50)
     base_url: str = Field(default="", max_length=2000)
-    temperature: float = Field(default=settings.LLM_TEMPERATURE, ge=0, le=2)
-    max_tokens: int = Field(default=settings.LLM_MAX_TOKENS, ge=1, le=200_000)
+    temperature: float = Field(default=settings.LLM_TEMPERATURE, ge=0, le=1)
+    max_tokens: int = Field(
+        default=(settings.GLM_MAX_OUTPUT_TOKENS if settings.LLM_PROVIDER == "glm" else settings.LLM_MAX_TOKENS),
+        ge=1,
+        le=131_072,
+    )
     model_timeout_seconds: float = Field(default=settings.LLM_TIMEOUT, ge=1, le=600)
     parallel_tool_calls: bool = True
+    thinking_enabled: bool = settings.GLM_THINKING_ENABLED
+    clear_thinking: bool = settings.GLM_CLEAR_THINKING
+    reasoning_effort: Literal["none", "minimal", "low", "medium", "high", "max", "xhigh"] = settings.GLM_REASONING_EFFORT
+    stream: bool = settings.GLM_STREAM
+    tool_stream: bool = settings.GLM_TOOL_STREAM
+    model_connect_timeout_seconds: float = Field(default=settings.GLM_CONNECT_TIMEOUT, gt=0, le=120)
+    model_read_timeout_seconds: float = Field(default=settings.GLM_READ_TIMEOUT, gt=0, le=600)
     execution_mode: Literal["auto", "coordinator", "single"] = "auto"
     orchestration_profile: Literal["conservative", "balanced", "aggressive"] = "balanced"
     autonomy_level: Literal["low", "medium", "high"] = "high"
@@ -115,6 +126,13 @@ def create_agent_run(payload: AgentRunCreate):
             max_tokens=payload.max_tokens,
             timeout_seconds=payload.model_timeout_seconds,
             parallel_tool_calls=payload.parallel_tool_calls,
+            thinking_enabled=payload.thinking_enabled,
+            clear_thinking=payload.clear_thinking,
+            reasoning_effort=payload.reasoning_effort,
+            stream=payload.stream,
+            tool_stream=payload.tool_stream,
+            connect_timeout_seconds=payload.model_connect_timeout_seconds,
+            read_timeout_seconds=payload.model_read_timeout_seconds,
         ),
         execution_mode=payload.execution_mode,
         orchestration_profile=payload.orchestration_profile,

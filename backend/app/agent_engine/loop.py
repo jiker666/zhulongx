@@ -54,6 +54,7 @@ class AgentLoop:
         self.replanner = Replanner()
         self._replan_attempts = 0
         self._budget_warning_emitted = False
+        self._capability_signatures: set[str] = set()
         self.batch_executor = BoundedToolBatchExecutor(
             registry,
             executor,
@@ -113,12 +114,28 @@ class AgentLoop:
                 return LoopOutcome(RunStatus.FAILED, f"provider error [{exc.code}]: {exc}")
 
             budget.record_model_request(turn.usage)
+            provider_metadata = dict(turn.provider_metadata)
+            negotiation = provider_metadata.get("capability_negotiation")
+            response_parent_id = requested.event_id
+            if isinstance(negotiation, dict):
+                signature = repr(sorted(negotiation.get("downgraded_fields", [])))
+                if signature not in self._capability_signatures:
+                    self._capability_signatures.add(signature)
+                    capability_event = self._append(
+                        events,
+                        state,
+                        EventType.PROVIDER_CAPABILITY_NEGOTIATED,
+                        actor="provider",
+                        parent_event_id=requested.event_id,
+                        payload={"negotiation": negotiation},
+                    )
+                    response_parent_id = capability_event.event_id
             responded = self._append(
                 events,
                 state,
                 EventType.MODEL_RESPONDED,
                 actor="provider",
-                parent_event_id=requested.event_id,
+                parent_event_id=response_parent_id,
                 payload={
                     "text": turn.text,
                     "tool_calls": [
@@ -129,6 +146,7 @@ class AgentLoop:
                     "budget_usage": budget.usage.to_dict(),
                     "finish_reason": turn.finish_reason,
                     "raw_response_ref": turn.raw_response_ref,
+                    **turn.public_metadata(),
                 },
             )
 

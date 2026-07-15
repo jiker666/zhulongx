@@ -58,6 +58,13 @@ class ModelConfig:
     expert_model: str = ""
     reviewer_model: str = ""
     degradation_policy: str = "fail_visible"
+    thinking_enabled: bool = True
+    clear_thinking: bool = False
+    reasoning_effort: str = "max"
+    stream: bool = True
+    tool_stream: bool = True
+    connect_timeout_seconds: float = 10.0
+    read_timeout_seconds: float = 120.0
 
 
 @dataclass(frozen=True)

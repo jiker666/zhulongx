@@ -58,6 +58,9 @@ class AgentSession:
             readonly_paths=[item.path for item in request.inputs if item.readonly],
         )
         self.provider = provider
+        bind_private_transcript = getattr(self.provider, "bind_private_transcript", None)
+        if callable(bind_private_transcript):
+            bind_private_transcript(str(self.workspace / ".agent_state" / "private" / "provider_transcript.json"))
         self.validator = validator
         self.abort_token = AbortToken()
         self._timed_out = False
@@ -211,6 +214,7 @@ class AgentSession:
                 payload={"status": RunStatus.CANCELLED.value, "error": reason, "output": {}},
             )
             self._persist_checkpoint()
+            self._clear_private_transcript()
         return changed
 
     def pause_for_human(self, reason: str = "paused by operator") -> SessionState:
@@ -341,7 +345,19 @@ class AgentSession:
         )
         self.state.budget_usage = self.budget.usage.to_dict()
         self._persist_checkpoint()
+        if outcome.status in {
+            RunStatus.SUCCEEDED,
+            RunStatus.FAILED,
+            RunStatus.CANCELLED,
+            RunStatus.TIMED_OUT,
+        }:
+            self._clear_private_transcript()
         return self.state
+
+    def _clear_private_transcript(self) -> None:
+        clear_private_transcript = getattr(self.provider, "clear_private_transcript", None)
+        if callable(clear_private_transcript):
+            clear_private_transcript()
 
     def _last_event_id(self) -> str | None:
         events = self.events.read(self.run_id)
