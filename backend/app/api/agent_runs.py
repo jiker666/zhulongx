@@ -5,6 +5,7 @@ import json
 import shutil
 import time
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -12,9 +13,9 @@ from pydantic import BaseModel, Field
 
 from app.agent_engine.budget import BudgetLimits
 from app.agent_engine.manager import run_manager
+from app.agent_engine.managed_run import ManagedRun
 from app.agent_engine.projections import CanonicalRunProjection
 from app.agent_engine.service import agent_run_service
-from app.agent_engine.session import AgentSession
 from app.agent_engine.state import ModelConfig, NetworkPolicy, RunRequest
 from app.config import settings
 from app.scenarios import CTFScenario, default_scenarios
@@ -46,6 +47,11 @@ class AgentRunCreate(BaseModel):
     max_tokens: int = Field(default=settings.LLM_MAX_TOKENS, ge=1, le=200_000)
     model_timeout_seconds: float = Field(default=settings.LLM_TIMEOUT, ge=1, le=600)
     parallel_tool_calls: bool = True
+    execution_mode: Literal["auto", "coordinator", "single"] = "auto"
+    orchestration_profile: Literal["conservative", "balanced", "aggressive"] = "balanced"
+    autonomy_level: Literal["low", "medium", "high"] = "high"
+    max_parallel_agents: int = Field(default=4, ge=1, le=16)
+    max_agent_depth: int = Field(default=1, ge=1, le=4)
 
 
 class HumanAnswerRequest(BaseModel):
@@ -110,6 +116,11 @@ def create_agent_run(payload: AgentRunCreate):
             timeout_seconds=payload.model_timeout_seconds,
             parallel_tool_calls=payload.parallel_tool_calls,
         ),
+        execution_mode=payload.execution_mode,
+        orchestration_profile=payload.orchestration_profile,
+        autonomy_level=payload.autonomy_level,
+        max_parallel_agents=payload.max_parallel_agents,
+        max_agent_depth=payload.max_agent_depth,
     )
     try:
         session = agent_run_service.create_session(
@@ -125,6 +136,14 @@ def create_agent_run(payload: AgentRunCreate):
         "status": session.state.status.value,
         "scenario": payload.scenario,
         "workspace": str(workspace),
+        "execution_mode": next(
+            (
+                event.payload.get("effective_mode")
+                for event in session.event_stream()
+                if event.type == "run.mode_selected"
+            ),
+            payload.execution_mode,
+        ),
         "release_ready": session.sandbox.release_capable,
         "release_blocker": (
             "container runtime or preloaded sandbox image unavailable"
@@ -134,7 +153,7 @@ def create_agent_run(payload: AgentRunCreate):
     }
 
 
-def _session_or_404(run_id: str) -> AgentSession:
+def _session_or_404(run_id: str) -> ManagedRun:
     session = run_manager.get(run_id)
     if session is None:
         raise HTTPException(404, f"run not found: {run_id}")

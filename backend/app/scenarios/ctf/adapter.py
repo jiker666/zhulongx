@@ -58,4 +58,6 @@ class CTFRunRequestAdapter:
                 max_tool_calls=max((max_rounds if max_rounds > 0 else 50) * 3, 10),
             ),
             model_config=ModelConfig(provider=provider, model=model),
+            execution_mode=str(task.get("execution_mode") or "auto"),
+            max_parallel_agents=int(task.get("max_parallel_agents", 4) or 4),
         )

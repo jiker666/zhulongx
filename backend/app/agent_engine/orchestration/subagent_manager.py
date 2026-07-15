@@ -23,6 +23,8 @@ class SubagentWorker(Protocol):
 
 @dataclass
 class SubagentRecord:
+    root_run_id: str
+    child_run_id: str
     agent_id: str
     parent_agent_id: str | None
     role: str
@@ -42,6 +44,8 @@ class SubagentRecord:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "root_run_id": self.root_run_id,
+            "child_run_id": self.child_run_id,
             "agent_id": self.agent_id,
             "parent_agent_id": self.parent_agent_id,
             "role": self.role,
@@ -123,6 +127,8 @@ class SubagentManager:
             selected_workspace_policy = workspace_policy or WorkspacePolicy()
             agent_workspace = self._workspace_for(agent_id, selected_workspace_policy)
             record = SubagentRecord(
+                root_run_id=self.run_id,
+                child_run_id=f"child_{uuid.uuid4().hex}",
                 agent_id=agent_id,
                 parent_agent_id=parent_agent_id,
                 role=role,
@@ -342,6 +348,8 @@ class SubagentManager:
     @staticmethod
     def _public_record(record: SubagentRecord) -> dict[str, Any]:
         return {
+            "root_run_id": record.root_run_id,
+            "child_run_id": record.child_run_id,
             "agent_id": record.agent_id,
             "parent_agent_id": record.parent_agent_id,
             "role": record.role,

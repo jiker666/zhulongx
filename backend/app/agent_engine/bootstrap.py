@@ -2,18 +2,17 @@ from __future__ import annotations
 
 import hmac
 import logging
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from app.agent_engine.checkpoint import CheckpointStore
 from app.agent_engine.events import AppendOnlyEventStore
 from app.agent_engine.manager import run_manager
-from app.agent_engine.providers.factory import configured_provider
+from app.agent_engine.managed_run import ManagedRun
 from app.agent_engine.run_store import RunMetadata, RunMetadataStore
 from app.agent_engine.sandbox.container import ContainerSandbox
-from app.agent_engine.session import AgentSession
-from app.agent_engine.skills.index import SkillIndex
-from app.agent_engine.skills.loader import SkillLoader
+from app.agent_engine.service import agent_run_service
 from app.config import settings
 from app.core.ctf_persistence import get_expected_flag
 from app.scenarios import CTFScenario, default_scenarios
@@ -36,30 +35,31 @@ def _validator(metadata: RunMetadata):
     ).validator()
 
 
-def session_from_metadata(metadata: RunMetadata) -> AgentSession:
+def session_from_metadata(metadata: RunMetadata) -> ManagedRun:
     workspace = Path(metadata.request.workspace).expanduser().resolve()
     events = AppendOnlyEventStore(workspace / ".agent_state" / "events.jsonl")
     checkpoints = CheckpointStore(workspace / ".agent_state" / "checkpoints")
-    skill_index = SkillIndex.scan(Path(__file__).resolve().parents[1] / "skills")
-    skill_loader = SkillLoader(skill_index)
     sandbox = ContainerSandbox(
         workspace,
         readonly_paths=[item.path for item in metadata.request.inputs if item.readonly],
         runtime=settings.AGENT_SANDBOX_RUNTIME or None,
         image=settings.AGENT_SANDBOX_IMAGE,
     )
-    common: dict[str, Any] = {
-        "provider": configured_provider(metadata.request.model_config),
-        "validator": _validator(metadata),
-        "events": events,
-        "checkpoint_store": checkpoints,
-        "sandbox": sandbox,
-        "skill_index": skill_index,
-        "skill_loader": skill_loader,
-    }
-    if checkpoints.exists(metadata.run_id):
-        return AgentSession.resume(metadata.request, run_id=metadata.run_id, **common)
-    return AgentSession(metadata.request, run_id=metadata.run_id, **common)
+    request = metadata.request
+    if checkpoints.exists(metadata.run_id) and not any(
+        event.type == "run.mode_selected" for event in events.read(metadata.run_id)
+    ):
+        request = replace(request, execution_mode="single")
+    return agent_run_service.create_session(
+        request,
+        _validator(metadata),
+        run_id=metadata.run_id,
+        events=events,
+        checkpoint_store=checkpoints,
+        sandbox=sandbox,
+        scenario_config=dict(metadata.scenario_config),
+        register=False,
+    )
 
 
 def restore_persisted_sessions(root: str | Path | None = None) -> dict[str, Any]:

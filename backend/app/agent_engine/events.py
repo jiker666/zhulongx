@@ -14,6 +14,7 @@ from typing import Any, Mapping, Optional
 class EventType(str, Enum):
     RUN_CREATED = "run.created"
     RUN_STARTED = "run.started"
+    RUN_MODE_SELECTED = "run.mode_selected"
     MODEL_REQUESTED = "model.requested"
     MODEL_RESPONDED = "model.responded"
     PLAN_PROPOSED = "plan.proposed"

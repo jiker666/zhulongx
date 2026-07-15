@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 
-from app.agent_engine.session import AgentSession
+from app.agent_engine.managed_run import ManagedRun
 from app.agent_engine.state import RunStatus, SessionState
 
 
@@ -11,21 +11,23 @@ class RunManager:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._sessions: dict[str, AgentSession] = {}
+        self._sessions: dict[str, ManagedRun] = {}
         self._threads: dict[str, threading.Thread] = {}
 
-    def add(self, session: AgentSession) -> str:
+    def add(self, session: ManagedRun) -> str:
+        if not isinstance(session, ManagedRun):
+            raise TypeError("session does not implement ManagedRun")
         with self._lock:
             if session.run_id in self._sessions:
                 raise ValueError(f"run already exists: {session.run_id}")
             self._sessions[session.run_id] = session
         return session.run_id
 
-    def get(self, run_id: str) -> AgentSession | None:
+    def get(self, run_id: str) -> ManagedRun | None:
         with self._lock:
             return self._sessions.get(run_id)
 
-    def sessions(self) -> tuple[AgentSession, ...]:
+    def sessions(self) -> tuple[ManagedRun, ...]:
         with self._lock:
             return tuple(self._sessions.values())
 
@@ -44,7 +46,7 @@ class RunManager:
             thread.start()
         return True
 
-    def _run(self, run_id: str, session: AgentSession) -> None:
+    def _run(self, run_id: str, session: ManagedRun) -> None:
         try:
             session.run()
         finally:

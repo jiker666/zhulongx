@@ -72,6 +72,23 @@ class RunRequest:
     network_policy: NetworkPolicy = field(default_factory=NetworkPolicy)
     budgets: BudgetLimits = field(default_factory=BudgetLimits)
     model_config: ModelConfig = field(default_factory=ModelConfig)
+    execution_mode: str = "auto"
+    orchestration_profile: str = "balanced"
+    autonomy_level: str = "high"
+    max_parallel_agents: int = 4
+    max_agent_depth: int = 1
+
+    def __post_init__(self) -> None:
+        if self.execution_mode not in {"auto", "coordinator", "single"}:
+            raise ValueError(f"unknown execution mode: {self.execution_mode}")
+        if self.orchestration_profile not in {"conservative", "balanced", "aggressive"}:
+            raise ValueError(f"unknown orchestration profile: {self.orchestration_profile}")
+        if self.autonomy_level not in {"low", "medium", "high"}:
+            raise ValueError(f"unknown autonomy level: {self.autonomy_level}")
+        if not 1 <= self.max_parallel_agents <= 16:
+            raise ValueError("max_parallel_agents must be between 1 and 16")
+        if not 1 <= self.max_agent_depth <= 4:
+            raise ValueError("max_agent_depth must be between 1 and 4")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
