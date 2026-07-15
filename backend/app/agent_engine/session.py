@@ -76,6 +76,7 @@ class AgentSession:
             validator=self.validator,
             context_builder=ContextBuilder(skill_index=skill_index),
             reducer=self.reducer,
+            max_tool_concurrency=request.model_config.max_parallel_tools,
             checkpoint_callback=self._save_checkpoint,
         )
 

@@ -5,6 +5,7 @@ from app.agent_engine.tools.builtin.archive import ExtractArchiveExecutor
 from app.agent_engine.tools.builtin.filesystem import GrepExecutor, ListDirExecutor, ReadFileExecutor, WriteFileExecutor
 from app.agent_engine.tools.builtin.http import HttpRequestExecutor
 from app.agent_engine.tools.builtin.human import AskHumanExecutor
+from app.agent_engine.tools.builtin.handoff import CompleteTaskExecutor
 from app.agent_engine.tools.builtin.process import RunPythonExecutor, RunShellExecutor
 from app.agent_engine.tools.builtin.skill import LoadSkillExecutor
 from app.agent_engine.tools.builtin.state_updates import StateUpdateExecutor
@@ -167,6 +168,37 @@ def build_builtin_registry(
             side_effect_level="state",
             resource_locks=("candidate_state",),
             evidence_type="candidate",
+        ),
+        ToolDefinition(
+            name="complete_task",
+            description="Complete an assigned child task with a compact structured handoff to the coordinator.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "status": {"type": "string", "enum": ["completed", "blocked"]},
+                    "summary": {"type": "string", "minLength": 1, "maxLength": 20000},
+                    "facts": {"type": "array", "items": {"type": "object"}},
+                    "hypotheses_supported": {"type": "array", "items": {"type": "string"}},
+                    "hypotheses_refuted": {"type": "array", "items": {"type": "string"}},
+                    "evidence_refs": {"type": "array", "items": {"type": "string"}},
+                    "artifact_refs": {"type": "array", "items": {"type": "string"}},
+                    "commands_replay": {"type": "array", "items": {"type": "string"}},
+                    "unresolved_questions": {"type": "array", "items": {"type": "string"}},
+                    "recommended_next_actions": {"type": "array", "items": {"type": "string"}},
+                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                    "verdict": {"type": "string", "enum": ["", "accepted", "rejected", "insufficient"]},
+                },
+                "required": ["summary", "confidence"],
+                "additionalProperties": False,
+            },
+            risk_level="low",
+            permissions=("state_update",),
+            timeout_seconds=5,
+            executor=CompleteTaskExecutor(),
+            idempotency="idempotent",
+            side_effect_level="state",
+            resource_locks=("task_handoff",),
+            evidence_type="agent_handoff",
         ),
         ToolDefinition(
             name="extract_archive",

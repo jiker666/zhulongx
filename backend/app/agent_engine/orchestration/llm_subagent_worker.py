@@ -4,11 +4,13 @@ import shutil
 import threading
 from dataclasses import replace
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Mapping
 
-from app.agent_engine.agents.base import AgentSummary
+from app.agent_engine.agents.base import AgentHandoff, AgentSummary
+from app.agent_engine.agents.roles import RoleExecutionProfile, default_role_execution_profiles
 from app.agent_engine.budget import BudgetLimits
-from app.agent_engine.events import AppendOnlyEventStore
+from app.agent_engine.checkpoint import CheckpointStore
+from app.agent_engine.events import AppendOnlyEventStore, EventType
 from app.agent_engine.orchestration.mailbox import AgentMailbox
 from app.agent_engine.orchestration.subagent_manager import SubagentRecord
 from app.agent_engine.policy.engine import PolicyEngine
@@ -16,13 +18,103 @@ from app.agent_engine.providers.base import ModelProvider
 from app.agent_engine.sandbox.base import Sandbox
 from app.agent_engine.sandbox.container import ContainerSandbox
 from app.agent_engine.session import AgentSession
-from app.agent_engine.state import InputReference, RunRequest, RunStatus
+from app.agent_engine.state import InputReference, ModelConfig, RunRequest, RunStatus
 from app.agent_engine.tools.registry import ToolRegistry
 from app.agent_engine.validation.base import Validator
 
 
-ProviderForRole = Callable[[str], ModelProvider]
+ProviderForRole = Callable[[str, ModelConfig], ModelProvider]
 SandboxForWorkspace = Callable[[Path, tuple[Path, ...]], Sandbox]
+
+
+class ChildEventProjector:
+    """Project safe child execution events into the root event lineage."""
+
+    PROJECTED_TYPES = {
+        EventType.MODEL_REQUESTED.value,
+        EventType.MODEL_RESPONDED.value,
+        EventType.PROVIDER_CAPABILITY_NEGOTIATED.value,
+        EventType.TOOL_REQUESTED.value,
+        EventType.POLICY_ALLOWED.value,
+        EventType.POLICY_DENIED.value,
+        EventType.TOOL_STARTED.value,
+        EventType.TOOL_FINISHED.value,
+        EventType.TOOL_FAILED.value,
+        EventType.FACT_CONFIRMED.value,
+        EventType.FACT_RETRACTED.value,
+        EventType.HYPOTHESIS_PROPOSED.value,
+        EventType.HYPOTHESIS_CONFIRMED.value,
+        EventType.HYPOTHESIS_REFUTED.value,
+        EventType.EVIDENCE_RECORDED.value,
+        EventType.CONTRADICTION_RECORDED.value,
+        EventType.DECISION_RECORDED.value,
+        EventType.ARTIFACT_INGESTED.value,
+        EventType.SKILL_LOADED.value,
+        EventType.BUDGET_WARNING.value,
+        EventType.BUDGET_EXCEEDED.value,
+    }
+
+    def __init__(
+        self,
+        record: SubagentRecord,
+        child_events: AppendOnlyEventStore,
+        root_events: AppendOnlyEventStore,
+    ) -> None:
+        self.record = record
+        self.child_events = child_events
+        self.root_events = root_events
+        self._cursor = 0
+        self._event_map: dict[str, str] = {}
+        for event in root_events.read(record.root_run_id):
+            lineage = event.payload.get("lineage")
+            if not isinstance(lineage, Mapping) or lineage.get("child_run_id") != record.child_run_id:
+                continue
+            self._cursor = max(self._cursor, int(lineage.get("child_sequence", 0) or 0))
+            child_event_id = str(lineage.get("child_event_id") or "")
+            if child_event_id:
+                self._event_map[child_event_id] = event.event_id
+
+    def run(self, finished: threading.Event) -> None:
+        base_parent = self._spawn_event_id()
+        while True:
+            source = self.child_events.read(self.record.child_run_id, after_sequence=self._cursor)
+            for event in source:
+                self._cursor = event.sequence
+                if event.type not in self.PROJECTED_TYPES:
+                    continue
+                projected = self.root_events.append(
+                    self.record.root_run_id,
+                    event.type,
+                    actor=self.record.agent_id,
+                    parent_event_id=self._event_map.get(event.parent_event_id or "", base_parent),
+                    agent_id=self.record.agent_id,
+                    task_id=self.record.task.task_id,
+                    payload={
+                        **dict(event.payload),
+                        "lineage": {
+                            "root_run_id": self.record.root_run_id,
+                            "parent_run_id": self.record.root_run_id,
+                            "child_run_id": self.record.child_run_id,
+                            "agent_id": self.record.agent_id,
+                            "role": self.record.role,
+                            "child_event_id": event.event_id,
+                            "child_sequence": event.sequence,
+                        },
+                    },
+                )
+                self._event_map[event.event_id] = projected.event_id
+            if finished.is_set() and not self.child_events.read(
+                self.record.child_run_id,
+                after_sequence=self._cursor,
+            ):
+                return
+            finished.wait(0.02)
+
+    def _spawn_event_id(self) -> str | None:
+        for event in reversed(self.root_events.read(self.record.root_run_id)):
+            if event.type == EventType.AGENT_SPAWNED.value and event.agent_id == self.record.agent_id:
+                return event.event_id
+        return None
 
 
 class LLMSubagentWorker:
@@ -37,6 +129,7 @@ class LLMSubagentWorker:
         provider_for_role: ProviderForRole,
         *,
         sandbox_for_workspace: SandboxForWorkspace | None = None,
+        role_execution_profiles: Mapping[str, RoleExecutionProfile] | None = None,
     ) -> None:
         self.root_request = root_request
         self.validator = validator
@@ -44,21 +137,34 @@ class LLMSubagentWorker:
         self.policy = policy
         self.provider_for_role = provider_for_role
         self.sandbox_for_workspace = sandbox_for_workspace
+        self.role_execution_profiles = dict(role_execution_profiles or default_role_execution_profiles())
         self._lock = threading.RLock()
         self._active: dict[str, AgentSession] = {}
 
     def __call__(self, record: SubagentRecord, mailbox: AgentMailbox) -> AgentSummary:
+        execution_profile = self.role_execution_profiles[record.role]
         inputs = self._materialize_inputs(record.workspace)
+        model_config = replace(
+            self.root_request.model_config,
+            model=self.root_request.model_config.model or execution_profile.model,
+            temperature=execution_profile.temperature,
+            max_tokens=min(execution_profile.max_output_tokens, record.budget.max_tokens),
+            timeout_seconds=min(execution_profile.timeout_seconds, record.budget.max_seconds),
+            reasoning_effort=execution_profile.reasoning_effort,
+            max_parallel_tools=execution_profile.max_parallel_tools,
+            parallel_tool_calls=execution_profile.max_parallel_tools > 1,
+            context_budget_tokens=execution_profile.context_budget_tokens,
+        )
         child_request = replace(
             self.root_request,
             task_id=record.task.task_id,
             title=record.task.title,
-            objective=self._objective(record),
+            objective=self._objective(record, execution_profile),
             workspace=str(record.workspace),
             inputs=inputs,
             budgets=BudgetLimits(
                 max_seconds=min(self.root_request.budgets.max_seconds, record.budget.max_seconds),
-                max_model_requests=max(1, min(50, record.budget.max_tool_calls)),
+                max_model_requests=max(1, min(execution_profile.max_tool_rounds, record.budget.max_tool_calls)),
                 max_tool_calls=record.budget.max_tool_calls,
                 max_tokens=record.budget.max_tokens,
                 max_cost_usd=record.budget.max_cost_usd,
@@ -66,6 +172,11 @@ class LLMSubagentWorker:
             execution_mode="single",
             max_parallel_agents=1,
             max_agent_depth=1,
+            model_config=model_config,
+            root_run_id=record.root_run_id,
+            parent_run_id=record.root_run_id,
+            agent_role=record.role,
+            role_instructions=execution_profile.system_prompt,
         )
         child_events = AppendOnlyEventStore(record.workspace / ".agent_state" / "events.jsonl")
         readonly = tuple(Path(item.path) for item in inputs if item.readonly)
@@ -74,19 +185,35 @@ class LLMSubagentWorker:
             if self.sandbox_for_workspace is not None
             else ContainerSandbox(record.workspace, readonly_paths=readonly)
         )
-        session = AgentSession(
-            child_request,
-            run_id=record.child_run_id,
-            provider=self.provider_for_role(record.role),
-            validator=self.validator,
-            events=child_events,
-            registry=self._registry_for(record),
-            policy=self.policy,
-            sandbox=sandbox,
-        )
+        selected_provider = self.provider_for_role(record.role, child_request.model_config)
+        trace_context = getattr(selected_provider, "trace_context", None)
+        if isinstance(trace_context, dict):
+            trace_context.update({"run_id": record.child_run_id, "trace_id": record.root_run_id})
+        checkpoint_store = CheckpointStore(record.workspace / ".agent_state" / "checkpoints")
+        common = {
+            "provider": selected_provider,
+            "validator": self.validator,
+            "events": child_events,
+            "registry": self._registry_for(record),
+            "policy": self.policy,
+            "sandbox": sandbox,
+            "checkpoint_store": checkpoint_store,
+        }
+        if checkpoint_store.exists(record.child_run_id):
+            session = AgentSession.resume(child_request, run_id=record.child_run_id, **common)
+        else:
+            session = AgentSession(child_request, run_id=record.child_run_id, **common)
         with self._lock:
             self._active[record.agent_id] = session
         finished = threading.Event()
+        projector = ChildEventProjector(record, child_events, mailbox.events)
+        projector_thread = threading.Thread(
+            target=projector.run,
+            args=(finished,),
+            daemon=True,
+            name=f"subagent-events-{record.agent_id}",
+        )
+        projector_thread.start()
         watcher = threading.Thread(
             target=self._watch_cancel,
             args=(record, session, finished),
@@ -98,12 +225,45 @@ class LLMSubagentWorker:
             state = session.run()
         finally:
             finished.set()
+            projector_thread.join(timeout=2)
             with self._lock:
                 self._active.pop(record.agent_id, None)
         status = "completed" if state.status in {RunStatus.SUCCEEDED, RunStatus.PENDING_EXTERNAL} else "blocked"
         if state.status == RunStatus.CANCELLED:
             status = "cancelled"
-        summary = self._summary_text(record, state.status, state.error)
+        final_handoff = dict((state.final_output or {}).get("handoff") or {})
+        summary = str(final_handoff.get("summary") or self._summary_text(record, state.status, state.error))
+        handoff = AgentHandoff(
+            task_id=record.task.task_id,
+            status=status,
+            summary=summary,
+            facts=tuple(final_handoff.get("facts") or state.confirmed_facts),
+            hypotheses_supported=tuple(str(item) for item in final_handoff.get("hypotheses_supported", [])),
+            hypotheses_refuted=tuple(str(item) for item in final_handoff.get("hypotheses_refuted", [])),
+            evidence_refs=tuple(
+                str(item) for item in (
+                    final_handoff.get("evidence_refs")
+                    or [value.get("evidence_id", "") for value in state.evidence]
+                ) if item
+            ),
+            artifact_refs=tuple(
+                str(item) for item in (
+                    final_handoff.get("artifact_refs")
+                    or [value.get("artifact_id", value.get("path", "")) for value in state.artifacts]
+                ) if item
+            ),
+            commands_replay=tuple(str(item) for item in final_handoff.get("commands_replay", [])),
+            unresolved_questions=tuple(
+                str(item) for item in (final_handoff.get("unresolved_questions") or ([state.error] if state.error else []))
+            ),
+            recommended_next_actions=tuple(
+                str(item) for item in (
+                    final_handoff.get("recommended_next_actions")
+                    or ["inspect child evidence and continue the validated graph"]
+                )
+            ),
+            confidence=float(final_handoff.get("confidence", 1.0 if status == "completed" else 0.0)),
+        )
         mailbox.send(
             record.agent_id,
             record.parent_agent_id or "agent_root",
@@ -111,25 +271,31 @@ class LLMSubagentWorker:
             {
                 "root_run_id": record.root_run_id,
                 "child_run_id": record.child_run_id,
-                "task_id": record.task.task_id,
-                "status": status,
-                "summary": summary,
-                "evidence_refs": [item.get("evidence_id", "") for item in state.evidence],
-                "artifact_refs": [item.get("artifact_id", item.get("path", "")) for item in state.artifacts],
-                "unresolved_questions": [state.error] if state.error else [],
+                "role": record.role,
+                "review_independence": execution_profile.review_independence,
+                **handoff.to_dict(),
             },
         )
+        evidence = list(state.evidence)
+        known_evidence = {str(item.get("evidence_id") or item.get("event_id") or "") for item in evidence}
+        for evidence_ref in handoff.evidence_refs:
+            if evidence_ref not in known_evidence:
+                evidence.append({
+                    "evidence_id": evidence_ref,
+                    "summary": "child handoff evidence reference",
+                    "source_event_ids": [evidence_ref],
+                })
         return AgentSummary(
             agent_id=record.agent_id,
             role=record.role,
             task_id=record.task.task_id,
             status=status,
             summary=summary,
-            facts=tuple(state.confirmed_facts),
+            facts=handoff.facts,
             hypotheses=tuple(state.open_hypotheses),
-            evidence=tuple(state.evidence),
+            evidence=tuple(evidence),
             artifacts=tuple(state.artifacts),
-            recommendations=("inspect child handoff and referenced evidence",),
+            recommendations=handoff.recommended_next_actions,
             error=state.error if status != "completed" else "",
         )
 
@@ -148,7 +314,8 @@ class LLMSubagentWorker:
 
     def _registry_for(self, record: SubagentRecord) -> ToolRegistry:
         selected = ToolRegistry()
-        allowed = set(record.task.allowed_tools)
+        profile = self.role_execution_profiles[record.role]
+        allowed = set(record.task.allowed_tools) & set(profile.tool_capabilities)
         for definition in self.registry.definitions():
             if definition.name in allowed:
                 selected.register(definition)
@@ -170,12 +337,14 @@ class LLMSubagentWorker:
         return tuple(inputs)
 
     @staticmethod
-    def _objective(record: SubagentRecord) -> str:
+    def _objective(record: SubagentRecord, profile: RoleExecutionProfile) -> str:
         return (
-            f"Role: {record.role}. Task: {record.task.title}. "
+            f"Role: {record.role}. {profile.system_prompt} Task: {record.task.title}. "
             f"Expected output: {record.task.expected_output}. "
             f"Success criteria: {'; '.join(record.task.success_criteria)}. "
-            "Use only the assigned tools and return evidence-backed results."
+            "Use only the assigned tools and finish with complete_task. "
+            + ("Reproduce from an independent context and do not trust executor wording. " if profile.review_independence else "")
+            + "Return evidence-backed results."
         )
 
     @staticmethod

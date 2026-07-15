@@ -216,13 +216,22 @@ class CoordinatorSession:
                 })
 
         if self._abort.is_set():
-            return self._finish(RunStatus.CANCELLED, "coordinator cancelled", {})
+            status = RunStatus.TIMED_OUT if self._timed_out else RunStatus.CANCELLED
+            return self._finish(status, "coordinator deadline exceeded" if self._timed_out else "coordinator cancelled", {})
         dispatcher = SubagentTaskDispatcher(self.run_id, self.plan, self.manager, self.events)
-        result = WorkflowScheduler(dispatcher).execute(self.workflow)
+        remaining_seconds = max(0.01, self.request.budgets.max_seconds - self.budget.usage.elapsed_seconds)
+        deadline = threading.Timer(remaining_seconds, self._timeout_abort)
+        deadline.daemon = True
+        deadline.start()
+        try:
+            result = WorkflowScheduler(dispatcher).execute(self.workflow)
+        finally:
+            deadline.cancel()
         self.state = self.reducer.replay(self.run_id, self.request.objective, self.events.read(self.run_id))
         evidence_ids = self._evidence_ids(result)
         if self._abort.is_set():
-            return self._finish(RunStatus.CANCELLED, "coordinator cancelled", {})
+            status = RunStatus.TIMED_OUT if self._timed_out else RunStatus.CANCELLED
+            return self._finish(status, "coordinator deadline exceeded" if self._timed_out else "coordinator cancelled", {})
         if result.success and evidence_ids:
             return self._finish(
                 RunStatus.SUCCEEDED,
@@ -249,6 +258,7 @@ class CoordinatorSession:
     def abort(self, reason: str = "cancelled by user") -> bool:
         if self._abort.is_set():
             return False
+        had_active_children = any(record.status in {"queued", "running"} for record in self.manager.records())
         self._abort.set()
         self.abort_token.abort(reason)
         for record in self.manager.records():
@@ -257,9 +267,22 @@ class CoordinatorSession:
         if callable(worker_abort):
             worker_abort(reason)
         self.sandbox.abort_all()
-        if self.state.status not in TERMINAL_STATUSES - {RunStatus.HUMAN_REQUIRED}:
+        if not had_active_children and self.state.status not in TERMINAL_STATUSES - {RunStatus.HUMAN_REQUIRED}:
             self._finish(RunStatus.CANCELLED, reason, {})
         return True
+
+    def _timeout_abort(self) -> None:
+        if self._abort.is_set():
+            return
+        self._timed_out = True
+        self._abort.set()
+        self.abort_token.abort("coordinator deadline exceeded")
+        for record in self.manager.records():
+            self.manager.cancel(record.agent_id, "coordinator deadline exceeded")
+        worker_abort = getattr(self.manager.worker, "abort_all", None)
+        if callable(worker_abort):
+            worker_abort("coordinator deadline exceeded")
+        self.sandbox.abort_all()
 
     def pause_for_human(self, reason: str = "paused by operator") -> SessionState:
         if self.state.status in PAUSED_STATUSES:

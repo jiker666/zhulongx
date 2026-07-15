@@ -42,3 +42,26 @@ class AgentSummary:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class AgentHandoff:
+    task_id: str
+    status: str
+    summary: str
+    facts: tuple[Mapping[str, Any], ...] = ()
+    hypotheses_supported: tuple[str, ...] = ()
+    hypotheses_refuted: tuple[str, ...] = ()
+    evidence_refs: tuple[str, ...] = ()
+    artifact_refs: tuple[str, ...] = ()
+    commands_replay: tuple[str, ...] = ()
+    unresolved_questions: tuple[str, ...] = ()
+    recommended_next_actions: tuple[str, ...] = ()
+    confidence: float = 0.0
+
+    def __post_init__(self) -> None:
+        if not self.task_id or not 0 <= self.confidence <= 1:
+            raise ValueError("handoff requires a task id and confidence between 0 and 1")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)

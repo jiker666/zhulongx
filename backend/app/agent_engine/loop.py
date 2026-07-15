@@ -248,6 +248,16 @@ class AgentLoop:
                         {"handoff": self._human_handoff(state, question, "explicit human gate")},
                     )
 
+                if provider_call.name == "complete_task" and execution.result.success:
+                    handoff = dict(execution.result.metadata.get("subtask_handoff") or {})
+                    if handoff.get("status") == "blocked":
+                        return LoopOutcome(
+                            RunStatus.HUMAN_REQUIRED,
+                            str(handoff.get("summary") or "child task blocked"),
+                            {"handoff": handoff},
+                        )
+                    return LoopOutcome(RunStatus.SUCCEEDED, output={"handoff": handoff})
+
                 if provider_call.name != "submit_candidate" or not execution.result.success:
                     continue
                 outcome = self._validate_candidate(

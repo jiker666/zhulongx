@@ -65,6 +65,8 @@ class ModelConfig:
     tool_stream: bool = True
     connect_timeout_seconds: float = 10.0
     read_timeout_seconds: float = 120.0
+    max_parallel_tools: int = 4
+    context_budget_tokens: int = 128_000
 
 
 @dataclass(frozen=True)
@@ -84,6 +86,10 @@ class RunRequest:
     autonomy_level: str = "high"
     max_parallel_agents: int = 4
     max_agent_depth: int = 1
+    root_run_id: str = ""
+    parent_run_id: str = ""
+    agent_role: str = ""
+    role_instructions: str = ""
 
     def __post_init__(self) -> None:
         if self.execution_mode not in {"auto", "coordinator", "single"}:

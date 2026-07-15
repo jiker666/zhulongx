@@ -8,7 +8,7 @@ from app.agent_engine.orchestration.workflow import WorkflowSpec
 from app.scenarios.base import ScenarioManifest
 
 
-READ_TOOLS = ("list_dir", "read_file", "grep", "record_evidence", "record_fact", "record_hypothesis")
+READ_TOOLS = ("list_dir", "read_file", "grep", "record_evidence", "record_fact", "record_hypothesis", "complete_task")
 EXECUTE_TOOLS = READ_TOOLS + ("extract_archive", "run_shell", "run_python", "write_file")
 NETWORK_TOOLS = READ_TOOLS + ("http_request",)
 

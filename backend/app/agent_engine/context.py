@@ -27,7 +27,8 @@ class ContextBuilder:
                 "content": (
                     "You are a focused worker in an authorized Agent Engine run. Use registered tools, base decisions on "
                     "evidence, update the active plan, and submit candidates with evidence references. A candidate does "
-                    "not complete the run until the configured completion policy accepts it."
+                    "not complete the run until the configured completion policy accepts it. "
+                    + (f"Assigned role: {request.agent_role}. {request.role_instructions}" if request.agent_role else "")
                 ),
             },
             {
@@ -36,6 +37,11 @@ class ContextBuilder:
                     "title": request.title,
                     "objective": request.objective,
                     "scenario": request.scenario,
+                    "lineage": {
+                        "root_run_id": request.root_run_id or state.run_id,
+                        "parent_run_id": request.parent_run_id,
+                        "role": request.agent_role or "single",
+                    },
                     "inputs": [{"name": item.name, "path": item.path, "media_type": item.media_type} for item in request.inputs],
                     "skill_index": self.skill_index.prompt_index(scenario=request.scenario) if self.skill_index else [],
                     "state": {

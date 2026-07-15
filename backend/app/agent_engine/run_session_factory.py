@@ -112,10 +112,10 @@ class RunSessionFactory:
             workflow = build_workflow(scenario.manifest(), plan)
             route_policy = ModelRoutePolicy()
 
-            def provider_for_role(role: str) -> ModelProvider:
+            def provider_for_role(role: str, model_config) -> ModelProvider:
                 if provider is not None:
                     return provider
-                return configured_provider(route_policy.for_role(request.model_config, role))
+                return configured_provider(route_policy.for_role(model_config, role))
 
             def sandbox_for_workspace(child_workspace: Path, readonly: tuple[Path, ...]) -> Sandbox:
                 if sandbox is not None and not isinstance(sandbox, ContainerSandbox):
