@@ -113,3 +113,24 @@ def test_write_file_no_path():
     tool = WriteFileTool()
     result = tool.run({"workspace": ws, "content": "data"})
     assert result["success"] is False
+
+
+def test_symlink_escape_is_rejected(tmp_path):
+    ws = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    ws.mkdir()
+    outside.mkdir()
+    secret = outside / "secret.txt"
+    secret.write_text("outside", encoding="utf-8")
+    (ws / "escape").symlink_to(outside, target_is_directory=True)
+
+    read_result = ReadFileTool().run({"workspace": str(ws), "file": "escape/secret.txt"})
+    write_result = WriteFileTool().run({
+        "workspace": str(ws),
+        "path": "escape/created.txt",
+        "content": "must not escape",
+    })
+
+    assert read_result["success"] is False
+    assert write_result["success"] is False
+    assert not (outside / "created.txt").exists()

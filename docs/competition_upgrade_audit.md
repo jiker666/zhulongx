@@ -1,5 +1,10 @@
 # Competition Upgrade Audit
 
+> Historical pre-v3 audit from the teammate snapshot. Its proposed additive
+> runtime was evaluated during merge; duplicate controller, broker, repository,
+> and state-machine modules were removed. The current competition endpoint is a
+> facade over Agent Engine v3 as documented in `competition_architecture.md`.
+
 Audit date: 2026-07-11. Scope: repository source, tests, configuration, Docker definition, backend and frontend entry points. The Writeup path (`writeup_generator.py`, `get_writeup*`, `/writeup`, and UI modal) is frozen and is not an upgrade target.
 
 ## 1. Current execution path

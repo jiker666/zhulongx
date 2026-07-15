@@ -1,5 +1,9 @@
 # Phase 2 baseline and destructive acceptance
 
+> Historical teammate baseline. It predates the Agent Engine v3 merge and is
+> retained only as input evidence. Current architecture and measured results
+> are recorded in `docs/refactor/13-teammate-merge-report.md`.
+
 Date: 2026-07-11. Environment: Windows host, Python 3.14, FastAPI/SQLAlchemy, Docker Worker not started, `winpty` unavailable.
 
 ## Commands and measured results

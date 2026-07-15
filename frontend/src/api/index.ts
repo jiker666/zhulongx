@@ -264,6 +264,8 @@ export interface CtfTask {
   flag_format?: string | null
   authorized: boolean
   allow_network: boolean
+  allowed_hosts?: string[]
+  allowed_ports?: number[]
   max_rounds: number
   max_time_sec: number
   shell_history: Array<{
@@ -275,6 +277,10 @@ export interface CtfTask {
   }>
   attachments: string[]
   state: string
+  agent_status?: string
+  agent_run_id?: string | null
+  engine?: string
+  last_event_sequence?: number
   rounds_used: number
   is_running?: boolean
   source?: string
@@ -301,6 +307,11 @@ export interface CtfTask {
     run_index?: number
   }>
   evidence: Array<{
+    event_id?: string
+    sequence?: number
+    type?: string
+    actor?: string
+    payload?: Record<string, any>
     step: string
     timestamp: number
     duration_ms: number
@@ -316,6 +327,54 @@ export interface CtfTask {
   error: string
   created_at: number
   updated_at: number
+}
+
+export interface AgentPlanNode {
+  task_id: string
+  title: string
+  role: string
+  status: string
+  dependencies?: string[]
+  success_criteria?: string[]
+  status_reason?: string
+}
+
+export interface AgentRunProjection {
+  run_id: string
+  state: string
+  after_sequence: number
+  plan: {
+    plan_id?: string
+    version?: number
+    goal?: string
+    nodes?: AgentPlanNode[]
+    critical_path?: string[]
+    revision_reason?: string
+  }
+  plan_history: Array<{ event_id: string; type: string; reason: string; plan: Record<string, any> }>
+  tasks: Array<Record<string, any>>
+  agent_lanes: Array<{ agent_id: string; role: string; task_id: string; status: string; parent_agent_id?: string }>
+  facts: Array<{ fact_id: string; statement: string; confidence?: number; evidence_ids?: string[] }>
+  open_hypotheses: Array<{ hypothesis_id: string; statement: string; priority?: number }>
+  failed_hypotheses: Array<{ hypothesis_id: string; statement: string; reason?: string }>
+  evidence: Array<{ evidence_id: string; evidence_type?: string; summary: string; source_event_ids?: string[] }>
+  artifacts: Array<{ artifact_id?: string; original_name?: string; media_type?: string; sha256?: string; storage_path?: string }>
+  contradictions: Array<Record<string, any>>
+  decisions: Array<{ decision_id: string; decision: string; rationale: string }>
+  candidate_answers: Array<Record<string, any>>
+  verification: Array<{ event_id: string; type: string; payload: Record<string, any> }>
+  tool_activity: Array<{ event_id: string; type: string; payload: Record<string, any> }>
+  budget: Record<string, number>
+  human_handoff?: {
+    completed_work: string[]
+    minimal_blocker: string
+    questions: Array<{ id: string; type: string; question: string }>
+    recommended_next_step: string
+    risk: string
+    checkpoint_sequence: number
+  } | null
+  final_output?: Record<string, any> | null
+  error: string
 }
 
 export interface CtfDemo {
@@ -351,9 +410,11 @@ export const ctfCreateTask = (data: {
   flag_format?: string | null
   authorized?: boolean
   allow_network?: boolean
+  allowed_hosts?: string[]
+  allowed_ports?: number[]
   max_rounds?: number
   max_time_sec?: number
-}) => api.post<{ task_id: string; state: string }>('/ctf/tasks', data)
+}) => api.post<{ task_id: string; state: string; engine: string }>('/ctf/tasks', data)
 export const ctfUploadAttachment = (taskId: string, file: File) => {
   const formData = new FormData()
   formData.append('file', file)
@@ -363,22 +424,49 @@ export const ctfUploadAttachment = (taskId: string, file: File) => {
 }
 export const ctfSolveTask = (taskId: string, payload: { mode?: string; max_rounds?: number; max_time_sec?: number }) =>
   api.post<CtfTask>(`/ctf/tasks/${taskId}/solve`, payload)
-export const ctfGetEvents = (taskId: string) =>
+export const ctfGetEvents = (taskId: string, afterSequence = 0) =>
   api.get<{
     task_id: string
+    run_id?: string | null
     state: string
+    agent_status: string
+    is_running: boolean
+    after_sequence: number
+    last_sequence: number
     events: CtfTask['evidence']
     script_runs: CtfTask['script_runs']
+    shell_history: CtfTask['shell_history']
     candidate_flags: CtfTask['candidate_flags']
-  }>(`/ctf/tasks/${taskId}/events`)
+    best_flag?: string | null
+    current_script: string
+  }>(`/ctf/tasks/${taskId}/events`, { params: { after_sequence: afterSequence } })
 export const ctfGetWriteup = (taskId: string) =>
   api.get<string>(`/ctf/tasks/${taskId}/writeup`, { responseType: 'text' as const })
 export const ctfListDemos = () => api.get<CtfDemo[]>('/ctf/demos')
 export const ctfRunDemo = (demoId: string, maxRounds = 0, maxTimeSec = 600) =>
-  api.post<CtfTask & { expected_flag?: string | null; match?: boolean | null }>(
+  api.post<Partial<CtfTask> & { task_id: string; state: string; run_id?: string | null; agent_status?: string; match?: boolean | null }>(
     `/ctf/demos/${demoId}/run?max_rounds=${maxRounds}&max_time_sec=${maxTimeSec}`
   )
 export const ctfBenchmark = () => api.get<CtfBenchmark>('/ctf/benchmark')
+
+export const getAgentRunProjection = (runId: string) =>
+  api.get<AgentRunProjection>(`/agent/runs/${runId}/projection`)
+export const answerAgentRun = (
+  runId: string,
+  publicResponse: Record<string, any>,
+  secureInputRefs: string[] = [],
+) => api.post(`/agent/runs/${runId}/human-answer`, {
+  public_response: publicResponse,
+  secure_input_refs: secureInputRefs,
+  resume: true,
+})
+export const validateAgentRunExternally = (runId: string, accepted: boolean, reason: string) =>
+  api.post(`/agent/runs/${runId}/external-validation`, {
+    accepted,
+    reason,
+    resume_on_rejection: true,
+  })
+export const getAgentRunAudit = (runId: string) => api.get(`/agent/runs/${runId}/audit`)
 
 // LLM 模式查询
 export interface LlmStatus {

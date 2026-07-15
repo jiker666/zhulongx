@@ -1,0 +1,1 @@
+{"title":"Local search endpoint","objective":"Inspect the explicitly scoped local endpoint and report a validated browser-facing finding.","target_path":"/search?q=probe","target_response":"<html>search=probe<script> VULN:reflected_xss"}

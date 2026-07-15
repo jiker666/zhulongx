@@ -56,6 +56,16 @@ def test_runtime_safe_path_blocks_escape():
     assert rt._safe_path("subdir/file.txt") is not None
 
 
+def test_runtime_safe_path_blocks_symlink_escape(tmp_path):
+    ws = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    ws.mkdir()
+    outside.mkdir()
+    (ws / "escape").symlink_to(outside, target_is_directory=True)
+    rt = _make_runtime(workspace=str(ws))
+    assert rt._safe_path("escape/secret.txt") is None
+
+
 def test_runtime_exec_list_dir():
     ws = tempfile.mkdtemp(prefix="test_ls_")
     with open(os.path.join(ws, "hello.txt"), "w") as f:

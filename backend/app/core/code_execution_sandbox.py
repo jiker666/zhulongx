@@ -16,10 +16,12 @@ from __future__ import annotations
 
 import os
 import re
+import signal
 import shlex
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -143,6 +145,8 @@ class CodeExecutionSandbox:
         self.default_timeout = default_timeout or settings.CTF_SANDBOX_TIMEOUT
         self.max_output = max_output or settings.CTF_SANDBOX_MAX_OUTPUT
         self.allow_network = allow_network  # 必须显式开启，且 scope_guard 二次校验
+        self._process_lock = threading.Lock()
+        self._active_processes: set[subprocess.Popen[str]] = set()
 
         Path(self.base_workdir).mkdir(parents=True, exist_ok=True)
 
@@ -264,15 +268,17 @@ class CodeExecutionSandbox:
             safe["HTTPS_PROXY"] = "127.0.0.1:9"
             safe["ALL_PROXY"] = "127.0.0.1:9"
             safe["no_proxy"] = "localhost,127.0.0.1"
-        # 清空敏感字段
-        for key in list(os.environ.keys()):
-            if any(s in key.upper() for s in ("TOKEN", "API_KEY", "SECRET", "CREDENTIAL", "PASSWORD")):
-                continue
-            if key not in safe:
-                safe[key] = os.environ[key]
         if extra:
             safe.update(extra)
         return safe
+
+    def abort_all(self) -> None:
+        """Terminate every process group currently owned by this sandbox."""
+
+        with self._process_lock:
+            processes = list(self._active_processes)
+        for proc in processes:
+            self._terminate_process_group(proc)
 
     def _run(
         self,
@@ -287,25 +293,30 @@ class CodeExecutionSandbox:
         # cwd 必须存在
         Path(cwd).mkdir(parents=True, exist_ok=True)
         start = time.time()
+        proc: Optional[subprocess.Popen[str]] = None
         try:
-            proc = subprocess.run(
+            proc = subprocess.Popen(
                 cmd,
                 cwd=cwd,
                 env=self._make_safe_env(env),
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=timeout_s,
+                start_new_session=(os.name == "posix"),
                 # 资源限制
                 # 注意：preexec_fn 只在 POSIX 下生效
                 preexec_fn=self._limit_resources if os.name == "posix" else None,
             )
+            with self._process_lock:
+                self._active_processes.add(proc)
+            stdout_raw, stderr_raw = proc.communicate(timeout=timeout_s)
             elapsed = int((time.time() - start) * 1000)
-            stdout = (proc.stdout or "")[: self.max_output]
-            stderr = (proc.stderr or "")[: self.max_output]
+            stdout = (stdout_raw or "")[: self.max_output]
+            stderr = (stderr_raw or "")[: self.max_output]
             truncated = ""
-            if len(proc.stdout or "") > self.max_output:
+            if len(stdout_raw or "") > self.max_output:
                 truncated = f"\n[stdout truncated at {self.max_output} bytes]"
-            if len(proc.stderr or "") > self.max_output:
+            if len(stderr_raw or "") > self.max_output:
                 truncated += f"\n[stderr truncated at {self.max_output} bytes]"
             return SandboxResult(
                 success=(proc.returncode == 0),
@@ -315,10 +326,18 @@ class CodeExecutionSandbox:
                 duration_ms=elapsed,
                 workdir=cwd,
             )
-        except subprocess.TimeoutExpired as e:
+        except subprocess.TimeoutExpired:
+            if proc is not None:
+                self._terminate_process_group(proc)
+                try:
+                    stdout_raw, stderr_raw = proc.communicate(timeout=1)
+                except subprocess.TimeoutExpired:
+                    stdout_raw, stderr_raw = "", ""
+            else:
+                stdout_raw, stderr_raw = "", ""
             elapsed = int((time.time() - start) * 1000)
-            stdout = (e.stdout or b"").decode("utf-8", errors="ignore")[: self.max_output] if isinstance(e.stdout, bytes) else (e.stdout or "")[: self.max_output]
-            stderr = (e.stderr or b"").decode("utf-8", errors="ignore")[: self.max_output] if isinstance(e.stderr, bytes) else (e.stderr or "")[: self.max_output]
+            stdout = (stdout_raw or "")[: self.max_output]
+            stderr = (stderr_raw or "")[: self.max_output]
             return SandboxResult(
                 success=False,
                 exit_code=124,
@@ -339,6 +358,37 @@ class CodeExecutionSandbox:
                 workdir=cwd,
                 error=type(e).__name__,
             )
+        finally:
+            if proc is not None:
+                with self._process_lock:
+                    self._active_processes.discard(proc)
+
+    @staticmethod
+    def _terminate_process_group(proc: subprocess.Popen[str], grace_seconds: float = 0.25) -> None:
+        if proc.poll() is not None:
+            return
+        try:
+            if os.name == "posix":
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            else:
+                proc.terminate()
+        except ProcessLookupError:
+            return
+        except OSError:
+            proc.terminate()
+
+        deadline = time.monotonic() + grace_seconds
+        while proc.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if proc.poll() is not None:
+            return
+        try:
+            if os.name == "posix":
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            else:
+                proc.kill()
+        except ProcessLookupError:
+            pass
 
     @staticmethod
     def _limit_resources() -> None:
@@ -357,7 +407,15 @@ class CodeExecutionSandbox:
         except Exception:
             pass
         try:
-            resource.setrlimit(resource.RLIMIT_NPROC, (64, 64))
+            # RLIMIT_NPROC is per real user, not per sandbox. A limit of 64
+            # prevents all forks on normal macOS developer sessions. Keep a
+            # viable host-test ceiling; production per-run PID limits belong to
+            # the container sandbox.
+            nproc_limit = 1024 if getattr(os, "uname", lambda: None)() and os.uname().sysname == "Darwin" else 256
+            _, hard = resource.getrlimit(resource.RLIMIT_NPROC)
+            if hard != resource.RLIM_INFINITY:
+                nproc_limit = min(nproc_limit, hard)
+            resource.setrlimit(resource.RLIMIT_NPROC, (nproc_limit, nproc_limit))
         except Exception:
             pass
 

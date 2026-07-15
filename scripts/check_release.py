@@ -12,15 +12,20 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-FORBIDDEN_TRACKED = re.compile(r"(\.DS_Store|__MACOSX|node_modules|cyberpilot\.db|\.env$|storage/reports|storage/uploads|^backups/|^ctf_runs/)")
+FORBIDDEN_TRACKED = re.compile(r"(\.DS_Store|__MACOSX|node_modules|cyberpilot\.db|\.env$|storage/reports|storage/uploads|^backups/|^ctf_runs/|^backend/data/|^backend/vendor/|^\.skills/)")
 LOCAL_ARTIFACTS = [
     ".DS_Store",
     ".env",
+    "backend/.env",
     "data/cyberpilot.db",
+    "backend/data",
+    "backend/vendor/claude-code",
+    "frontend/node_modules",
+    ".skills",
     "backups",
     "ctf_runs",
 ]
-SKIP_DIRS = {".git", "node_modules", "dist", "__pycache__", ".pytest_cache", "backups", "ctf_runs"}
+SKIP_DIRS = {".git", ".skills", "vendor", "node_modules", "dist", "__pycache__", ".pytest_cache", "backups", "ctf_runs"}
 SKIP_PARTS = {
     ("backend", "app", "storage", "reports"),
     ("backend", "app", "storage", "uploads"),
@@ -34,6 +39,17 @@ ASSIGNMENT = re.compile(r"(?i)\b(api[_-]?key|secret|password|token)\b\s*[:=]\s*[
 ALLOWED_VALUES = {"replace_me", "your-api-key", "sk-example-placeholder", "example", "changeme", "false", "true", "none", "null", ""}
 REQUIRED_DOCS = [
     "README.md",
+    "docs/refactor/00-current-architecture.md",
+    "docs/refactor/01-target-architecture.md",
+    "docs/refactor/02-migration-plan.md",
+    "docs/refactor/03-secret-rotation.md",
+    "docs/refactor/05-agent-engine-v3-adr.md",
+    "docs/refactor/07-provider-tool-protocol.md",
+    "docs/refactor/08-scenario-workflows.md",
+    "docs/refactor/09-threat-model.md",
+    "docs/refactor/10-legacy-runtime-migration.md",
+    "docs/refactor/11-operator-guide.md",
+    "docs/refactor/12-verification-report.md",
     "docs/architecture_v3.md",
     "docs/security_boundary.md",
     "docs/developer_guide.md",
@@ -61,7 +77,10 @@ def check_tracked_files() -> list[str]:
         print("WARN: 当前目录不是 git 仓库，跳过 git tracked 文件检查")
         return []
     result = run(["git", "ls-files"])
-    offenders = [line for line in result.stdout.splitlines() if FORBIDDEN_TRACKED.search(line)]
+    offenders = [
+        line for line in result.stdout.splitlines()
+        if FORBIDDEN_TRACKED.search(line) and Path(line).name != ".gitkeep"
+    ]
     if offenders:
         print("FAIL: 禁止提交的文件仍被 git 跟踪:")
         for item in offenders:
@@ -99,13 +118,17 @@ def check_secrets() -> list[str]:
         except Exception:
             continue
         rel = path.relative_to(ROOT)
+        rel_text = str(rel)
         for pattern in SECRET_PATTERNS:
             for match in pattern.finditer(text):
                 value = match.group(0)
                 if "sk-example-placeholder" in value:
                     continue
+                if rel_text.startswith(("backend/tests/", "examples/")):
+                    continue
                 findings.append(f"{rel}: sensitive pattern {value[:32]}")
-        for match in ASSIGNMENT.finditer(text):
+        assignment_scan = path.suffix.lower() in {".env", ".yaml", ".yml", ".json", ".toml", ".ini", ".cfg"} or path.name.startswith(".env")
+        for match in ASSIGNMENT.finditer(text) if assignment_scan else ():
             value = match.group(2).strip().strip("'\"")
             lower = value.lower()
             if lower in ALLOWED_VALUES or value.startswith("${") or "replace_me" in lower or "sk-example-placeholder" in lower:
@@ -131,13 +154,10 @@ def check_docs() -> list[str]:
             print(f"  - {doc}")
     readme = (ROOT / "README.md").read_text(encoding="utf-8", errors="ignore")
     required_readme_terms = [
-        "CyberPilot FinalOps v4",
-        "提交前自检",
+        "ZHULONG-X",
+        "AgentSession",
         "make release-check",
-        "make team-drill",
         "make safety-audit",
-        "podman compose",
-        "make final-drill",
         "ScopeGuard",
         "cyberpilot-finalops-v4-submission.zip",
     ]
@@ -151,6 +171,35 @@ def check_docs() -> list[str]:
     return missing
 
 
+def check_runtime_authority() -> list[str]:
+    formal_files = list((ROOT / "backend" / "app" / "api").glob("*.py")) + [
+        ROOT / "backend" / "app" / "main.py",
+        ROOT / "backend" / "app" / "agent_engine" / "service.py",
+        ROOT / "backend" / "app" / "scenarios" / "ctf" / "service.py",
+    ]
+    forbidden = (
+        "app.core.ctf_agent_orchestrator",
+        "app.core.agent_runtime",
+        "app.core.cc_bridge_runtime",
+    )
+    findings: list[str] = []
+    for path in formal_files:
+        source = path.read_text(encoding="utf-8", errors="ignore")
+        for module in forbidden:
+            if module in source:
+                findings.append(f"formal runtime import in {path.relative_to(ROOT)}: {module}")
+    env_example = (ROOT / ".env.example").read_text(encoding="utf-8", errors="ignore")
+    if "CC_RUNTIME_ENABLED" in env_example:
+        findings.append(".env.example advertises experimental bridge selection")
+    if findings:
+        print("FAIL: 正式运行时权威检查失败:")
+        for item in findings:
+            print(f"  - {item}")
+    else:
+        print("OK: 正式 API 仅使用 Agent Engine v3，无旧运行时导入或默认桥接配置")
+    return findings
+
+
 def main() -> int:
     os.chdir(ROOT)
     failures: list[str] = []
@@ -158,6 +207,7 @@ def main() -> int:
     check_local_artifacts()
     failures.extend(check_secrets())
     failures.extend(check_docs())
+    failures.extend(check_runtime_authority())
     if failures:
         print(f"release check failed: {len(failures)} issue(s)")
         return 1

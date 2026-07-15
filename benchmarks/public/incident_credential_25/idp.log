@@ -1,0 +1,6 @@
+EVENT=11:00 repeated failed logins across accounts
+EVENT=11:04 successful login from new geography
+IOC=ip:198.51.100.24
+ROOT_CAUSE=credential_stuffing_without_mfa
+ACTION=reset_impacted_credentials
+ACTION=enforce_mfa

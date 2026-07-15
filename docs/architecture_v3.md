@@ -1,29 +1,73 @@
-# CyberPilot v3 Architecture
+# Agent Engine v3 Architecture
 
-CyberPilot v3 keeps the v2 FastAPI + React + Agent Core architecture and adds intent analysis, dynamic decision traces, tool metadata, policy checks, and report export.
+## Authority
 
-## Core Flow
+- `AgentSession` owns single-Agent lifecycle and terminal state.
+- `CoordinatorSession` owns declarative multi-Agent workflow lifecycle.
+- `AppendOnlyEventStore` is the audit and recovery source.
+- `StateReducer` is the canonical projection function.
+- `AgentRunService` is the only formal session construction path.
+- scenario plugins own manifest, Plan, WorkflowSpec, completion schema, and validator.
 
-1. Task input is created with `target` and optional `uploaded_file`.
-2. `TaskIntentAnalyzer` reads description, URL, file suffix, and ZIP key files.
-3. `Planner` generates structured `PlanStep` records with reason, expected input/output, risk, confirmation flag, and fallback strategy.
-4. `Executor` runs only enabled tools, checks `PolicyEngine`, records `DecisionTrace`, and broadcasts WebSocket events.
-5. `Judge` returns structured observations, evidence, risk, continuation and replan hints.
-6. `Reporter` saves Markdown and print-friendly HTML after all tool steps finish.
+```mermaid
+flowchart TD
+    API["FastAPI control plane"] --> SERVICE["AgentRunService"]
+    SERVICE --> SESSION["AgentSession"]
+    SERVICE --> COORD["CoordinatorSession"]
+    COORD --> DAG["Plan / TaskGraph"]
+    DAG --> SCHED["WorkflowScheduler"]
+    SCHED --> SUB["SubagentManager"]
+    SUB --> MAIL["Mailbox + child checkpoints"]
+    SESSION --> PROVIDER["Provider adapter"]
+    SESSION --> TOOL["ToolExecutionService"]
+    TOOL --> POLICY["PolicyEngine"]
+    TOOL --> SANDBOX["ContainerSandbox"]
+    SESSION --> VALIDATOR["Scenario validator"]
+    SESSION --> EVENTS["EventStore"]
+    COORD --> EVENTS
+    SUB --> EVENTS
+    EVENTS --> REDUCER["StateReducer"]
+    REDUCER --> PROJECTION["API / SSE / UI / audit export"]
+```
 
-## Safety Boundary
+## Native Tool Sequence
 
-All default tools are read-only. Network tools use SSRF protection and timeouts. Destructive actions, exploit steps, shell access, persistence, data theft, brute force, and lateral movement are denied by policy and prompt safety filters.
+```mermaid
+sequenceDiagram
+    participant M as ModelProvider
+    participant L as AgentLoop
+    participant P as PolicyEngine
+    participant T as ToolExecutor
+    participant E as EventStore
+    participant V as Validator
+    L->>M: system/user + assistant tool_calls + tool results
+    M-->>L: AssistantTurn(tool_calls[])
+    L->>E: model.responded
+    loop each bounded batch
+        L->>P: authorize ToolDefinition
+        P->>E: policy.allowed or policy.denied
+        L->>T: execute idempotent/locked call
+        T->>E: tool.finished or tool.failed
+    end
+    L->>V: evidence-bound candidate
+    V->>E: validation.completed
+    alt authoritative acceptance
+        L->>E: completion.decided then run.succeeded
+    else no evaluator
+        L->>E: candidate.pending_external
+    else blocked
+        L->>E: human.requested with structured handoff
+    end
+```
 
-## Tool Metadata
+## Recovery
 
-`BaseTool` exposes:
+Events use contiguous per-run sequence numbers and schema version 1. Checkpoints store the reducer state,
+budget usage, and event offset atomically. Provider tool-call IDs are replay keys; completed calls return their
+stored result and non-idempotent tools are not repeated. Subagents persist independent summaries/transcripts
+under `.agent_subagents/<agent_id>/.agent_state/`.
 
-- `input_schema`
-- `output_schema`
-- `permissions`
-- `risk_level`
-- `timeout_seconds`
-- `tags`
+## Runtime Boundary
 
-`/api/tools` returns these fields and `PATCH /api/tools/{name}/enabled` controls availability.
+Formal API modules import `agent_engine` and `scenarios` only. The old orchestrator, old runtime, and bridge
+remain compatibility/research code and have no default selection or fallback role.

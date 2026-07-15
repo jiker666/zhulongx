@@ -1,3 +1,12 @@
-# Competition controller
+# Competition control plane
 
-The initial controller creates independently scoped challenge states, assigns isolated workspaces, exposes capability health, and ranks active tasks. Persisted scheduling, human ownership locks, and platform submission adapters are planned as the next additive stage.
+Competition control is implemented by the v3 `RunManager` and `AgentSession`:
+
+- `AgentRunService` creates and restores sessions.
+- `RunManager` owns the in-process run/thread index.
+- `AgentSession` owns status, abort, pause, resume, validation, and checkpoints.
+- `AppendOnlyEventStore` plus `StateReducer` is the state authority.
+- `CanonicalRunProjection` supplies the compatibility response shape.
+
+The API never maintains a parallel controller state map. Scheduling across
+multiple runs belongs in the v3 coordinator and subagent manager.

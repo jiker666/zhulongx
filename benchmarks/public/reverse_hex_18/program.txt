@@ -1,0 +1,2 @@
+validation branch constant
+SECRET_HEX=6f70636f64655f616c706861

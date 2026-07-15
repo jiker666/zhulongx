@@ -1,0 +1,1 @@
+{"title":"Local profile API","objective":"Inspect the explicitly scoped local endpoint and report a validated access-control finding.","target_path":"/api/profile/42","target_response":"profile_id=42 owner=other-user VULN:idor"}

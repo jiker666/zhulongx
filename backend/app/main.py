@@ -20,6 +20,7 @@ from app.api.ws import router as ws_router
 from app.api.challenges import router as challenges_router
 from app.api.ctf import router as ctf_router
 from app.api.settings import router as settings_router
+from app.api.agent_runs import router as agent_runs_router
 from app.api.competition import router as competition_router
 from app.config import settings
 from app.core.scope_guard import scope_guard
@@ -32,6 +33,8 @@ async def lifespan(app: FastAPI):
     tool_registry.sync_to_db()
     from app.core.runtime_config import load_runtime_config_on_startup
     load_runtime_config_on_startup()
+    from app.agent_engine.bootstrap import restore_persisted_sessions
+    restore_persisted_sessions()
     _cleanup_ghost_tasks()
     yield
 
@@ -42,7 +45,10 @@ def _cleanup_ghost_tasks():
     from app.models.ctf import CtfTask as CtfTaskModel
     try:
         db = SessionLocal()
-        ghosts = db.query(CtfTaskModel).filter(CtfTaskModel.is_running == True).all()
+        ghosts = db.query(CtfTaskModel).filter(
+            CtfTaskModel.is_running == True,
+            CtfTaskModel.engine.notin_(("v2", "v3")) | (CtfTaskModel.engine.is_(None)),
+        ).all()
         for g in ghosts:
             g.is_running = False
             g.state = "HUMAN_REQUIRED"
@@ -79,6 +85,7 @@ app.include_router(llm_router, prefix="/api")
 app.include_router(challenges_router, prefix="/api")
 app.include_router(ctf_router, prefix="/api")
 app.include_router(settings_router, prefix="/api")
+app.include_router(agent_runs_router, prefix="/api")
 app.include_router(competition_router, prefix="/api")
 app.include_router(ws_router)   # WS route already has /ws prefix
 

@@ -1,0 +1,6 @@
+EVENT=09:14 user opened invoice.xlsm
+EVENT=09:15 powershell spawned from spreadsheet
+IOC=sha256:1111222233334444
+ROOT_CAUSE=phishing_attachment_execution
+ACTION=isolate_endpoint
+ACTION=block_attachment_hash

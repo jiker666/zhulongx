@@ -1,4 +1,7 @@
 from pathlib import Path
+
+
+DEFAULT_RUNTIME_ROOT = Path.home() / ".local" / "state" / "zhulongx"
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -16,7 +19,8 @@ class Settings(BaseSettings):
     UPLOAD_DIR: str = "./app/storage/uploads"
     REPORT_DIR: str = "./app/storage/reports"
     CTF_DEMO_DIR: str = "./examples/ctf_demo"
-    CTF_RUN_DIR: str = "./data/ctf_runs"
+    # Run workspaces must live outside the source tree by default.
+    CTF_RUN_DIR: str = str(DEFAULT_RUNTIME_ROOT / "ctf_runs")
     CTF_MAX_ROUNDS: int = 0           # v7: 0=无限，仅受 max_time_sec 限制
     CTF_MAX_TIME_SEC: int = 600       # v7: 最大运行时间(秒)
     CTF_SANDBOX_TIMEOUT: int = 15
@@ -65,17 +69,21 @@ class Settings(BaseSettings):
     LLM_FALLBACK_MODEL: str = "qwen-coder-plus"
     LLM_FALLBACK_API_KEY: str = "replace_me"
 
-    # ===== Claude Code Bridge Runtime =====
-    # 主编排优先交给 vendored / external Claude Code；不可用时可回退内部 AgentRuntime。
-    CC_RUNTIME_ENABLED: bool = True
+    # ===== Experimental bridge compatibility =====
+    # Formal APIs never read these options. Legacy research tests must opt in explicitly.
+    CC_RUNTIME_ENABLED: bool = False
     CC_RUNTIME_REQUIRE_EXTERNAL: bool = False
-    CC_RUNTIME_FALLBACK_INTERNAL: bool = True
+    CC_RUNTIME_FALLBACK_INTERNAL: bool = False
     CC_RUNTIME_BIN: str = ""
     CC_RUNTIME_COMMAND_TEMPLATE: str = ""
     CC_RUNTIME_VENDOR_DIR: str = "./vendor/claude-code"
     CC_RUNTIME_TIMEOUT: int = 600
     CC_RUNTIME_MAX_OUTPUT_CHARS: int = 120000
     CC_RUNTIME_SKIP_PERMISSIONS: bool = False
+
+    # ===== Agent Engine v3 container sandbox =====
+    AGENT_SANDBOX_RUNTIME: str = ""
+    AGENT_SANDBOX_IMAGE: str = "python:3.11-slim"
 
     # ===== WQ (万青/晚晴) Gateway 统一 API Key =====
     # 当设置了 WQ_API_KEY 环境变量时，自动覆盖所有 lane 的 API_KEY
@@ -84,21 +92,15 @@ class Settings(BaseSettings):
     MAX_UPLOAD_SIZE: int = 50 * 1024 * 1024  # 50MB
 
     COMPETITION_MODE: bool = False
-    # Opt-in competition workflow. Legacy CTF orchestration stays the default.
-    COMPETITION_PROFILE: str = "training"
-    COMPETITION_WORKFLOW_ENABLED: bool = False
-    COMPETITION_MAX_PARALLEL_CHALLENGES: int = 3
-    COMPETITION_MAX_PARALLEL_WORKERS_PER_CHALLENGE: int = 2
-    COMPETITION_MAX_TOOL_RUNTIME: int = 60
-    COMPETITION_WORKSPACE_ROOT: str = "./data/competition_workspaces"
     WORKER_BASE_URL: str = "http://worker-base:8090"
+    WORKER_SHARED_ROOT: str = str(DEFAULT_RUNTIME_ROOT / "worker_tasks")
+    WORKER_WORKSPACE_ROOT: str = "/workspace/tasks"
     WORKER_CONNECT_TIMEOUT: float = 3.0
     WORKER_READ_TIMEOUT: float = 20.0
     WORKER_MAX_RETRIES: int = 1
     WORKER_CIRCUIT_BREAKER_THRESHOLD: int = 3
     WORKER_CIRCUIT_BREAKER_RESET_SECONDS: int = 30
     WORKER_TERMINATE_GRACE_SECONDS: int = 2
-    WORKER_KILL_GRACE_SECONDS: int = 2
     SCOPE_CIDRS: str = ""
     SCOPE_DOMAINS: str = ""
     SCOPE_PORTS: str = ""

@@ -1,0 +1,2 @@
+loader string table
+SECRET_B64=c3RhdGljX2JldGE=

@@ -1,0 +1,2 @@
+comparison loop iterates from end to start
+SECRET_REVERSED=ammag_lortnoc
