@@ -180,6 +180,8 @@ class AgentLoop:
                     **turn.public_metadata(),
                 },
             )
+            if state.status == RunStatus.HUMAN_REQUIRED:
+                return LoopOutcome(RunStatus.HUMAN_REQUIRED, state.error or "paused by operator")
 
             if not turn.tool_calls:
                 no_progress += 1

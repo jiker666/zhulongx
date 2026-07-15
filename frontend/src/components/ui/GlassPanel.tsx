@@ -22,7 +22,6 @@ export default function GlassPanel({ children, className, tone = 'slate', compac
         className,
       )}
     >
-      <span className={cn('pointer-events-none absolute -right-10 -top-10 h-28 w-28 rounded-full blur-3xl opacity-20', toneStyles.dot)} aria-hidden="true" />
       <div className="relative z-10">{children}</div>
     </Tag>
   )

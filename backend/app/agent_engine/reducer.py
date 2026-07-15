@@ -20,6 +20,13 @@ def _upsert(items: list[dict[str, Any]], value: Mapping[str, Any], key: str) -> 
     items.append(incoming)
 
 
+def _patch_agent(items: list[dict[str, Any]], agent_id: str, changes: Mapping[str, Any]) -> None:
+    for item in items:
+        if item.get("agent_id") == agent_id:
+            item.update(changes)
+            return
+
+
 class StateReducer:
     """Deterministically project canonical events into one mutable session view."""
 
@@ -78,6 +85,10 @@ class StateReducer:
                     "type": event_type,
                     "plan": plan,
                     "reason": payload.get("reason", ""),
+                    "old_version": payload.get("old_version"),
+                    "new_version": payload.get("new_version"),
+                    "diff": deepcopy(payload.get("diff") or []),
+                    "evidence_refs": list(payload.get("evidence_refs") or []),
                 }, "event_id")
         elif event_type in {
             EventType.PLAN_NODE_STARTED.value,
@@ -104,7 +115,40 @@ class StateReducer:
             agent = deepcopy(payload.get("agent") or payload)
             agent.setdefault("agent_id", event.agent_id)
             agent.setdefault("status", event_type.rsplit(".", 1)[-1])
+            summary = payload.get("summary")
+            if isinstance(summary, Mapping):
+                agent["handoff_summary"] = summary.get("summary", "")
+                agent["verdict"] = summary.get("verdict", "")
+                agent["evidence_refs"] = [
+                    item.get("evidence_id") or item.get("event_id")
+                    for item in summary.get("evidence", ())
+                    if item.get("evidence_id") or item.get("event_id")
+                ]
+                agent["artifact_refs"] = [
+                    item.get("artifact_id") or item.get("path")
+                    for item in summary.get("artifacts", ())
+                    if item.get("artifact_id") or item.get("path")
+                ]
             _upsert(state.agents, agent, "agent_id")
+
+        if event.agent_id and event.agent_id != "agent_root":
+            if event_type == EventType.TOOL_STARTED.value:
+                _patch_agent(state.agents, event.agent_id, {
+                    "active_tool": payload.get("name", ""),
+                    "active_tool_call_id": payload.get("tool_call_id", ""),
+                })
+            elif event_type in {EventType.TOOL_FINISHED.value, EventType.TOOL_FAILED.value}:
+                _patch_agent(state.agents, event.agent_id, {
+                    "active_tool": "",
+                    "last_tool": payload.get("name", ""),
+                    "last_tool_success": event_type == EventType.TOOL_FINISHED.value and payload.get("success", True),
+                })
+            elif event_type == EventType.MODEL_RESPONDED.value:
+                _patch_agent(state.agents, event.agent_id, {
+                    "usage": dict(payload.get("usage") or {}),
+                    "budget": dict(payload.get("budget_usage") or {}),
+                    "decision_summary": payload.get("decision_summary", ""),
+                })
 
         if event_type == EventType.FACT_CONFIRMED.value:
             fact = payload.get("fact") or payload

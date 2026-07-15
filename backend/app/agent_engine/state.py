@@ -90,6 +90,7 @@ class RunRequest:
     parent_run_id: str = ""
     agent_role: str = ""
     role_instructions: str = ""
+    human_approval_policy: str = "policy_only"
 
     def __post_init__(self) -> None:
         if self.execution_mode not in {"auto", "coordinator", "single"}:
@@ -102,6 +103,8 @@ class RunRequest:
             raise ValueError("max_parallel_agents must be between 1 and 16")
         if not 1 <= self.max_agent_depth <= 4:
             raise ValueError("max_agent_depth must be between 1 and 4")
+        if self.human_approval_policy not in {"always", "risk_based", "policy_only"}:
+            raise ValueError(f"unknown human approval policy: {self.human_approval_policy}")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

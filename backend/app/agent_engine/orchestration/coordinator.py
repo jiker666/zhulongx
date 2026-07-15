@@ -21,7 +21,7 @@ from app.agent_engine.orchestration.planner import DynamicPlanner, PlanningError
 from app.agent_engine.orchestration.scheduler import TaskDispatcher, WorkflowResult, WorkflowScheduler
 from app.agent_engine.orchestration.subagent_manager import SubagentManager
 from app.agent_engine.orchestration.task_graph import TaskGraph
-from app.agent_engine.orchestration.task_graph_store import PlanPatch, TaskGraphStore
+from app.agent_engine.orchestration.task_graph_store import PlanPatch, PlanPatchOperation, TaskGraphStore
 from app.agent_engine.orchestration.workflow import WorkflowSpec, WorkflowValidator
 from app.agent_engine.policy.engine import PolicyEngine
 from app.agent_engine.providers.base import ProviderError
@@ -150,6 +150,7 @@ class CoordinatorSession:
         )
         self.dynamic_scheduler: DynamicTaskScheduler | None = None
         self._abort = threading.Event()
+        self._pause_requested = threading.Event()
         self._timed_out = False
         self._lock = threading.RLock()
         self.graph = TaskGraph(
@@ -350,6 +351,8 @@ class CoordinatorSession:
             outcome = self.dynamic_scheduler.execute_until_blocked()
             self.state = self.reducer.replay(self.run_id, self.request.objective, self.events.read(self.run_id))
             self._persist_checkpoint()
+            if self._pause_requested.is_set():
+                return self.state
             if self._abort.is_set():
                 status = RunStatus.TIMED_OUT if self._timed_out else RunStatus.CANCELLED
                 return self._finish(
@@ -516,11 +519,18 @@ class CoordinatorSession:
             return self.state
         if self.state.status in TERMINAL_STATUSES:
             raise ValueError("terminal run cannot be paused")
+        self._pause_requested.set()
         self._append(EventType.HUMAN_REQUESTED, "human", {
             "status": RunStatus.HUMAN_REQUIRED.value,
             "error": reason,
             "handoff": {"question": reason, "reason": "operator pause"},
         })
+        for record in self.manager.records():
+            self.manager.cancel(record.agent_id, reason)
+        worker_abort = getattr(self.manager.worker, "abort_all", None)
+        if callable(worker_abort):
+            worker_abort(reason)
+        self.sandbox.abort_all()
         self._persist_checkpoint()
         return self.state
 
@@ -542,9 +552,109 @@ class CoordinatorSession:
             "secure_input_refs": list(secure_input_refs),
             "resume_status": resume_status.value,
         })
+        self._pause_requested.clear()
+        if self.dynamic_scheduler is not None:
+            self.dynamic_scheduler.cancelled = {
+                task_id for task_id, node in self.dynamic_scheduler.graph.nodes.items()
+                if node.status.value == "cancelled"
+            }
         self.state.error = ""
         self._save_checkpoint()
         return self.state
+
+    def cancel_branch(self, task_id: str, reason: str = "cancelled by operator") -> dict[str, object]:
+        if task_id not in self.graph_store.graph.nodes:
+            raise ValueError(f"unknown plan task: {task_id}")
+        node = self.graph_store.graph.nodes[task_id]
+        if node.status.value in {"completed", "cancelled"}:
+            raise ValueError(f"branch is not cancellable: {task_id}")
+        for record in self.manager.records():
+            if record.task.task_id == task_id:
+                self.manager.cancel(record.agent_id, reason)
+        self.dynamic_scheduler = self.dynamic_scheduler or DynamicTaskScheduler(
+            self.run_id,
+            self.graph_store.graph,
+            self.manager,
+            self.events,
+            max_concurrency=self.request.max_parallel_agents,
+            abort_token=self.abort_token,
+        )
+        outcome = self._scheduler_outcome(reason, failed_task_ids=())
+        self._apply_patch(
+            PlanPatch(
+                reason=reason,
+                operations=[PlanPatchOperation(operation="cancel_node", task_id=task_id)],
+            ),
+            outcome,
+        )
+        return {"task_id": task_id, "status": "cancelled", "plan_version": self.plan.version}
+
+    def retry_branch(self, task_id: str, reason: str = "retry requested by operator") -> dict[str, object]:
+        records = [record for record in self.manager.records() if record.task.task_id == task_id]
+        if not records or records[-1].status not in {"blocked", "cancelled", "restored"}:
+            raise ValueError(f"branch is not retryable: {task_id}")
+        outcome = self._scheduler_outcome(reason, failed_task_ids=(task_id,))
+        proposed = self.graph_replanner.propose(self.graph_store, outcome)
+        if proposed.patch is None:
+            raise ValueError(proposed.reason)
+        self.dynamic_scheduler = self.dynamic_scheduler or DynamicTaskScheduler(
+            self.run_id,
+            self.graph_store.graph,
+            self.manager,
+            self.events,
+            max_concurrency=self.request.max_parallel_agents,
+            abort_token=self.abort_token,
+        )
+        self._apply_patch(proposed.patch, outcome)
+        replacement = next(
+            (
+                item.get("replacement_task_id")
+                for event in reversed(self.state.plan_history)
+                for item in event.get("diff", ())
+                if item.get("task_id") == task_id
+            ),
+            None,
+        )
+        return {
+            "task_id": task_id,
+            "replacement_task_id": replacement,
+            "status": "scheduled",
+            "plan_version": self.plan.version,
+        }
+
+    def _scheduler_outcome(
+        self,
+        reason: str,
+        *,
+        failed_task_ids: tuple[str, ...],
+    ) -> SchedulerOutcome:
+        summaries = {
+            record.task.task_id: record.summary
+            for record in self.manager.records()
+            if record.summary is not None
+        }
+        completed = tuple(
+            task_id for task_id, node in self.graph_store.graph.nodes.items()
+            if node.status.value == "completed"
+        )
+        evidence_ids = tuple(dict.fromkeys(
+            str(item.get("evidence_id") or item.get("event_id"))
+            for summary in summaries.values()
+            for item in summary.evidence
+            if item.get("evidence_id") or item.get("event_id")
+        ))
+        return SchedulerOutcome(
+            False,
+            completed,
+            failed_task_ids,
+            tuple(
+                task_id for task_id, node in self.graph_store.graph.nodes.items()
+                if node.status.value == "cancelled"
+            ),
+            summaries,
+            evidence_ids,
+            reason,
+        )
 
     def record_human_evidence(self, content: str) -> dict[str, object]:
         if self.state.status in TERMINAL_STATUSES - {RunStatus.HUMAN_REQUIRED}:

@@ -501,3 +501,44 @@ def test_formal_auto_run_emits_dynamic_parallel_replan_and_completion_sequence(t
     assert EventType.COMPLETION_DECIDED.value in event_types
     assert EventType.RUN_SUCCEEDED.value in event_types
     session.manager.shutdown()
+
+
+def test_operator_retry_of_blocked_branch_uses_structural_replanner(tmp_path):
+    workspace = tmp_path / "operator_retry"
+    workspace.mkdir()
+    request = RunRequest("operator_retry", "Operator retry", "Retry one blocked branch.", str(workspace))
+    scenario = CTFScenario()
+    plan = scenario.build_plan(request.objective)
+    workflow = scenario.workflow(request.objective)
+    events = AppendOnlyEventStore()
+
+    def worker(record, _mailbox):
+        return AgentSummary(
+            record.agent_id,
+            record.role,
+            record.task.task_id,
+            "blocked",
+            "fixture blocked",
+            error="fixture blocked",
+        )
+
+    manager = SubagentManager("run_operator_retry", workspace, events, worker)
+    session = CoordinatorSession(
+        request,
+        plan,
+        workflow,
+        manager,
+        events=events,
+        run_id="run_operator_retry",
+    )
+    node = plan.nodes[0]
+    agent_id = manager.spawn(node.role, node)
+    assert manager.join([agent_id], timeout=2).summaries[0].status == "blocked"
+
+    result = session.retry_branch(node.task_id, "operator selected alternate strategy")
+
+    assert result["status"] == "scheduled"
+    assert result["replacement_task_id"]
+    assert session.graph_store.graph.nodes[node.task_id].status == TaskStatus.CANCELLED
+    assert session.plan.version == 2
+    manager.shutdown()

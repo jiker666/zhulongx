@@ -81,6 +81,7 @@ class DynamicTaskScheduler:
                 if node.status != TaskStatus.CANCELLED
                 and node.task_id not in self.completed
                 and node.task_id not in self.failed
+                and node.task_id not in self.cancelled
             ]
             ready.sort(key=lambda node: (-node.priority, node.task_id))
             if not ready:
@@ -165,6 +166,9 @@ class DynamicTaskScheduler:
                 if summary.status == "completed":
                     self.completed.add(task_id)
                     event_type = EventType.PLAN_COMPLETED
+                elif summary.status == "cancelled" or self.graph.nodes[task_id].status == TaskStatus.CANCELLED:
+                    self.cancelled.add(task_id)
+                    event_type = EventType.PLAN_NODE_BLOCKED
                 else:
                     self.failed.add(task_id)
                     wave_failed = True

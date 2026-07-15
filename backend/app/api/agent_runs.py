@@ -36,12 +36,14 @@ class AgentRunCreate(BaseModel):
     allow_private_network: bool = False
     allowed_hosts: list[str] = Field(default_factory=list, max_length=100)
     allowed_ports: list[int] = Field(default_factory=list, max_length=100)
+    approved_tools: list[str] = Field(default_factory=list, max_length=128)
     max_seconds: float = Field(default=600, ge=1, le=3600)
     max_model_requests: int = Field(default=50, ge=1, le=500)
     max_tool_calls: int = Field(default=100, ge=1, le=1000)
     provider: str = Field(default=settings.LLM_PROVIDER, min_length=1, max_length=100)
     model: str = Field(default=settings.LLM_MODEL, min_length=1, max_length=200)
     gateway_profile: str = Field(default="default", max_length=50)
+    model_profile: str = Field(default="", max_length=50)
     base_url: str = Field(default="", max_length=2000)
     temperature: float = Field(default=settings.LLM_TEMPERATURE, ge=0, le=1)
     max_tokens: int = Field(
@@ -58,11 +60,13 @@ class AgentRunCreate(BaseModel):
     tool_stream: bool = settings.GLM_TOOL_STREAM
     model_connect_timeout_seconds: float = Field(default=settings.GLM_CONNECT_TIMEOUT, gt=0, le=120)
     model_read_timeout_seconds: float = Field(default=settings.GLM_READ_TIMEOUT, gt=0, le=600)
+    context_budget_tokens: int = Field(default=128_000, ge=4096, le=1_000_000)
     execution_mode: Literal["auto", "coordinator", "single"] = "auto"
     orchestration_profile: Literal["conservative", "balanced", "aggressive"] = "balanced"
     autonomy_level: Literal["low", "medium", "high"] = "high"
     max_parallel_agents: int = Field(default=4, ge=1, le=16)
     max_agent_depth: int = Field(default=1, ge=1, le=4)
+    human_approval_policy: Literal["always", "risk_based", "policy_only"] = "risk_based"
 
 
 class HumanAnswerRequest(BaseModel):
@@ -75,6 +79,14 @@ class ExternalValidationRequest(BaseModel):
     accepted: bool
     reason: str = Field(min_length=1, max_length=10_000)
     resume_on_rejection: bool = True
+
+
+class PauseRequest(BaseModel):
+    reason: str = Field(default="paused by operator", min_length=1, max_length=10_000)
+
+
+class BranchControlRequest(BaseModel):
+    reason: str = Field(default="operator branch control", min_length=1, max_length=10_000)
 
 
 @router.post("")
@@ -106,6 +118,7 @@ def create_agent_run(payload: AgentRunCreate):
             "allow_process": payload.allow_process,
             "allow_worker": payload.allow_worker,
             "allow_private_network": payload.allow_private_network,
+            "approved_tools": tuple(payload.approved_tools),
         },
         network_policy=NetworkPolicy(
             mode=network_mode,
@@ -120,7 +133,7 @@ def create_agent_run(payload: AgentRunCreate):
         model_config=ModelConfig(
             provider=payload.provider,
             model=payload.model,
-            gateway_profile=payload.gateway_profile,
+            gateway_profile=payload.model_profile or payload.gateway_profile,
             base_url=payload.base_url,
             temperature=payload.temperature,
             max_tokens=payload.max_tokens,
@@ -133,12 +146,14 @@ def create_agent_run(payload: AgentRunCreate):
             tool_stream=payload.tool_stream,
             connect_timeout_seconds=payload.model_connect_timeout_seconds,
             read_timeout_seconds=payload.model_read_timeout_seconds,
+            context_budget_tokens=payload.context_budget_tokens,
         ),
         execution_mode=payload.execution_mode,
         orchestration_profile=payload.orchestration_profile,
         autonomy_level=payload.autonomy_level,
         max_parallel_agents=payload.max_parallel_agents,
         max_agent_depth=payload.max_agent_depth,
+        human_approval_policy=payload.human_approval_policy,
     )
     try:
         session = agent_run_service.create_session(
@@ -168,6 +183,23 @@ def create_agent_run(payload: AgentRunCreate):
             if not session.sandbox.release_capable
             else ""
         ),
+        "effective_config": {
+            "execution_mode": payload.execution_mode,
+            "orchestration_profile": payload.orchestration_profile,
+            "autonomy_level": payload.autonomy_level,
+            "max_parallel_agents": payload.max_parallel_agents,
+            "max_agent_depth": payload.max_agent_depth,
+            "provider": payload.provider,
+            "model": payload.model,
+            "model_profile": payload.model_profile or payload.gateway_profile,
+            "reasoning_effort": payload.reasoning_effort,
+            "thinking_enabled": payload.thinking_enabled,
+            "clear_thinking": payload.clear_thinking,
+            "stream": payload.stream,
+            "tool_stream": payload.tool_stream,
+            "context_budget_tokens": payload.context_budget_tokens,
+            "human_approval_policy": payload.human_approval_policy,
+        },
     }
 
 
@@ -190,6 +222,59 @@ def stop_agent_run(run_id: str):
     _session_or_404(run_id)
     changed = run_manager.abort(run_id)
     return {"run_id": run_id, "abort_requested": changed}
+
+
+@router.post("/{run_id}/pause")
+def pause_agent_run(run_id: str, payload: PauseRequest | None = None):
+    session = _session_or_404(run_id)
+    try:
+        state = session.pause_for_human((payload or PauseRequest()).reason)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"run_id": run_id, "status": state.status.value, "paused": True}
+
+
+@router.post("/{run_id}/resume")
+def resume_agent_run(run_id: str):
+    session = _session_or_404(run_id)
+    try:
+        if session.state.status.value == "human_required":
+            session.answer_human({"action": "resume"})
+        elif session.state.status.value != "running":
+            raise ValueError("run is not resumable")
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    started = run_manager.start(run_id)
+    return {"run_id": run_id, "status": session.state.status.value, "resumed": started}
+
+
+@router.post("/{run_id}/branches/{task_id}/cancel")
+def cancel_agent_branch(run_id: str, task_id: str, payload: BranchControlRequest | None = None):
+    session = _session_or_404(run_id)
+    control = getattr(session, "cancel_branch", None)
+    if not callable(control):
+        raise HTTPException(409, "branch control requires coordinator mode")
+    try:
+        result = control(task_id, (payload or BranchControlRequest()).reason)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"run_id": run_id, **result}
+
+
+@router.post("/{run_id}/branches/{task_id}/retry")
+def retry_agent_branch(run_id: str, task_id: str, payload: BranchControlRequest | None = None):
+    session = _session_or_404(run_id)
+    control = getattr(session, "retry_branch", None)
+    if not callable(control):
+        raise HTTPException(409, "branch control requires coordinator mode")
+    try:
+        result = control(task_id, (payload or BranchControlRequest()).reason)
+        if session.state.status.value == "human_required":
+            session.answer_human({"action": "retry_branch", "task_id": task_id})
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    started = run_manager.start(run_id)
+    return {"run_id": run_id, **result, "resumed": started}
 
 
 @router.post("/{run_id}/human-answer")

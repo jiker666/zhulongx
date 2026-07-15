@@ -14,8 +14,13 @@ import {
   ctfStopTask,
   ctfUploadAttachment,
   answerAgentRun,
+  cancelAgentBranch,
   getAgentRunAudit,
   getAgentRunProjection,
+  pauseAgentRun,
+  resumeAgentRun,
+  retryAgentBranch,
+  stopAgentRun,
   validateAgentRunExternally,
   type AgentRunProjection,
   type BlackboardSnapshot,
@@ -66,7 +71,7 @@ function toLiveEvent(event: CtfTask['evidence'][number], taskId: string): AgentL
         : type === 'tool.finished'
           ? 'result'
           : type.startsWith('model.')
-            ? 'thinking'
+            ? 'decision'
             : 'info'
   return {
     type: 'agent_live',
@@ -74,7 +79,9 @@ function toLiveEvent(event: CtfTask['evidence'][number], taskId: string): AgentL
     event_type: eventType,
     phase: type,
     title: type,
-    detail: event.output_summary || event.input_summary || '',
+    detail: type.startsWith('model.')
+      ? String(event.payload?.decision_summary || '')
+      : event.output_summary || event.input_summary || '',
     code: '',
     output: '',
     success: event.success,
@@ -257,9 +264,26 @@ export default function CtfTaskDetail() {
       .finally(() => setAgentRefreshing(false))
   }
 
-  const handleHumanAnswer = async (answer: string) => {
+  const handleHumanAnswer = async (answer: Record<string, any>) => {
     if (!task?.agent_run_id) return
-    await answerAgentRun(task.agent_run_id, { answer })
+    await answerAgentRun(task.agent_run_id, answer)
+    refreshAgentProjection()
+    setTimeout(refresh, 200)
+  }
+
+  const handleAgentControl = async (action: 'pause' | 'resume' | 'cancel') => {
+    if (!task?.agent_run_id) return
+    if (action === 'pause') await pauseAgentRun(task.agent_run_id)
+    if (action === 'resume') await resumeAgentRun(task.agent_run_id)
+    if (action === 'cancel') await stopAgentRun(task.agent_run_id)
+    refreshAgentProjection()
+    setTimeout(refresh, 200)
+  }
+
+  const handleBranchControl = async (taskId: string, action: 'cancel' | 'retry') => {
+    if (!task?.agent_run_id) return
+    if (action === 'cancel') await cancelAgentBranch(task.agent_run_id, taskId)
+    if (action === 'retry') await retryAgentBranch(task.agent_run_id, taskId)
     refreshAgentProjection()
     setTimeout(refresh, 200)
   }
@@ -377,6 +401,8 @@ export default function CtfTaskDetail() {
           onHumanAnswer={handleHumanAnswer}
           onExternalValidation={handleExternalValidation}
           onAudit={handleAudit}
+          onControl={handleAgentControl}
+          onBranchControl={handleBranchControl}
         />
       )}
 
