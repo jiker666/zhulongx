@@ -20,8 +20,9 @@ class Replanner:
         "switch_tool",
         "switch_hypothesis",
         "review_refute",
-        "rebuild_local_plan",
-        "escalate_model",
+        "spawn_specialist",
+        "rebuild_plan",
+        "broaden_search",
         "human_handoff",
     )
 
@@ -37,7 +38,7 @@ class Replanner:
             action,
             f"stuck signals: {', '.join(report.signals)}",
             requires_human=action == "human_handoff",
-            model_profile="expert" if action == "escalate_model" else "",
+            model_profile="expert" if action in {"spawn_specialist", "rebuild_plan"} else "",
         )
 
     def revise(self, plan: Plan, decision: ReplanDecision) -> Plan:

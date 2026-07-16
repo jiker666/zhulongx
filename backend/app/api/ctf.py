@@ -23,7 +23,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
 from fastapi.responses import PlainTextResponse
@@ -58,6 +58,8 @@ class TaskCreateIn(BaseModel):
     allowed_ports: list[int] = Field(default_factory=list, max_length=100)
     max_rounds: int = Field(0, ge=0, description="最大轮数，0=无限")
     max_time_sec: int = Field(600, ge=30, le=3600, description="最大运行时间(秒)")
+    execution_mode: Literal["auto", "coordinator", "single"] = "auto"
+    max_parallel_agents: int = Field(default=4, ge=1, le=16)
 
 
 class TaskSolveIn(BaseModel):
@@ -159,6 +161,8 @@ def create_task(payload: TaskCreateIn):
         allowed_ports=tuple(payload.allowed_ports),
         max_rounds=payload.max_rounds,
         max_time_sec=payload.max_time_sec,
+        execution_mode=payload.execution_mode,
+        max_parallel_agents=payload.max_parallel_agents,
         source="api",
     )
     return {"task_id": task["task_id"], "state": task["state"], "engine": "v3"}
@@ -190,7 +194,7 @@ async def upload_attachment(
     saved = _save_upload(file, task_id)
     if not ctf_session_service.add_attachment(task_id, saved):
         Path(saved).unlink(missing_ok=True)
-        raise HTTPException(409, "attachments cannot be changed after an AgentSession run is created")
+        raise HTTPException(409, "attachments cannot be changed after a ManagedRun is created")
     return {"saved_path": saved, "filename": file.filename, "size": os.path.getsize(saved)}
 
 
@@ -289,6 +293,7 @@ def run_demo(demo_id: str, max_rounds: int = 0, max_time_sec: int = 600, sync: b
         authorized=True,
         allow_network=meta.get("allow_network", False),
         max_rounds=max_rounds,
+        execution_mode="single",
         source="demo",
         demo_id=demo_id,
         expected_flag=expected_flag,  # ⚠️ 仅 benchmark 用，orchestrator 不读

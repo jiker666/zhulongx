@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from typing import Any, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 
 from app.agent_engine.contracts.plan import Plan
 from app.agent_engine.orchestration.workflow import WorkflowSpec
@@ -19,6 +19,8 @@ class ScenarioManifest:
     high_risk_tools: tuple[str, ...]
     required_outputs: tuple[str, ...]
     completion_policy: str
+    macro_stages: tuple[str, ...] = ()
+    completion_contract: Mapping[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

@@ -1,19 +1,20 @@
-import { Component, type ReactNode } from 'react'
+import { Component, lazy, Suspense, type ReactNode } from 'react'
 import { BrowserRouter, Routes, Route, Link } from 'react-router-dom'
 import { Sidebar } from './components/layout'
 import { ObsidianBackground } from './components/visual'
-import { ErrorState } from './components/ui'
-import Dashboard from './pages/Dashboard'
-import CtfHub from './pages/CtfHub'
-import CtfTaskDetail from './pages/CtfTaskDetail'
-import Benchmark from './pages/Benchmark'
-import CreateTask from './pages/CreateTask'
-import TaskList from './pages/TaskList'
-import TaskDetail from './pages/TaskDetail'
-import ToolCenter from './pages/ToolCenter'
-import ReportView from './pages/ReportView'
-import FinalOps from './pages/FinalOps'
-import SettingsPage from './pages/Settings'
+import { ErrorState, LoadingState } from './components/ui'
+
+const Dashboard = lazy(() => import('./pages/Dashboard'))
+const CtfHub = lazy(() => import('./pages/CtfHub'))
+const CtfTaskDetail = lazy(() => import('./pages/CtfTaskDetail'))
+const Benchmark = lazy(() => import('./pages/Benchmark'))
+const CreateTask = lazy(() => import('./pages/CreateTask'))
+const TaskList = lazy(() => import('./pages/TaskList'))
+const TaskDetail = lazy(() => import('./pages/TaskDetail'))
+const ToolCenter = lazy(() => import('./pages/ToolCenter'))
+const ReportView = lazy(() => import('./pages/ReportView'))
+const FinalOps = lazy(() => import('./pages/FinalOps'))
+const SettingsPage = lazy(() => import('./pages/Settings'))
 
 class ErrorBoundary extends Component<{ children: ReactNode }, { hasError: boolean; error?: Error }> {
   state = { hasError: false, error: undefined as Error | undefined }
@@ -53,20 +54,22 @@ export default function App() {
         <Sidebar />
         <main id="main-content" tabIndex={-1} className="relative z-10 min-w-0 flex-1 md:ml-64 min-h-screen p-4 md:p-6 lg:p-8">
           <ErrorBoundary>
-            <Routes>
-              <Route path="/" element={<Dashboard />} />
-              <Route path="/ctf" element={<CtfHub />} />
-              <Route path="/ctf/:taskId" element={<CtfTaskDetail />} />
-              <Route path="/benchmark" element={<Benchmark />} />
-              <Route path="/tasks/new" element={<CreateTask />} />
-              <Route path="/tasks" element={<TaskList />} />
-              <Route path="/tasks/:id" element={<TaskDetail />} />
-              <Route path="/tasks/:id/report" element={<ReportView />} />
-              <Route path="/tools" element={<ToolCenter />} />
-              <Route path="/finalops" element={<FinalOps />} />
-              <Route path="/settings" element={<SettingsPage />} />
-              <Route path="*" element={<NotFound />} />
-            </Routes>
+            <Suspense fallback={<LoadingState message="加载作战视图" />}>
+              <Routes>
+                <Route path="/" element={<Dashboard />} />
+                <Route path="/ctf" element={<CtfHub />} />
+                <Route path="/ctf/:taskId" element={<CtfTaskDetail />} />
+                <Route path="/benchmark" element={<Benchmark />} />
+                <Route path="/tasks/new" element={<CreateTask />} />
+                <Route path="/tasks" element={<TaskList />} />
+                <Route path="/tasks/:id" element={<TaskDetail />} />
+                <Route path="/tasks/:id/report" element={<ReportView />} />
+                <Route path="/tools" element={<ToolCenter />} />
+                <Route path="/finalops" element={<FinalOps />} />
+                <Route path="/settings" element={<SettingsPage />} />
+                <Route path="*" element={<NotFound />} />
+              </Routes>
+            </Suspense>
           </ErrorBoundary>
         </main>
       </div>

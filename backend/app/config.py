@@ -40,6 +40,19 @@ class Settings(BaseSettings):
     LLM_MAX_TOKENS: int = 4096
     LLM_TEMPERATURE: float = 0.2
 
+    # Native GLM-5.2 protocol. Secrets are loaded only from environment.
+    GLM_API_KEY: str = "replace_me"
+    GLM_BASE_URL: str = "https://api.z.ai/api/paas/v4"
+    GLM_MODEL: str = "glm-5.2"
+    GLM_THINKING_ENABLED: bool = True
+    GLM_CLEAR_THINKING: bool = False
+    GLM_REASONING_EFFORT: str = "max"
+    GLM_STREAM: bool = True
+    GLM_TOOL_STREAM: bool = True
+    GLM_MAX_OUTPUT_TOKENS: int = 8192
+    GLM_CONNECT_TIMEOUT: float = 10.0
+    GLM_READ_TIMEOUT: float = 120.0
+
     # ===== Cost-aware Model Router (v6) =====
     LLM_ROUTER_ENABLED: bool = True
     LLM_BUDGET_PER_TASK_USD: float = 0.05

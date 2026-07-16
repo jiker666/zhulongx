@@ -6,8 +6,11 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from app.agent_engine.events import AgentEvent, AppendOnlyEventStore, EventType
+from app.agent_engine.hooks import HookContext, HookPipeline
 from app.agent_engine.policy.engine import PolicyContext, PolicyEngine
+from app.agent_engine.state_invariants import StateInvariantError, StateInvariantGuard
 from app.agent_engine.tools.registry import ToolRegistry
+from app.agent_engine.tools.resource_locks import ResourceLockManager, ResourceLockTimeout
 from app.agent_engine.tools.schema import ArgumentsValidationError
 from app.agent_engine.tools.types import ToolCall, ToolContext, ToolResult
 
@@ -27,11 +30,17 @@ class ToolExecutionService:
         events: AppendOnlyEventStore,
         *,
         max_result_chars: int = 10_000,
+        hooks: HookPipeline | None = None,
+        resource_locks: ResourceLockManager | None = None,
+        invariant_guard: StateInvariantGuard | None = None,
     ) -> None:
         self.registry = registry
         self.policy = policy
         self.events = events
         self.max_result_chars = max_result_chars
+        self.hooks = hooks or HookPipeline()
+        self.resource_locks = resource_locks or ResourceLockManager()
+        self.invariant_guard = invariant_guard or StateInvariantGuard()
 
     def execute(self, call: ToolCall, context: ToolContext, *, parent_event_id: str | None = None) -> ToolExecution:
         existing = self._completed_execution(call, context)
@@ -49,10 +58,25 @@ class ToolExecutionService:
         definition = self.registry.get(call.name)
         if definition is None:
             return self._failure(call, context, requested.event_id, "unknown_tool", f"tool is not registered: {call.name}")
+        if context.exposed_tools and call.name not in set(context.exposed_tools):
+            return self._failure(call, context, requested.event_id, "tool_not_selected", f"tool was not selected: {call.name}")
         try:
             self.registry.validate(call.name, call.arguments)
         except ArgumentsValidationError as exc:
             return self._failure(call, context, requested.event_id, "invalid_arguments", str(exc))
+        try:
+            self.invariant_guard.validate_tool_call(call, context, self.events)
+        except StateInvariantError as exc:
+            return self._failure(call, context, requested.event_id, "state_invariant", str(exc))
+
+        hook_context = HookContext(
+            context.run_id,
+            context.request.task_id,
+            context.agent_id,
+            context.request.agent_role,
+            {"tool_name": call.name, "arguments": dict(call.arguments), "risk_level": definition.risk_level},
+        )
+        self.hooks.run("before_tool_call", hook_context)
 
         decision = self.policy.authorize(definition, PolicyContext(context.request, context.workspace))
         decision_type = EventType.POLICY_ALLOWED if decision.allowed else EventType.POLICY_DENIED
@@ -80,7 +104,14 @@ class ToolExecutionService:
         began = time.monotonic()
         try:
             context.abort_token.raise_if_aborted()
-            result = definition.executor.execute(replace(context, tool_call_id=call.id), call.arguments)
+            with self.resource_locks.acquire(
+                definition.resource_locks,
+                timeout_seconds=definition.timeout_seconds,
+                abort_token=context.abort_token,
+            ):
+                result = definition.executor.execute(replace(context, tool_call_id=call.id), call.arguments)
+        except ResourceLockTimeout as exc:
+            result = ToolResult(False, f"{call.name} resource lock timed out", error=str(exc))
         except Exception as exc:
             result = ToolResult(False, f"{call.name} failed", error=f"{type(exc).__name__}: {exc}")
         duration_ms = int((time.monotonic() - began) * 1000)
@@ -105,6 +136,19 @@ class ToolExecutionService:
             agent_id=context.agent_id,
             task_id=context.request.task_id,
         )
+        hook_name = "after_tool_call" if result.success else "on_tool_error"
+        self.hooks.run(hook_name, HookContext(
+            context.run_id,
+            context.request.task_id,
+            context.agent_id,
+            context.request.agent_role,
+            {
+                "tool_name": call.name,
+                "success": result.success,
+                "event_id": result_event.event_id,
+                "error": result.error,
+            },
+        ))
         return ToolExecution(result, result_event)
 
     def _failure(
@@ -131,6 +175,13 @@ class ToolExecutionService:
             agent_id=context.agent_id,
             task_id=context.request.task_id,
         )
+        self.hooks.run("on_tool_error", HookContext(
+            context.run_id,
+            context.request.task_id,
+            context.agent_id,
+            context.request.agent_role,
+            {"tool_name": call.name, "error": code, "event_id": event.event_id},
+        ))
         return ToolExecution(result, event)
 
     def _completed_execution(self, call: ToolCall, context: ToolContext) -> ToolExecution | None:

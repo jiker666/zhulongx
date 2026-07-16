@@ -4,16 +4,16 @@ from __future__ import annotations
 import tempfile
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.agent_engine.budget import BudgetLimits
 from app.agent_engine.manager import run_manager
+from app.agent_engine.managed_run import ManagedRun
 from app.agent_engine.projections import CanonicalRunProjection
 from app.agent_engine.service import agent_run_service
-from app.agent_engine.session import AgentSession
 from app.agent_engine.state import ModelConfig, NetworkPolicy, RunRequest, RunStatus
 from app.agent_engine.tools.builtin import build_builtin_registry
 from app.agent_engine.tools.types import ToolCall
@@ -42,6 +42,8 @@ class CreateChallenge(BaseModel):
     max_tool_calls: int = Field(default=100, ge=1, le=1000)
     provider: str = Field(default=settings.LLM_PROVIDER, min_length=1, max_length=100)
     model: str = Field(default=settings.LLM_MODEL, min_length=1, max_length=200)
+    execution_mode: Literal["auto", "coordinator", "single"] = "auto"
+    max_parallel_agents: int = Field(default=4, ge=1, le=16)
 
 
 class HypothesisIn(BaseModel):
@@ -79,14 +81,14 @@ class PauseIn(BaseModel):
     reason: str = Field(default="paused by competition operator", min_length=1, max_length=10_000)
 
 
-def _session_or_404(run_id: str) -> AgentSession:
+def _session_or_404(run_id: str) -> ManagedRun:
     session = run_manager.get(run_id)
     if session is None or not session.request.authorization.get("competition_id"):
         raise HTTPException(404, "competition run not found")
     return session
 
 
-def _project(session: AgentSession) -> dict[str, Any]:
+def _project(session: ManagedRun) -> dict[str, Any]:
     projection = CanonicalRunProjection(session.run_id, session.request.objective)
     projection.consume(session.event_stream())
     data = projection.to_dict()
@@ -111,8 +113,8 @@ def profiles():
 def profile():
     return {
         "name": "agent-engine-v3",
-        "lifecycle_authority": "AgentSession",
-        "construction_path": "AgentRunService",
+        "lifecycle_authority": "ManagedRun",
+        "construction_path": "AgentRunService -> RunSessionFactory",
         "state_source": "AppendOnlyEventStore",
         "policy": "default-deny per run",
     }
@@ -155,6 +157,8 @@ def create_challenge(payload: CreateChallenge):
             max_tool_calls=payload.max_tool_calls,
         ),
         model_config=ModelConfig(provider=payload.provider, model=payload.model),
+        execution_mode=payload.execution_mode,
+        max_parallel_agents=payload.max_parallel_agents,
     )
     try:
         session = agent_run_service.create_session(
@@ -232,7 +236,7 @@ def score_action(run_id: str, action: ActionCandidate):
 def execute_action(run_id: str, payload: ExecuteAction):
     session = _session_or_404(run_id)
     if run_manager.is_running(run_id):
-        raise HTTPException(409, "run is active; tools are controlled by its AgentSession")
+        raise HTTPException(409, "run is active; tools are controlled by its ManagedRun")
     call = ToolCall(
         payload.action.tool_call_id or f"operator_{uuid.uuid4().hex}",
         payload.action.tool_name,

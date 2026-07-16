@@ -32,6 +32,7 @@ SKIP_PARTS = {
 }
 SECRET_PATTERNS = [
     re.compile(r"sk-[A-Za-z0-9_\-]{20,}"),
+    re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"),
     re.compile(r"AKIA[0-9A-Z]{16}"),
     re.compile(r"BEGIN (RSA |OPENSSH |EC )?PRIVATE KEY"),
 ]
@@ -50,6 +51,12 @@ REQUIRED_DOCS = [
     "docs/refactor/10-legacy-runtime-migration.md",
     "docs/refactor/11-operator-guide.md",
     "docs/refactor/12-verification-report.md",
+    "docs/refactor_glm52/00-baseline.md",
+    "docs/refactor_glm52/01-architecture.md",
+    "docs/refactor_glm52/02-glm52-protocol.md",
+    "docs/refactor_glm52/03-migration-plan.md",
+    "docs/refactor_glm52/04-verification-report.md",
+    "docs/refactor_glm52/05-live-model-eval.md",
     "docs/architecture_v3.md",
     "docs/security_boundary.md",
     "docs/developer_guide.md",

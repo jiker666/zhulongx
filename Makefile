@@ -175,6 +175,7 @@ dev-frontend:
 
 package:
 	python3 scripts/package_release.py
+	python3 scripts/check_release_archive.py
 
 reset-demo:
 	COMPOSE_PROJECT_NAME=cyberpilot_v3 podman compose -f podman-compose.yml down -v --remove-orphans 2>/dev/null || true

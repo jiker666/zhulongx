@@ -14,12 +14,15 @@ from typing import Any, Mapping, Optional
 class EventType(str, Enum):
     RUN_CREATED = "run.created"
     RUN_STARTED = "run.started"
+    RUN_MODE_SELECTED = "run.mode_selected"
     MODEL_REQUESTED = "model.requested"
     MODEL_RESPONDED = "model.responded"
+    PROVIDER_CAPABILITY_NEGOTIATED = "provider.capability_negotiated"
     PLAN_PROPOSED = "plan.proposed"
     PLAN_ACCEPTED = "plan.accepted"
     PLAN_NODE_STARTED = "plan.node_started"
     PLAN_NODE_BLOCKED = "plan.node_blocked"
+    PLAN_PATCH_PROPOSED = "plan.patch_proposed"
     PLAN_REVISED = "plan.revised"
     PLAN_COMPLETED = "plan.completed"
     TASK_SCHEDULED = "task.scheduled"
@@ -32,6 +35,7 @@ class EventType(str, Enum):
     AGENT_COMPLETED = "agent.completed"
     MAILBOX_MESSAGE = "mailbox.message"
     TOOL_REQUESTED = "tool.requested"
+    TOOLSET_SELECTED = "toolset.selected"
     POLICY_ALLOWED = "policy.allowed"
     POLICY_DENIED = "policy.denied"
     TOOL_STARTED = "tool.started"
@@ -171,10 +175,9 @@ class AppendOnlyEventStore:
         type_value = event_type.value if isinstance(event_type, EventType) else str(event_type)
         with self._lock:
             events = self._events.setdefault(run_id, [])
-            if type_value in TERMINAL_EVENT_TYPES:
-                for existing in events:
-                    if existing.type in TERMINAL_EVENT_TYPES:
-                        return existing
+            terminal = next((event for event in reversed(events) if event.type in TERMINAL_EVENT_TYPES), None)
+            if terminal is not None:
+                return terminal
             redacted_paths: list[str] = []
             safe_payload = _redact(payload or {}, "payload", redacted_paths)
             event = AgentEvent(

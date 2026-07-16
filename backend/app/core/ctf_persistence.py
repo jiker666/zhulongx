@@ -68,7 +68,18 @@ def save_task(task_dict: Dict[str, Any]) -> None:
         row.state = task_dict.get("state", row.state or "INIT")
         row.rounds_used = int(task_dict.get("rounds_used", 0))
         row.plan_json = _j(task_dict.get("plan")) or row.plan_json
-        row.analysis_json = _j(task_dict.get("analysis")) or row.analysis_json
+        analysis = task_dict.get("analysis")
+        if not isinstance(analysis, dict):
+            analysis = _jd(row.analysis_json, {}) or {}
+        else:
+            analysis = dict(analysis)
+        if "execution_mode" in task_dict or "max_parallel_agents" in task_dict:
+            analysis["_managed_run"] = {
+                "version": 1,
+                "execution_mode": str(task_dict.get("execution_mode") or "auto"),
+                "max_parallel_agents": int(task_dict.get("max_parallel_agents", 4) or 4),
+            }
+        row.analysis_json = _j(analysis) or row.analysis_json
         row.current_script = task_dict.get("current_script", "") or ""
         row.best_flag = task_dict.get("best_flag") or None
         # writeup_md: 仅在 to_dict() 提供时更新（避免空覆盖）
@@ -214,6 +225,8 @@ def load_task_view(task_id: str) -> Optional[Dict[str, Any]]:
             .order_by(CtfFlag.confidence.desc())
             .all()
         )
+        analysis = _jd(row.analysis_json) or {}
+        managed_run = analysis.get("_managed_run", {}) if isinstance(analysis, dict) else {}
         return {
             "task_id": row.task_id,
             "title": row.title,
@@ -230,7 +243,9 @@ def load_task_view(task_id: str) -> Optional[Dict[str, Any]]:
             "state": row.state,
             "rounds_used": row.rounds_used,
             "plan": _jd(row.plan_json),
-            "analysis": _jd(row.analysis_json),
+            "analysis": analysis,
+            "execution_mode": str(managed_run.get("execution_mode") or "auto"),
+            "max_parallel_agents": int(managed_run.get("max_parallel_agents", 4) or 4),
             "current_script": row.current_script,
             "script_runs": [
                 {

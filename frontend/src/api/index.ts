@@ -337,6 +337,11 @@ export interface AgentPlanNode {
   dependencies?: string[]
   success_criteria?: string[]
   status_reason?: string
+  priority?: number
+  attempt?: number
+  parallel_group?: string
+  expected_output?: string
+  verification_policy?: string
 }
 
 export interface AgentRunProjection {
@@ -350,10 +355,37 @@ export interface AgentRunProjection {
     nodes?: AgentPlanNode[]
     critical_path?: string[]
     revision_reason?: string
+    completion_contract?: Record<string, any>
   }
-  plan_history: Array<{ event_id: string; type: string; reason: string; plan: Record<string, any> }>
+  plan_history: Array<{
+    event_id: string
+    type: string
+    reason: string
+    old_version?: number
+    new_version?: number
+    diff?: Array<Record<string, any>>
+    evidence_refs?: string[]
+    plan: Record<string, any>
+  }>
   tasks: Array<Record<string, any>>
-  agent_lanes: Array<{ agent_id: string; role: string; task_id: string; status: string; parent_agent_id?: string }>
+  agent_lanes: Array<{
+    agent_id: string
+    child_run_id?: string
+    parent_agent_id?: string
+    role: string
+    task_id: string
+    status: string
+    active_tool?: string
+    last_tool?: string
+    last_tool_success?: boolean
+    usage?: Record<string, number>
+    budget?: Record<string, number>
+    handoff_summary?: string
+    verdict?: string
+    evidence_refs?: string[]
+    artifact_refs?: string[]
+    decision_summary?: string
+  }>
   facts: Array<{ fact_id: string; statement: string; confidence?: number; evidence_ids?: string[] }>
   open_hypotheses: Array<{ hypothesis_id: string; statement: string; priority?: number }>
   failed_hypotheses: Array<{ hypothesis_id: string; statement: string; reason?: string }>
@@ -368,7 +400,7 @@ export interface AgentRunProjection {
   human_handoff?: {
     completed_work: string[]
     minimal_blocker: string
-    questions: Array<{ id: string; type: string; question: string }>
+    questions: Array<{ id: string; type: string; question: string; choices?: string[] }>
     recommended_next_step: string
     risk: string
     checkpoint_sequence: number
@@ -451,6 +483,14 @@ export const ctfBenchmark = () => api.get<CtfBenchmark>('/ctf/benchmark')
 
 export const getAgentRunProjection = (runId: string) =>
   api.get<AgentRunProjection>(`/agent/runs/${runId}/projection`)
+export const pauseAgentRun = (runId: string, reason = 'paused by operator') =>
+  api.post(`/agent/runs/${runId}/pause`, { reason })
+export const resumeAgentRun = (runId: string) => api.post(`/agent/runs/${runId}/resume`)
+export const stopAgentRun = (runId: string) => api.post(`/agent/runs/${runId}/stop`)
+export const cancelAgentBranch = (runId: string, taskId: string, reason = 'branch cancelled by operator') =>
+  api.post(`/agent/runs/${runId}/branches/${encodeURIComponent(taskId)}/cancel`, { reason })
+export const retryAgentBranch = (runId: string, taskId: string, reason = 'branch retry requested by operator') =>
+  api.post(`/agent/runs/${runId}/branches/${encodeURIComponent(taskId)}/retry`, { reason })
 export const answerAgentRun = (
   runId: string,
   publicResponse: Record<string, any>,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from app.agent_engine.providers.base import ModelProvider
+from app.agent_engine.providers.glm52 import GLM52Provider
 from app.agent_engine.providers.mock import ScriptedProvider
 from app.agent_engine.providers.openai_compatible import OpenAICompatibleProvider
 from app.agent_engine.state import ModelConfig
@@ -40,6 +41,11 @@ def configured_provider(config: ModelConfig | None = None) -> ModelProvider:
     supported = {"openai", "openai_compatible", "wanqing", "deepseek", "qwen", "glm", profile_provider}
     if provider_name not in supported:
         raise ValueError(f"unsupported model provider: {provider_name}")
+    native_glm = provider_name == "glm" or (requested.model or profile_model).lower().startswith("glm-5.2")
+    if provider_name == "glm":
+        profile_base_url = settings.GLM_BASE_URL
+        profile_model = settings.GLM_MODEL
+        api_key = settings.GLM_API_KEY
     configured_base_url = _normalized_base_url(profile_base_url)
     requested_base_url = _normalized_base_url(requested.base_url)
     if requested_base_url and requested_base_url != configured_base_url:
@@ -48,6 +54,22 @@ def configured_provider(config: ModelConfig | None = None) -> ModelProvider:
         raise ValueError(f"gateway profile has no configured base URL: {profile}")
     if not api_key or api_key == "replace_me":
         raise ValueError(f"gateway profile has no configured API key: {profile}")
+    if native_glm:
+        return GLM52Provider(
+            base_url=configured_base_url,
+            api_key=api_key,
+            model=requested.model or profile_model,
+            temperature=requested.temperature,
+            max_tokens=requested.max_tokens,
+            thinking_enabled=requested.thinking_enabled,
+            reasoning_effort=requested.reasoning_effort,
+            clear_thinking=requested.clear_thinking,
+            stream=requested.stream,
+            tool_stream=requested.tool_stream,
+            connect_timeout=requested.connect_timeout_seconds,
+            read_timeout=requested.read_timeout_seconds,
+            max_retries=settings.LLM_MAX_RETRIES,
+        )
     return OpenAICompatibleProvider(
         base_url=configured_base_url,
         api_key=api_key,

@@ -27,7 +27,8 @@ class PolicyEngine:
 
     def authorize(self, definition: ToolDefinition, context: PolicyContext) -> PolicyDecision:
         permissions = set(definition.permissions)
-        if definition.requires_approval and context.request.authorization.get("approval_mode") == "required":
+        approval_required = context.request.human_approval_policy in {"always", "risk_based"}
+        if definition.requires_approval and approval_required:
             approved = set(context.request.authorization.get("approved_tools", ()))
             if definition.name not in approved:
                 return PolicyDecision(False, "tool requires an explicit per-run approval")

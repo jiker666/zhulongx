@@ -51,6 +51,34 @@ def test_five_scenario_workflows_are_executable_offline():
         assert result.children, name
 
 
+def test_scenario_macros_publish_enforced_completion_contracts():
+    registry = default_scenarios()
+    expected_stages = {
+        "ctf": {"intake", "candidate_extraction", "clean_verification", "external_evaluation"},
+        "pentest": {"scope_confirmation", "passive_discovery", "controlled_proof", "independent_review"},
+        "vuln_analysis": {"artifact_inventory", "source_sink_hypotheses", "patch", "regression_verification"},
+        "incident_response": {"preservation", "timeline_ioc_parallel", "recovery_plan", "audit_export"},
+        "reverse_forensics": {"triage", "parallel_static_hypotheses", "targeted_dynamic_analysis", "clean_verification"},
+    }
+    for name in registry.names():
+        scenario = registry.get(name)
+        manifest = scenario.manifest()
+        plan = scenario.build_plan(f"contract {name}")
+        contract = plan.completion_contract
+
+        assert expected_stages[name] <= set(manifest.macro_stages)
+        assert set(manifest.required_outputs) <= set(contract["required_outputs"])
+        assert contract["minimum_verification_level"] == "independent"
+        assert contract["independent_reproduction"] is True
+        verifier = [node for node in plan.nodes if node.role == "verifier"]
+        assert verifier and all(node.verification_policy == "clean_context" for node in verifier)
+        assert plan.critical_path[-1] == plan.nodes[-1].task_id
+
+    assert registry.get("ctf").build_plan("ctf").completion_contract["pending_external_allowed"] is True
+    assert registry.get("pentest").build_plan("pentest").nodes[0].task_id == "scope_confirmation"
+    assert registry.get("incident_response").build_plan("ir").nodes[0].task_id == "evidence_preservation"
+
+
 def test_structured_validator_can_require_hidden_authoritative_evaluator(tmp_path):
     store = AppendOnlyEventStore()
     state = SessionState(run_id="run_structured", objective="validate finding")

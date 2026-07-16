@@ -8,7 +8,7 @@ import { DataEmpty, GlassPanel, StatePill, Timeline, type TimelineItem } from '.
 export interface AgentLiveEvent {
   type: 'agent_live'
   task_id: string
-  event_type: 'thinking' | 'action' | 'result' | 'flag' | 'error' | 'info'
+  event_type: 'decision' | 'action' | 'result' | 'flag' | 'error' | 'info'
   phase: string
   title: string
   detail: string
@@ -20,7 +20,7 @@ export interface AgentLiveEvent {
 }
 
 const EVENT_TONE: Record<string, 'ember' | 'cyan' | 'violet' | 'jade' | 'crimson' | 'slate'> = {
-  thinking: 'violet',
+  decision: 'violet',
   action: 'cyan',
   result: 'jade',
   flag: 'ember',
@@ -55,8 +55,8 @@ export default function ReasoningTimeline({ task, liveEvents, streamConnected, l
       <GlassPanel tone={task.is_running ? 'cyan' : 'slate'}>
         <div className="mb-4 flex items-center justify-between gap-3">
           <div>
-            <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-cyan-300">Live Reasoning</div>
-            <h2 className="mt-1 text-lg font-semibold text-white">Agent 实时推理</h2>
+            <div className="text-[11px] font-semibold uppercase text-cyan-300">Live Decisions</div>
+            <h2 className="mt-1 text-lg font-semibold text-white">Agent 实时决策</h2>
           </div>
           <StatePill tone={streamConnected ? 'jade' : 'slate'} icon={streamConnected ? <Sparkles size={13} /> : <CircleDashed size={13} />}>
             {streamConnected ? '事件流已同步' : '等待同步'}
@@ -64,7 +64,7 @@ export default function ReasoningTimeline({ task, liveEvents, streamConnected, l
         </div>
         <div ref={liveLogRef} className="max-h-[420px] space-y-3 overflow-y-auto pr-1">
           {liveEvents.length === 0 ? (
-            <DataEmpty title={task.is_running ? 'Agent 正在启动' : '等待启动解题'} description="推理、工具调用、输出与错误会实时进入这里。" />
+            <DataEmpty title={task.is_running ? 'Agent 正在启动' : '等待启动解题'} description="决策摘要、工具调用、输出与错误会实时进入这里。" />
           ) : (
             liveEvents.map((event, index) => {
               const tone = EVENT_TONE[event.event_type] || 'slate'
@@ -88,7 +88,7 @@ export default function ReasoningTimeline({ task, liveEvents, streamConnected, l
 
       <GlassPanel tone={toneForState(task.state)}>
         <div className="mb-4">
-          <div className="text-[11px] font-semibold uppercase tracking-[0.22em] text-ember-300">Evidence Timeline</div>
+          <div className="text-[11px] font-semibold uppercase text-ember-300">Evidence Timeline</div>
           <h2 className="mt-1 text-lg font-semibold text-white">阶段时间线</h2>
         </div>
         <Timeline

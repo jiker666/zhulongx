@@ -116,6 +116,42 @@ def test_v3_api_exposes_workflow_projection_audit_and_human_resume():
     assert answered.json()["status"] == "running"
 
 
+def test_v3_api_exposes_effective_config_pause_resume_and_branch_control():
+    created = client.post("/api/agent/runs", json={
+        "task_id": "api_controls",
+        "title": "API controls",
+        "objective": "Exercise pause, resume, and graph branch control through the coordinator API.",
+        "scenario": "ctf",
+        "provider": "mock",
+        "execution_mode": "coordinator",
+        "context_budget_tokens": 64000,
+        "human_approval_policy": "risk_based",
+    })
+    assert created.status_code == 200
+    body = created.json()
+    run_id = body["run_id"]
+    assert body["effective_config"]["context_budget_tokens"] == 64000
+    assert body["effective_config"]["human_approval_policy"] == "risk_based"
+
+    session = run_manager.get(run_id)
+    assert session is not None
+    task_id = session.plan.nodes[0].task_id
+    cancelled = client.post(
+        f"/api/agent/runs/{run_id}/branches/{task_id}/cancel",
+        json={"reason": "operator pruned this branch"},
+    )
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == "cancelled"
+    assert session.plan.version == 2
+
+    paused = client.post(f"/api/agent/runs/{run_id}/pause", json={"reason": "inspect graph"})
+    assert paused.status_code == 200
+    assert paused.json()["status"] == "human_required"
+    resumed = client.post(f"/api/agent/runs/{run_id}/resume")
+    assert resumed.status_code == 200
+    assert resumed.json()["resumed"] is True
+
+
 def test_formal_api_has_no_legacy_runtime_imports():
     root = Path(__file__).resolve().parents[1] / "app"
     formal_files = list((root / "api").glob("*.py")) + [

@@ -9,13 +9,13 @@ from typing import Any, Callable
 from app.agent_engine.checkpoint import CheckpointStore
 from app.agent_engine.events import AppendOnlyEventStore
 from app.agent_engine.manager import run_manager
+from app.agent_engine.managed_run import ManagedRun
 from app.agent_engine.projections import LegacyTaskProjection
 from app.agent_engine.providers.base import ModelProvider
 from app.agent_engine.providers.factory import configured_provider
 from app.agent_engine.service import agent_run_service
 from app.agent_engine.sandbox.base import Sandbox
 from app.agent_engine.sandbox.container import ContainerSandbox
-from app.agent_engine.session import AgentSession
 from app.agent_engine.state import ModelConfig
 from app.config import settings
 from app.core.ctf_persistence import get_expected_flag, list_tasks_view, load_task_view, save_task
@@ -31,7 +31,7 @@ def build_provider(config: ModelConfig | None = None) -> ModelProvider:
 
 
 class CTFSessionService:
-    """CTF control-plane adapter; AgentSession remains the only run authority."""
+    """CTF control-plane adapter backed by the canonical ManagedRun factory."""
 
     _LEGACY_STATE = {
         "created": "INIT",
@@ -65,6 +65,8 @@ class CTFSessionService:
         allowed_ports: tuple[int, ...] = (),
         max_rounds: int = 0,
         max_time_sec: int = 600,
+        execution_mode: str = "auto",
+        max_parallel_agents: int = 4,
         source: str = "api",
         demo_id: str | None = None,
         expected_flag: str | None = None,
@@ -82,6 +84,8 @@ class CTFSessionService:
             "allowed_ports": [int(port) for port in allowed_ports],
             "max_rounds": int(max_rounds),
             "max_time_sec": max(30, min(int(max_time_sec), 3600)),
+            "execution_mode": execution_mode,
+            "max_parallel_agents": max_parallel_agents,
             "attachments": [],
             "state": "INIT",
             "rounds_used": 0,
@@ -167,7 +171,7 @@ class CTFSessionService:
         *,
         max_rounds: int | None = None,
         max_time_sec: int | None = None,
-    ) -> AgentSession:
+    ) -> ManagedRun:
         existing_run_id = str(task.get("agent_run_id") or "")
         if existing_run_id:
             existing = run_manager.get(existing_run_id)

@@ -45,10 +45,13 @@ def test_terminal_event_is_appended_once():
     store.append("run_terminal", EventType.RUN_CREATED, actor="test")
     succeeded = store.append("run_terminal", EventType.RUN_SUCCEEDED, actor="test")
     duplicate = store.append("run_terminal", EventType.RUN_FAILED, actor="test")
+    late_tool = store.append("run_terminal", EventType.TOOL_FAILED, actor="test")
 
     assert duplicate.event_id == succeeded.event_id
+    assert late_tool.event_id == succeeded.event_id
     terminal = [event for event in store.read("run_terminal") if event.type.startswith("run.") and event.type not in {"run.created", "run.started"}]
     assert len(terminal) == 1
+    assert store.read("run_terminal")[-1].event_id == succeeded.event_id
 
 
 def test_token_usage_metrics_are_not_mistaken_for_credentials():

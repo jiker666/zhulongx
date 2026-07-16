@@ -20,8 +20,11 @@ EXCLUDED_DIRS = {
     "ctf_runs", "vendor", "data",
     ".agent_state", ".agent_subagents", ".agent_artifacts",
 }
-EXCLUDED_NAMES = {".DS_Store", ".env"}
+EXCLUDED_NAMES = {".DS_Store", ".env", "benchmark_results.json"}
 EXCLUDED_SUFFIXES = {".pyc"}
+EXCLUDED_PATHS = {
+    ("scripts", "hard_ctf_benchmark.py"),
+}
 FORBIDDEN_ZIP_PARTS = {
     "node_modules",
     ".git",
@@ -49,6 +52,8 @@ REQUIRED = [
     "frontend",
     "docs",
     "samples",
+    "docs/refactor_glm52/04-verification-report.md",
+    "docs/refactor_glm52/05-live-model-eval.md",
 ]
 
 
@@ -57,6 +62,8 @@ def excluded(path: Path) -> bool:
     parts = rel.parts
     if any(part in EXCLUDED_DIRS or part == "__MACOSX" for part in parts):
         return True
+    if parts in EXCLUDED_PATHS:
+        return True
     if "evaluator" in parts:
         return True
     if parts[:2] == ("ctf_cases", "generated"):
@@ -64,6 +71,8 @@ def excluded(path: Path) -> bool:
     if parts[:2] in {("benchmarks", "hidden"), ("benchmarks", "results")}:
         return True
     if path.name in EXCLUDED_NAMES:
+        return True
+    if path.name.startswith(("expected_flag", "expected_answer")):
         return True
     if path.suffix in EXCLUDED_SUFFIXES:
         return True

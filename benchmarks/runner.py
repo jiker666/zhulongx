@@ -161,6 +161,7 @@ def run_case(case: dict, repetition: int, *, sandbox_mode: str = "local") -> dic
             started = time.monotonic()
             state = session.run()
             elapsed = time.monotonic() - started
+            event_log = session.event_stream()
             invalid = sum(
                 1 for event in session.event_stream()
                 if event.type == EventType.TOOL_FAILED.value
@@ -175,6 +176,33 @@ def run_case(case: dict, repetition: int, *, sandbox_mode: str = "local") -> dic
                 for event in session.event_stream()
                 if event.type == EventType.TOOL_FAILED.value
             ]
+            tool_requests = [event for event in event_log if event.type == EventType.TOOL_REQUESTED.value]
+            tool_fingerprints = [
+                json.dumps(
+                    [event.payload.get("name"), event.payload.get("arguments", {})],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                for event in tool_requests
+            ]
+            evidence_ids = {
+                str(evidence_id)
+                for event in event_log
+                if event.type == EventType.CANDIDATE_DETECTED.value
+                for evidence_id in event.payload.get("evidence_event_ids", ())
+                if evidence_id
+            }
+            active_tools: set[str] = set()
+            peak_tool_concurrency = 0
+            for event in event_log:
+                tool_call_id = str(event.payload.get("tool_call_id", ""))
+                if event.type == EventType.TOOL_STARTED.value and tool_call_id:
+                    active_tools.add(tool_call_id)
+                    peak_tool_concurrency = max(peak_tool_concurrency, len(active_tools))
+                elif event.type in {EventType.TOOL_FINISHED.value, EventType.TOOL_FAILED.value}:
+                    active_tools.discard(tool_call_id)
+            agent_ids = {event.agent_id for event in event_log if event.agent_id}
+            tool_call_count = sum(1 for event in event_log if event.type == EventType.TOOL_STARTED.value)
             candidate = (state.final_output or {}).get("candidate", "")
             matches = _matches_expected(candidate, expected)
             return {
@@ -192,7 +220,17 @@ def run_case(case: dict, repetition: int, *, sandbox_mode: str = "local") -> dic
                 "cost_usd": state.budget_usage.get("cost_usd", 0.0),
                 "invalid_tool_calls": invalid,
                 "tool_failures": tool_failures,
-                "event_count": len(session.event_stream()),
+                "tool_call_count": tool_call_count,
+                "duplicate_tool_calls": len(tool_fingerprints) - len(set(tool_fingerprints)),
+                "useful_evidence_count": len(evidence_ids),
+                "useful_evidence_per_tool_call": len(evidence_ids) / tool_call_count if tool_call_count else 0.0,
+                "plan_revisions": sum(1 for event in event_log if event.type == EventType.PLAN_REVISED.value),
+                "validation_attempts": sum(1 for event in event_log if event.type == EventType.VALIDATION_REQUESTED.value),
+                "validator_rejections": sum(1 for event in event_log if event.type == EventType.CANDIDATE_REJECTED.value),
+                "agent_count": len(agent_ids),
+                "peak_tool_concurrency": peak_tool_concurrency,
+                "timeout_cancel_cleanup": "not_exercised",
+                "event_count": len(event_log),
             }
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
@@ -215,6 +253,12 @@ def main() -> int:
         "claim": "Hidden-evaluator harness and deterministic AgentSession integration only; not a live-model solve rate.",
         "provider": "BenchmarkMockProvider",
         "sandbox": "ContainerSandbox" if args.sandbox == "container" else "LocalTestSandbox (test-only)",
+        "scope": {
+            "provider": "deterministic_mock",
+            "answers": "hidden evaluator manifest is loaded only by the runner",
+            "orchestration": "single AgentSession fixture benchmark; multi-agent behavior is measured separately",
+            "network": "disabled except ephemeral loopback targets for scoped pentest fixtures",
+        },
         "commit": git_commit(),
         "case_count": len(cases),
         "scenario_count": len({case["scenario"] for case in cases}),

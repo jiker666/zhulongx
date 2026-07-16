@@ -4,7 +4,7 @@ import json
 import threading
 import time
 import uuid
-from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
+from concurrent.futures import CancelledError, Future, ThreadPoolExecutor, TimeoutError
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Mapping, Protocol
@@ -23,6 +23,8 @@ class SubagentWorker(Protocol):
 
 @dataclass
 class SubagentRecord:
+    root_run_id: str
+    child_run_id: str
     agent_id: str
     parent_agent_id: str | None
     role: str
@@ -42,6 +44,8 @@ class SubagentRecord:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "root_run_id": self.root_run_id,
+            "child_run_id": self.child_run_id,
             "agent_id": self.agent_id,
             "parent_agent_id": self.parent_agent_id,
             "role": self.role,
@@ -95,6 +99,7 @@ class SubagentManager:
             name: threading.BoundedSemaphore(max(1, profile.max_instances))
             for name, profile in self.role_profiles.items()
         }
+        self._restore_records()
 
     def spawn(
         self,
@@ -113,6 +118,33 @@ class SubagentManager:
         if forbidden:
             raise ValueError(f"role {role} cannot use tools: {sorted(forbidden)}")
         with self._lock:
+            restored = next(
+                (
+                    record for record in self._records.values()
+                    if record.task.task_id == task.task_id and record.role == role
+                ),
+                None,
+            )
+            if restored is not None:
+                if restored.summary is not None and restored.status == "completed":
+                    future: Future[AgentSummary] = Future()
+                    future.set_result(restored.summary)
+                    self._futures[restored.agent_id] = future
+                    return restored.agent_id
+                restored.cancel_event = threading.Event()
+                restored.status = "queued"
+                restored.error = ""
+                self.events.append(
+                    self.run_id,
+                    EventType.AGENT_RESUMED,
+                    actor=restored.parent_agent_id or "coordinator",
+                    agent_id=restored.agent_id,
+                    task_id=restored.task.task_id,
+                    payload={"agent": self._public_record(restored), "new_input": {"checkpoint_resume": True}},
+                )
+                self._futures[restored.agent_id] = self._pool.submit(self._execute, restored)
+                self._checkpoint(restored)
+                return restored.agent_id
             active_for_role = sum(
                 1 for record in self._records.values()
                 if record.role == role and record.status in {"queued", "running"}
@@ -123,6 +155,8 @@ class SubagentManager:
             selected_workspace_policy = workspace_policy or WorkspacePolicy()
             agent_workspace = self._workspace_for(agent_id, selected_workspace_policy)
             record = SubagentRecord(
+                root_run_id=self.run_id,
+                child_run_id=f"child_{uuid.uuid4().hex}",
                 agent_id=agent_id,
                 parent_agent_id=parent_agent_id,
                 role=role,
@@ -243,6 +277,9 @@ class SubagentManager:
             remaining = None if deadline is None else max(0, deadline - time.monotonic())
             try:
                 summaries.append(future.result(timeout=remaining))
+            except CancelledError:
+                record = self.get(agent_id)
+                summaries.append(self._failure_summary(record, record.error or "cancelled before start"))
             except TimeoutError:
                 self.cancel(agent_id, "join timeout")
                 record = self.get(agent_id)
@@ -339,9 +376,62 @@ class SubagentManager:
             temporary.write_text(json.dumps(record.to_dict(), ensure_ascii=False, sort_keys=True), encoding="utf-8")
             temporary.replace(target)
 
+    def _restore_records(self) -> None:
+        root = self.workspace / ".agent_subagents"
+        if not root.is_dir():
+            return
+        for target in sorted(root.glob("*/.agent_state/checkpoint.json")):
+            try:
+                raw = json.loads(target.read_text(encoding="utf-8"))
+                if str(raw.get("root_run_id") or "") != self.run_id:
+                    continue
+                workspace = Path(str(raw["workspace"])).expanduser().resolve()
+                workspace.relative_to(self.workspace)
+                summary_raw = raw.get("summary")
+                summary = None
+                if isinstance(summary_raw, Mapping):
+                    summary = AgentSummary(
+                        agent_id=str(summary_raw["agent_id"]),
+                        role=str(summary_raw["role"]),
+                        task_id=str(summary_raw["task_id"]),
+                        status=str(summary_raw["status"]),
+                        summary=str(summary_raw["summary"]),
+                        facts=tuple(summary_raw.get("facts", ())),
+                        hypotheses=tuple(summary_raw.get("hypotheses", ())),
+                        evidence=tuple(summary_raw.get("evidence", ())),
+                        artifacts=tuple(summary_raw.get("artifacts", ())),
+                        recommendations=tuple(str(item) for item in summary_raw.get("recommendations", ())),
+                        error=str(summary_raw.get("error") or ""),
+                        verdict=str(summary_raw.get("verdict") or ""),
+                    )
+                record = SubagentRecord(
+                    root_run_id=self.run_id,
+                    child_run_id=str(raw["child_run_id"]),
+                    agent_id=str(raw["agent_id"]),
+                    parent_agent_id=str(raw.get("parent_agent_id") or "") or None,
+                    role=str(raw["role"]),
+                    task=TaskNode.from_dict(raw["task"]),
+                    context_policy=ContextPolicy(**dict(raw.get("context_policy", {}))),
+                    budget=TaskBudget(**dict(raw.get("budget", {}))),
+                    workspace_policy=WorkspacePolicy(**dict(raw.get("workspace_policy", {}))),
+                    workspace=workspace,
+                    status="completed" if summary and summary.status == "completed" else "restored",
+                    created_at=float(raw.get("created_at", time.time())),
+                    started_at=float(raw.get("started_at", 0)),
+                    completed_at=float(raw.get("completed_at", 0)),
+                    transcript=list(raw.get("transcript", [])),
+                    summary=summary,
+                    error=str(raw.get("error") or ""),
+                )
+                self._records[record.agent_id] = record
+            except (KeyError, TypeError, ValueError, OSError, json.JSONDecodeError):
+                continue
+
     @staticmethod
     def _public_record(record: SubagentRecord) -> dict[str, Any]:
         return {
+            "root_run_id": record.root_run_id,
+            "child_run_id": record.child_run_id,
             "agent_id": record.agent_id,
             "parent_agent_id": record.parent_agent_id,
             "role": record.role,

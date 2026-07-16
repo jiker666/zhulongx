@@ -58,6 +58,15 @@ class ModelConfig:
     expert_model: str = ""
     reviewer_model: str = ""
     degradation_policy: str = "fail_visible"
+    thinking_enabled: bool = True
+    clear_thinking: bool = False
+    reasoning_effort: str = "max"
+    stream: bool = True
+    tool_stream: bool = True
+    connect_timeout_seconds: float = 10.0
+    read_timeout_seconds: float = 120.0
+    max_parallel_tools: int = 4
+    context_budget_tokens: int = 128_000
 
 
 @dataclass(frozen=True)
@@ -72,6 +81,30 @@ class RunRequest:
     network_policy: NetworkPolicy = field(default_factory=NetworkPolicy)
     budgets: BudgetLimits = field(default_factory=BudgetLimits)
     model_config: ModelConfig = field(default_factory=ModelConfig)
+    execution_mode: str = "auto"
+    orchestration_profile: str = "balanced"
+    autonomy_level: str = "high"
+    max_parallel_agents: int = 4
+    max_agent_depth: int = 1
+    root_run_id: str = ""
+    parent_run_id: str = ""
+    agent_role: str = ""
+    role_instructions: str = ""
+    human_approval_policy: str = "policy_only"
+
+    def __post_init__(self) -> None:
+        if self.execution_mode not in {"auto", "coordinator", "single"}:
+            raise ValueError(f"unknown execution mode: {self.execution_mode}")
+        if self.orchestration_profile not in {"conservative", "balanced", "aggressive"}:
+            raise ValueError(f"unknown orchestration profile: {self.orchestration_profile}")
+        if self.autonomy_level not in {"low", "medium", "high"}:
+            raise ValueError(f"unknown autonomy level: {self.autonomy_level}")
+        if not 1 <= self.max_parallel_agents <= 16:
+            raise ValueError("max_parallel_agents must be between 1 and 16")
+        if not 1 <= self.max_agent_depth <= 4:
+            raise ValueError("max_agent_depth must be between 1 and 4")
+        if self.human_approval_policy not in {"always", "risk_based", "policy_only"}:
+            raise ValueError(f"unknown human approval policy: {self.human_approval_policy}")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

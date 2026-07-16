@@ -52,6 +52,27 @@ def test_summary_computed(analyzer, tmp_path):
     assert result.summary["has_flag_candidate"]
 
 
+def test_analyze_binary_without_system_strings(analyzer, tmp_path, monkeypatch):
+    f = tmp_path / "sample.bin"
+    f.write_bytes(b"\x00prefix flag{python_fallback}\x00flag{python_fallback}\xff")
+    original_run_tool = analyzer._run_tool
+
+    def run_without_strings(cmd, **kwargs):
+        if cmd[0] == "strings":
+            return ""
+        return original_run_tool(cmd, **kwargs)
+
+    monkeypatch.setattr(analyzer, "_run_tool", run_without_strings)
+
+    result = analyzer.analyze(str(f))
+    analysis = result.files[0]
+    assert analysis.flags_found == ["flag{python_fallback}"]
+    assert analysis.strings.count("prefix flag{python_fallback}") == 1
+    assert analysis.suspicious_strings.count(
+        "[flag_pattern] flag{python_fallback}"
+    ) == 1
+
+
 def test_recommendation_generated(analyzer, tmp_path):
     f = tmp_path / "a.png"
     f.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)

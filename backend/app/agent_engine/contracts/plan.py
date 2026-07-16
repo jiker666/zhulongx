@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any, Mapping
 
 from app.agent_engine.contracts.task import TaskNode
@@ -19,6 +19,9 @@ class Plan:
     critical_path: tuple[str, ...] = ()
     rationale: str = ""
     revision_reason: str = ""
+    hypotheses: tuple[Mapping[str, Any], ...] = ()
+    completion_contract: Mapping[str, Any] = field(default_factory=dict)
+    risk_register: tuple[Mapping[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
         if not self.plan_id or self.version < 1 or not self.goal:
@@ -37,6 +40,7 @@ class Plan:
     def from_dict(cls, raw: Mapping[str, Any]) -> "Plan":
         value = dict(raw)
         value["nodes"] = tuple(TaskNode.from_dict(item) for item in value.get("nodes", ()))
-        for key in ("alternatives", "risks", "assumptions", "unknowns", "critical_path"):
+        for key in ("alternatives", "risks", "assumptions", "unknowns", "critical_path", "hypotheses", "risk_register"):
             value[key] = tuple(value.get(key, ()))
+        value["completion_contract"] = dict(value.get("completion_contract", {}))
         return cls(**value)
