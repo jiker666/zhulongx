@@ -1,6 +1,6 @@
 # Agent Engine v3 GLM-5.2 Verification Report
 
-Verification date: 2026-07-15
+Verification date: 2026-07-16
 
 ## Implementation status
 
@@ -15,7 +15,8 @@ Phase commits:
 5. `9ea0abc feat: execute dynamic plan dag with evidence driven replanning`
 6. `90b57ea feat: add token aware context and capability scoped tools`
 7. `5fc0beb feat: expose live multi agent operations across security workflows`
-8. `chore: harden glm52 agent harness for release` (the commit containing this report)
+8. `efbc647 chore: harden glm52 agent harness for release`
+9. `fix: make file analysis portable across release hosts` (the commit containing this update)
 
 ## Formal runtime
 
@@ -58,31 +59,38 @@ Static formal-runtime import scan returned no old orchestrator, old runtime, or 
 
 | Check | Result |
 | --- | --- |
-| `python -m compileall -q backend/app worker/app` | passed |
+| macOS `python -m compileall -q backend/app worker/app` | passed |
 | first full backend run after Phase 6 | 484 passed, 1 failed; abort terminal ordering race reproduced |
 | focused event/abort/deadline regression | 6 passed |
 | repeated abort/deadline race regression | 10 passed across five repetitions |
-| final Agent Engine suite | 115 passed, 0 failed, 0 skipped |
-| final full backend suite | 485 passed, 0 failed, 0 skipped, 471 warnings in 145.92s |
+| final macOS full backend suite | 486 passed, 0 failed, 0 skipped, 474 warnings in 154.75s |
+| Ubuntu 24.04 compileall | passed on Python 3.12.3 |
+| Ubuntu 24.04 full backend suite | 481 passed, 0 failed, 5 skipped, 475 warnings in 138.69s |
+| Ubuntu 24.04 Agent Engine suite | 115 passed, 0 failed, 0 skipped in 18.33s |
+| Ubuntu 24.04 release container group | 5 passed, 0 failed, 0 skipped in 4.76s; JUnit totals asserted |
 
 The initial failure was not suppressed. `tool.failed` could arrive after `run.cancelled` from a terminating tool thread. `AppendOnlyEventStore` now treats the first terminal event as the append boundary for that run; late events return the existing terminal event and are not persisted. Process-tree cleanup already passed in the failing run and continues to pass after the ordering fix.
 
-Warnings are existing SQLAlchemy/application uses of deprecated naive UTC helpers. They do not change pass/fail counts but remain migration work.
+The final portability regression adds a bounded Python byte/string scanner to `CtfFileAnalyzer`. It merges and de-duplicates external and Python results, and scans the fallback text directly when a minimal release host has no `strings` binary. The focused analyzer suite is 6/6, including the explicit missing-`strings` binary fixture.
+
+Warnings are Pydantic protected-namespace notices and existing SQLAlchemy/application uses of deprecated naive UTC helpers. They do not change pass/fail counts but remain migration work.
 
 ### Container and Linux
 
-The local Docker server reports Linux 5.8.2. After explicitly preloading `python:3.11-slim`, the release container group ran as real containers:
+The cross-platform run used a clean Ubuntu 24.04.4 environment with managed Python 3.12.3. Pytest capture retained container-native `/tmp`; `--basetemp` used a host-shared absolute path so sibling sandbox containers could mount their workspaces. The Ubuntu environment connected to the external Linux Podman 5.8.2 Docker-compatible server with `python:3.11-slim` preloaded.
+
+The full Ubuntu suite completed with five documented skips, all from `tests/test_worker_e2e.py`: the separately deployed `worker-base` HTTP service was not reachable on `localhost:8090` inside the validation container. No Agent Engine or container sandbox test skipped. The explicit release container group ran as real sibling containers:
 
 ```text
 backend/tests/test_agent_engine_container_sandbox.py
-5 passed, 0 failed, 0 skipped in 3.38s
+5 passed, 0 failed, 0 skipped in 4.76s
 ```
 
-Coverage includes workspace/secret isolation, read-only inputs, network denial, timeout cleanup and abort cleanup. `scripts/release_agent_engine.sh` is the Ubuntu release job: it preloads the image, runs compileall/full backend/Agent Engine/container tests, parses JUnit, asserts exactly five container tests with zero skips, performs the clean frontend sequence, scans the repository, packages the release and scans the ZIP. Its individual commands and JUnit assertion were executed locally. Remote Ubuntu job status: `NOT RUN`.
+Coverage includes workspace/secret isolation, read-only inputs, network denial, timeout cleanup and abort cleanup. `scripts/release_agent_engine.sh` is the Ubuntu release job: it preloads the image, runs compileall/full backend/Agent Engine/container tests, parses JUnit, asserts exactly five container tests with zero skips, performs the clean frontend sequence, scans the repository, packages the release and scans the ZIP. The Linux commands and JUnit assertion were executed in the Ubuntu environment. A hosted Ubuntu CI runner was not used.
 
 ### Frontend
 
-Clean sequence:
+Clean Linux sequence used Node 20.20.2 and npm 10.8.2:
 
 ```text
 rm -rf frontend/node_modules frontend/dist
@@ -94,12 +102,13 @@ npm run build
 
 Results:
 
-- clean install: 242 packages, 0 npm vulnerabilities
+- clean install: 242 packages
 - lint: passed (`tsc --noEmit`)
 - test: command passed; no frontend test script is defined
 - production build: passed, 1,803 modules transformed
-- largest shared chunk: 195.88 kB (63.17 kB gzip)
-- CTF detail route chunk: 51.65 kB (13.96 kB gzip)
+- largest shared chunk: 195.83 kB (63.30 kB gzip)
+- CTF detail route chunk: 51.65 kB (14.05 kB gzip)
+- dependency audit: patched `react-router-dom`, `react-router`, `form-data` and transitive dependencies; 2 development-tool findings remain in Vite 5/esbuild and require a Vite 8 major upgrade
 
 Responsive Playwright/Chrome QA used the populated canonical run fixture at 390x844, 768x1024, 1280x720 and 1440x900. For all three tabs at every viewport: page overflow was 0 px, interactive text overflow was 0, interactive overlap findings were 0, console errors were 0 and failed requests were 0. The large DAG scrolls only inside its dedicated container. Public DOM text contained no raw reasoning field. Screenshots are under `docs/refactor_glm52/qa/responsive/`.
 
@@ -151,7 +160,7 @@ Status: `NOT RUN`. No GLM, generic LLM, or gateway key was configured in the ver
 - archive: `dist/cyberpilot-finalops-v4-submission.zip`
 - checksum file: `dist/SHA256SUMS`
 - archive scan: passed (`scripts/check_release_archive.py`, 752 packaged files)
-- local archive SHA256: `04f306db08b0bfe3a6334516f483af60846848f8e6456e721c7ba6a979dd204c`
+- local archive SHA256: `0d454d2f5fb26df8ea8562087d4e7939adf4796345e7d0b9b38db51d4378bf42`
 
 The packager excludes credentials, `.env`, databases, uploads, reports, workspaces, checkpoints, private provider transcripts, node modules, caches, hidden evaluators, benchmark results, evaluator source and every `expected_flag`/`expected_answer` file. `scripts/check_release_archive.py` independently checks ZIP integrity, paths, required documents, secret patterns and `SHA256SUMS`.
 
@@ -170,8 +179,9 @@ The finalized ZIP embeds the pre-hash revision of this report. The repository co
 ## Remaining risks
 
 1. Live GLM-5.2 quality, latency, token usage, cost and real gateway capability downgrade behavior remain unmeasured without a model key.
-2. The executable Ubuntu release job is included, but no remote Ubuntu runner executed it in this verification environment.
-3. Frontend has deterministic type lint/build and responsive browser QA but no component or end-to-end test suite in `package.json`.
-4. The backend passes with 471 UTC deprecation warnings that should be migrated before Python removes the affected APIs.
-5. The offline 25-case set is deterministic and intentionally bounded; it does not measure difficult open-ended model generalization.
-6. The local Docker result uses a Linux container server from macOS; a clean Ubuntu host remains the authoritative cross-platform run.
+2. The clean Ubuntu 24.04 container run passed, but no hosted CI or dedicated bare-metal Ubuntu runner executed the release job.
+3. Five optional worker HTTP E2E tests skip when the separately deployed `worker-base` service is absent; Agent Engine and release container tests have zero skips.
+4. Frontend has deterministic type lint/build and responsive browser QA but no component or end-to-end test suite in `package.json`.
+5. The frontend lockfile retains two Vite 5/esbuild development-server audit findings; removing them requires a tested Vite 8 major upgrade.
+6. The backend passes with 474 macOS and 475 Ubuntu warnings, mainly UTC deprecations that should be migrated before Python removes the affected APIs.
+7. The offline 25-case set is deterministic and intentionally bounded; it does not measure difficult open-ended model generalization.

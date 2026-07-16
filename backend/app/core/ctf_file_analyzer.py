@@ -41,6 +41,7 @@ SAFE_ARCHIVE_EXTS = (".zip", ".tar", ".tar.gz", ".tgz", ".gz", ".tar.bz2", ".bz2
 MAX_FILE_SIZE = 30 * 1024 * 1024  # 单文件 30MB
 MAX_EXTRACTED_FILES = 200
 MAX_EXTRACTED_TOTAL_SIZE = 200 * 1024 * 1024  # 200MB
+MAX_FALLBACK_SCAN_BYTES = 1024 * 1024  # 系统 strings 缺失时最多扫描 1MB
 
 
 @dataclass
@@ -276,18 +277,26 @@ class CtfFileAnalyzer:
         analysis.type = self._run_tool(["file", "-b", file_path])[:200]
         analysis.mime = self._run_tool(["file", "--mime-type", "-b", file_path])[:100]
 
-        # strings（截断）
+        # strings（截断）；Python 回退保证最小 Linux 镜像中也能分析附件。
         raw_strings = self._run_tool(["strings", "-n", "6", file_path], max_out=8000)
-        analysis.strings = self._extract_strings(raw_strings, max_count=200)
+        fallback_text, fallback_strings = self._extract_file_strings(file_path)
+        analysis.strings = self._dedupe(
+            [*self._extract_strings(raw_strings, max_count=200), *fallback_strings],
+            max_count=200,
+        )
 
         # 可疑字符串 + flag
-        for s in analysis.strings:
+        scan_sources = [*analysis.strings]
+        if fallback_text:
+            scan_sources.append(fallback_text)
+        for s in scan_sources:
             for rx, label in SUSPICIOUS_PATTERNS:
-                m = rx.search(s)
-                if m:
+                for m in rx.finditer(s):
                     analysis.suspicious_strings.append(f"[{label}] {m.group(0)[:120]}")
                     if "flag" in label or "ctf" in label:
                         analysis.flags_found.append(m.group(0))
+        analysis.suspicious_strings = self._dedupe(analysis.suspicious_strings)
+        analysis.flags_found = self._dedupe(analysis.flags_found)
 
         # 如果有 flag_format，按格式过滤候选
         if flag_format and analysis.flags_found:
@@ -366,7 +375,32 @@ class CtfFileAnalyzer:
         if not raw:
             return []
         lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
-        return lines[:max_count]
+        return self._dedupe(lines, max_count=max_count)
+
+    def _extract_file_strings(
+        self,
+        file_path: str,
+        *,
+        max_bytes: int = MAX_FALLBACK_SCAN_BYTES,
+        min_length: int = 6,
+        max_count: int = 200,
+    ) -> tuple[str, List[str]]:
+        """Return bounded raw text and printable strings without external tools."""
+        try:
+            with open(file_path, "rb") as fh:
+                data = fh.read(max_bytes)
+        except OSError:
+            return "", []
+
+        raw_text = data.decode("utf-8", errors="replace")
+        printable = re.compile(rb"[\x20-\x7e]{%d,}" % min_length)
+        strings = [match.group(0).decode("ascii") for match in printable.finditer(data)]
+        return raw_text, self._dedupe(strings, max_count=max_count)
+
+    @staticmethod
+    def _dedupe(values: List[str], *, max_count: Optional[int] = None) -> List[str]:
+        unique = list(dict.fromkeys(values))
+        return unique if max_count is None else unique[:max_count]
 
     def _parse_kv(self, text: str) -> Dict[str, str]:
         out: Dict[str, str] = {}
