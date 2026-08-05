@@ -41,6 +41,7 @@ flowchart LR
 | `audit.ts` | 顺序化写入和 SHA-256 前向哈希校验 | 不替代外部不可篡改存储 |
 | `trace.ts` / `dashboard.ts` | 将审计记录投影为外显决策时间线，接受人工纠错 | 不展示或推断隐藏思维链 |
 | `experience.ts` | 脱敏、平台验真后晋升、按类别检索和人工启停通用经验 | 不保存题号、flag、固定地址或未经验证的答案 |
+| `skill-catalog.ts` | 将固定版本的开源 CTF skill 归一化为类别、技术族和 pivot 信号 | 不执行上游脚本、不继承外部工具权限、不把上游内容当证据 |
 | `server.ts` | 健康检查、异步运行、鉴权、审计台与复核 API | 不允许远程扩大配置范围 |
 
 ## 自主性机制
@@ -52,6 +53,7 @@ flowchart LR
 5. 轮次、工具、HTTP、TCP、时间、scratch 文件和输出量均有独立上限；任何一个上限都不能由模型提高。
 6. CTF 任务先做通用 triage，再根据证据在 web、pwn、crypto、reverse、forensics、malware、OSINT、misc、AI/ML 之间 pivot。
 7. Arena 完成前必须调用 `record_lesson` 记录通用经验候选；只有平台接受提交后才写入经验库，后续运行仍必须重新验证。
+8. 任务类别命中时只加载一个经过审查且长度受限的 skill 索引。它与 playbook 一样只是决策提示，任何行动仍需经过工具注册表和 `PolicyEngine`。
 
 ## 隔离与可观测性
 
@@ -82,6 +84,8 @@ flowchart LR
 - Forensics/Misc/OSINT：binwalk、foremost、exiftool、tshark、sleuthkit、ffmpeg、zbar/qrencode、hashcat/john、dnsutils、whois、nmap、Pillow/numpy/matplotlib。
 
 Heavy profile 可选安装 angr、qiling、frida-tools、torch、transformers。SageMath、Ghidra、RsaCtfTool 和 GPU hashcat 调优仍作为人工确认的重型扩展。
+
+开源 skill 来源、固定版本与内容筛选规则见 [`skills/README.md`](../skills/README.md)。外部 skill 的网络、shell 或安装权限不会进入运行时。
 
 ## 扩展协议
 

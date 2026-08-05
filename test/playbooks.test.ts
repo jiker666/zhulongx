@@ -6,6 +6,8 @@ describe("category capability playbooks", () => {
     const crypto = renderCapabilityPlaybook("Crypto");
     expect(crypto).toContain("Re-encrypt");
     expect(crypto).toContain("infer any wrapper only from direct evidence");
+    expect(crypto).toContain("CURATED CTF SKILL INDEX (ctf-crypto)");
+    expect(crypto).toContain("PolicyEngine scope/budgets");
     expect(crypto).not.toMatch(/NSSCTF\{|0x[0-9a-f]+/i);
 
     expect(renderCapabilityPlaybook("Pwn")).toContain("never use guessed offsets");

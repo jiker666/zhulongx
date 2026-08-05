@@ -8,6 +8,7 @@
 
 - 归一化文本、JSON/YAML/HAR/CSV、目录、ZIP 和二进制附件，所有预览均有上限。
 - 强制执行 `任务理解 -> 计划 -> 行动/观察 -> checkpoint -> 证据 -> 完成/阻塞` 状态机。
+- 按题型加载 9 类经过归一化审查的开源 CTF skill 索引；skill 只提供策略候选，不继承外部工具权限。
 - 工具失败或策略拒绝后，必须分类失败、修订计划并说明新的行动依据。
 - 只读输入、逐运行 scratch、结构化沙箱命令，以及受策略约束的 HTTP/TCP 工具。
 - 主机、程序、路径、轮次、工具调用、请求、输出、重复动作和总时长预算。
@@ -143,6 +144,7 @@ docker compose up --build
 ## 项目结构
 
 - `src/runtime.ts`：Agent 生命周期、状态与持久化。
+- `src/skill-catalog.ts`、`skills/`：开源 CTF skill 的固定来源、类别索引与接入边界。
 - `src/policy.ts`：作用域、预算和停滞门禁。
 - `src/tools.ts`：模型可调用的有界工具。
 - `src/sandbox.ts`：sidecar 协议与结构化命令执行。
@@ -151,7 +153,7 @@ docker compose up --build
 - `src/arena*.ts`：Arena 客户端与评测闭环。
 - `test/`：确定性 faux-model、策略、沙箱和 API 测试。
 
-架构、评测方法与路线图分别见 [docs/architecture.md](docs/architecture.md)、[docs/evaluation.md](docs/evaluation.md) 和 [docs/roadmap.md](docs/roadmap.md)。本项目当前仍缺少浏览器插件、DNS 解析锁定、出口代理和租户级 microVM 隔离，不应把当前版本视为无人值守生产安全扫描器。
+架构、CTF skills、评测方法与路线图分别见 [docs/architecture.md](docs/architecture.md)、[skills/README.md](skills/README.md)、[docs/evaluation.md](docs/evaluation.md) 和 [docs/roadmap.md](docs/roadmap.md)。本项目当前仍缺少浏览器插件、DNS 解析锁定、出口代理和租户级 microVM 隔离，不应把当前版本视为无人值守生产安全扫描器。
 
 ## 贡献与许可证
 

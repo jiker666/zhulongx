@@ -1,4 +1,6 @@
-const PLAYBOOKS: Record<string, string[]> = {
+import { renderCuratedCtfSkill, resolveCtfSkillCategory, type CtfSkillCategory } from "./skill-catalog.js";
+
+const PLAYBOOKS: Record<CtfSkillCategory, string[]> = {
   web: [
     "Map the smallest observable attack surface first: routes, methods, parameters, cookies, redirects, source disclosures, and response differences.",
     "Separate authentication, authorization, parsing, file/path, template, request-forgery, deserialization, and business-logic hypotheses; test one variable at a time.",
@@ -53,27 +55,15 @@ const PLAYBOOKS: Record<string, string[]> = {
   ],
 };
 
-const ALIASES: Array<[RegExp, keyof typeof PLAYBOOKS]> = [
-  [/web|api/i, "web"],
-  [/pwn|binary exploitation/i, "pwn"],
-  [/crypto|cryptography/i, "crypto"],
-  [/reverse|reversing/i, "reverse"],
-  [/forensic|取证/i, "forensics"],
-  [/malware|恶意/i, "malware"],
-  [/osint/i, "osint"],
-  [/ai|ml|machine learning/i, "ai/ml"],
-  [/misc|综合/i, "misc"],
-];
-
 export function renderCapabilityPlaybook(category: string | undefined): string {
-  if (!category) return "";
-  const key = ALIASES.find(([pattern]) => pattern.test(category))?.[1];
+  const key = resolveCtfSkillCategory(category);
   if (!key) return "";
   const steps = PLAYBOOKS[key];
-  if (!steps) return "";
   return [
     `CATEGORY PLAYBOOK (${key})`,
     "Use this as a general decision scaffold, never as challenge-specific evidence:",
     ...steps.map((step, index) => `${index + 1}. ${step}`),
+    "",
+    renderCuratedCtfSkill(key),
   ].join("\n");
 }
