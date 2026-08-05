@@ -1,0 +1,62 @@
+{
+  "profiles": {
+    "core": {
+      "description": "Practical CTF sandbox profile for triage, scripting, crypto math, pwn payload generation, reverse triage, forensics, web requests, DNS, images, audio, and malware static analysis.",
+      "apt": [
+        "apktool",
+        "binutils",
+        "binwalk",
+        "bzip2",
+        "checksec",
+        "curl",
+        "default-jre",
+        "dnsutils",
+        "ffmpeg",
+        "file",
+        "foremost",
+        "gdb",
+        "git",
+        "gzip",
+        "hashcat",
+        "imagemagick",
+        "john",
+        "jq",
+        "libimage-exiftool-perl",
+        "nmap",
+        "p7zip-full",
+        "python3",
+        "python3-pip",
+        "python3-venv",
+        "qemu-user",
+        "qrencode",
+        "ripgrep",
+        "ruby",
+        "sleuthkit",
+        "sqlite3",
+        "strace",
+        "testdisk",
+        "tshark",
+        "unzip",
+        "whois",
+        "xxd",
+        "xz-utils",
+        "zbar-tools",
+        "zstd"
+      ],
+      "pip": "tools/ctf/requirements-core.txt",
+      "rubyGems": ["one_gadget", "seccomp-tools", "zsteg"],
+      "architectureOptional": ["ltrace"],
+      "categories": ["web", "pwn", "crypto", "reverse", "forensics", "malware", "misc", "osint", "ai-ml-light"]
+    },
+    "heavy": {
+      "description": "Optional heavier profile for symbolic binary analysis, emulation frameworks, Frida workflows, and local ML model attacks.",
+      "pip": "tools/ctf/requirements-heavy.txt",
+      "manual": ["SageMath", "Ghidra", "RsaCtfTool", "full GPU hashcat/runtime tuning"]
+    }
+  },
+  "sandboxContract": {
+    "network": "The Docker sidecar is configured with network_mode: none. Remote services must be reached through scoped HTTP/TCP tools in the API process.",
+    "filesystem": "Challenge input is mounted read-only; every run receives a dedicated scratchRoot/runs/<run-id> namespace with isolated cwd, HOME, and TMPDIR.",
+    "execution": "Commands are structured as program + args + optional stdin. Shell parsing is not used. Run namespaces prevent normal tool-protocol access to another run's scratch files; deployment-level containers or microVMs are required for mutually untrusted tenant kernel isolation."
+  }
+}

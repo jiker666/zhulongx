@@ -1,0 +1,5 @@
+angr==9.2.185
+qiling==1.4.6
+frida-tools==14.5.0
+torch==2.9.0
+transformers==4.57.1

@@ -1,0 +1,50 @@
+name: zhulong-xuanshu
+
+services:
+  xuanshu:
+    build: .
+    depends_on:
+      ctf-sandbox:
+        condition: service_started
+    ports:
+      - "7318:7318"
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?set OPENAI_API_KEY}
+      XUANSHU_SERVER_TOKEN: ${XUANSHU_SERVER_TOKEN:?set XUANSHU_SERVER_TOKEN}
+      NSSCTF_AGENT_TOKEN: ${NSSCTF_AGENT_TOKEN:-}
+    volumes:
+      - ./workspace:/workspace/input:ro
+      - xuanshu-work:/workspace/work
+      - xuanshu-sockets:/run/xuanshu
+      - xuanshu-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:7318/health').then(r=>{if(!r.ok)process.exit(1)})"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  ctf-sandbox:
+    build:
+      context: .
+      dockerfile: Dockerfile.ctf-sandbox
+      args:
+        INSTALL_HEAVY: ${XUANSHU_INSTALL_HEAVY_CTF_TOOLS:-false}
+    environment:
+      XUANSHU_SANDBOX_NETWORK: none
+    volumes:
+      - ./workspace:/workspace/input:ro
+      - xuanshu-work:/workspace/work
+      - xuanshu-sockets:/run/xuanshu
+    network_mode: none
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "dist/cli.js", "sandbox-health", "--config", "config/container.yaml"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  xuanshu-data:
+  xuanshu-work:
+  xuanshu-sockets:

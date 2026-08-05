@@ -1,0 +1,95 @@
+model:
+  provider: openai
+  id: gpt-5
+  name: GPT-5
+  api: openai-responses
+  baseUrl: https://api.openai.com/v1
+  apiKeyEnv: OPENAI_API_KEY
+  reasoning: true
+  contextWindow: 400000
+  maxTokens: 8192
+
+runtime:
+  thinkingLevel: medium
+  artifactRoot: .xuan-shu/runs
+  scratchRoot: .xuan-shu/work
+  maxTurns: 30
+  maxToolCalls: 80
+  maxRuntimeMs: 900000
+  maxActionsWithoutCheckpoint: 4
+  maxRepeatedAction: 2
+  maxOutputBytes: 65536
+  maxScratchFileBytes: 1048576
+  commandTimeoutMs: 30000
+  httpTimeoutMs: 15000
+  maxHttpRequests: 40
+  maxTcpSessions: 8
+  maxTcpBytes: 1048576
+  sandbox:
+    socketPath: tcp://127.0.0.1:7320
+    connectTimeoutMs: 2000
+
+scope:
+  mode: observe
+  workspaceRoot: ./workspace
+  allowedHosts: []
+  allowedPrograms:
+    - 7z
+    - apktool
+    - base64
+    - binwalk
+    - bzip2
+    - checksec
+    - exiftool
+    - ffmpeg
+    - file
+    - find
+    - fls
+    - flask-unsign
+    - foremost
+    - gdb
+    - gzip
+    - hashcat
+    - icat
+    - java
+    - john
+    - jq
+    - mmls
+    - nm
+    - objdump
+    - one_gadget
+    - python3
+    - qemu-aarch64
+    - qemu-arm
+    - qemu-i386
+    - qemu-x86_64
+    - qrencode
+    - readelf
+    - rg
+    - ropper
+    - ROPgadget
+    - seccomp-tools
+    - sqlite3
+    - strings
+    - strace
+    - tar
+    - testdisk
+    - tshark
+    - unzip
+    - xxd
+    - xz
+    - zbarimg
+    - zsteg
+    - zstd
+
+server:
+  host: 127.0.0.1
+  port: 7318
+  tokenEnv: XUANSHU_SERVER_TOKEN
+
+arena:
+  enabled: true
+  baseUrl: https://www.nssctf.cn
+  tokenEnv: NSSCTF_AGENT_TOKEN
+  timeoutMs: 15000
+  maxResponseBytes: 262144

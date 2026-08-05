@@ -1,0 +1,7 @@
+.git
+.xuan-shu
+node_modules
+test
+workspace
+*.log
+.env

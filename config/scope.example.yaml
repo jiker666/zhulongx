@@ -1,0 +1,16 @@
+# Example operator-owned scope. Merge these values into a dedicated full config.
+# Per-run --scope files may only narrow, never expand, the full config.
+mode: controlled
+workspaceRoot: ./workspace/input
+allowedHosts:
+  - 127.0.0.1:3000
+  - pwn.example.invalid:31337
+  - lab.example.invalid
+  - "*.sandbox.invalid:*"
+allowedPrograms:
+  - file
+  - jq
+  - python3
+  - rg
+  - strings
+  - xxd

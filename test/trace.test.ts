@@ -1,0 +1,80 @@
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { afterEach, describe, expect, it } from "vitest";
+import { AuditChain } from "../src/audit.js";
+import { appendRunReview, listPersistedRuns, loadDecisionTrace } from "../src/trace.js";
+import type { RunState } from "../src/types.js";
+
+const roots: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
+
+describe("decision trace", () => {
+  it("builds a hash-verified external trace and attaches human correction", async () => {
+    const root = await mkdtemp(join(tmpdir(), "xuan-trace-"));
+    roots.push(root);
+    const runId = "22222222-2222-4222-8222-222222222222";
+    const runRoot = join(root, runId);
+    await mkdir(runRoot, { recursive: true });
+    const audit = new AuditChain(join(runRoot, "audit.jsonl"), runId);
+    await audit.append("plan.submitted", { goal: "Inspect evidence", steps: [] });
+    const action = await audit.append("policy.decision", { toolName: "file", allowed: true, reason: "Allowed" });
+    await audit.append("tool.result", { toolName: "file", isError: false, content: "ELF" });
+    await audit.append("decision.checkpoint", { assessment: "Native binary confirmed", nextAction: "Disassemble" });
+    await audit.append("hypothesis.updated", {
+      updates: [{ hypothesis: "The artifact is native", status: "confirmed", evidence: ["ELF magic"] }],
+      ledger: [],
+    });
+    await audit.append("strategy.revised", {
+      revision: { classification: "tool", nextAction: "Use objdump", rationale: "Decompiler unavailable" },
+    });
+    await audit.flush();
+    const now = new Date().toISOString();
+    const state = {
+      id: runId,
+      status: "completed",
+      phase: "done",
+      task: { task: "Inspect", attachments: [], metadata: { category: "Pwn" } },
+      createdAt: now,
+      updatedAt: now,
+      finishedAt: now,
+      findings: [],
+      lessons: [],
+      hypotheses: [],
+      strategyRevisions: [],
+      strategyRevisionRequired: false,
+      sandboxNamespace: runId,
+      scratchRoot: join(root, "scratch", runId),
+      appliedExperienceIds: [],
+      turns: 2,
+      toolCalls: 2,
+      httpRequests: 0,
+      tcpSessions: 0,
+      actionsSinceCheckpoint: 0,
+      repeatedActions: {},
+    } satisfies RunState;
+    await writeFile(join(runRoot, "state.json"), JSON.stringify(state), "utf8");
+
+    const review = await appendRunReview(root, runId, {
+      sequence: action.sequence,
+      verdict: "incorrect",
+      note: "The action was allowed but not useful.",
+      correction: "Prefer a protection check first.",
+    });
+    const trace = await loadDecisionTrace(root, runId);
+    expect(trace.integrity.valid).toBe(true);
+    expect(trace.timeline.map((event) => event.kind)).toEqual([
+      "plan",
+      "action",
+      "observation",
+      "checkpoint",
+      "hypothesis",
+      "revision",
+    ]);
+    expect(trace.reviews).toContainEqual(review);
+    expect((await listPersistedRuns(root))[0]).toMatchObject({ id: runId, category: "Pwn" });
+  });
+});

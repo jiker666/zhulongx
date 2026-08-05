@@ -1,0 +1,8 @@
+ARG BASE_IMAGE=zhulong-xuanshu-ctf-sandbox:dev
+FROM ${BASE_IMAGE}
+
+USER root
+WORKDIR /app
+COPY dist ./dist
+COPY config ./config
+USER sandbox
