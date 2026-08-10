@@ -3,8 +3,8 @@ set -euo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
 
-apt-get update
-apt-get install -y --no-install-recommends \
+apt-get -o Acquire::Retries=5 update
+apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
   apktool \
   binutils \
   binwalk \
@@ -15,12 +15,15 @@ apt-get install -y --no-install-recommends \
   curl \
   default-jre \
   dnsutils \
+  dirsearch \
   ffmpeg \
+  ffuf \
   file \
   foremost \
   gdb \
   git \
   gzip \
+  gobuster \
   hashcat \
   imagemagick \
   john \

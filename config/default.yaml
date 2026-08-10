@@ -41,14 +41,17 @@ scope:
     - bzip2
     - checksec
     - exiftool
+    - dirsearch
     - ffmpeg
     - file
+    - ffuf
     - find
     - fls
     - flask-unsign
     - foremost
     - gdb
     - gzip
+    - gobuster
     - hashcat
     - icat
     - java

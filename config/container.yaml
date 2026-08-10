@@ -10,7 +10,7 @@ model:
   maxTokens: 8192
 
 runtime:
-  thinkingLevel: medium
+  thinkingLevel: off
   artifactRoot: /data/runs
   scratchRoot: /workspace/work
   maxTurns: 30
@@ -42,15 +42,18 @@ scope:
     - checksec
     - curl
     - dig
+    - dirsearch
     - exiftool
     - ffmpeg
     - file
+    - ffuf
     - find
     - fls
     - flask-unsign
     - foremost
     - gdb
     - gzip
+    - gobuster
     - hashcat
     - icat
     - java

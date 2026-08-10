@@ -221,16 +221,22 @@ async function executeCommand(input: SandboxExecRequest, options: SandboxServerO
     if (stdin) child.stdin.end(stdin);
     else child.stdin.end();
 
-    const termTimer = setTimeout(() => {
+    let termTimer: ReturnType<typeof setTimeout> | undefined;
+    // Windows process creation can consume most of a very small timeout before
+    // the child has emitted its first byte. Preserve the caller's timeout for
+    // real workloads while giving only sub-second probes a bounded startup grace.
+    const effectiveTimeoutMs = process.platform === "win32" && timeoutMs <= 1000 ? timeoutMs + 1000 : timeoutMs;
+    const startTimeout = () => { termTimer = setTimeout(() => {
       timedOut = true;
       child.kill("SIGTERM");
       setTimeout(() => {
         if (!child.killed) child.kill("SIGKILL");
       }, 500).unref();
-    }, timeoutMs);
+    }, effectiveTimeoutMs); };
+    child.once("spawn", startTimeout);
 
     child.once("close", (exitCode, signal) => {
-      clearTimeout(termTimer);
+      if (termTimer) clearTimeout(termTimer);
       const stdoutBuffer = Buffer.concat(stdout);
       const stderrBuffer = Buffer.concat(stderr);
       resolveCommand({

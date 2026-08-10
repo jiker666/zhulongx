@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { verifyAuditChain } from "./audit.js";
 import { sanitizeSecrets } from "./sanitize.js";
 import type { AuditRecord, RunReview, RunState } from "./types.js";
+import { createInitialWebReasoningState, normalizeWebReasoningState } from "./web-reasoning/state.js";
 
 const SAFE_RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -26,6 +27,14 @@ export interface DecisionTraceEvent {
   summary: string;
   data: unknown;
   status?: "allowed" | "denied" | "success" | "error";
+  sourceEventType?: string;
+}
+
+export interface RawTraceEvent {
+  sequence: number;
+  timestamp: string;
+  type: string;
+  data: unknown;
 }
 
 function assertRunId(id: string): void {
@@ -41,6 +50,10 @@ function truncate(value: unknown, depth = 0): unknown {
     return Object.fromEntries(Object.entries(sanitized).slice(0, 80).map(([key, item]) => [key, truncate(item, depth + 1)]));
   }
   return sanitized;
+}
+
+export function truncateTraceData(value: unknown): unknown {
+  return truncate(value);
 }
 
 function summaryOf(value: unknown, fallback: string): string {
@@ -121,7 +134,7 @@ function traceEvent(record: AuditRecord): DecisionTraceEvent | undefined {
     return { sequence: record.sequence, timestamp: record.timestamp, kind: "finding", title: "证据发现", summary: summaryOf(raw, "记录了证据发现"), data };
   }
   if (record.type === "lesson.captured") {
-    return { sequence: record.sequence, timestamp: record.timestamp, kind: "lesson", title: "候选经验", summary: summaryOf(raw, "记录了待验真的通用经验"), data };
+    return { sequence: record.sequence, timestamp: record.timestamp, kind: "lesson", title: "候选经验", summary: summaryOf(raw, "记录了待验证的通用经验"), data };
   }
   if (record.type === "run.finished_by_agent" || record.type === "run.settled" || record.type === "run.error") {
     return { sequence: record.sequence, timestamp: record.timestamp, kind: "outcome", title: "运行结果", summary: summaryOf(raw, record.type), data, status: record.type === "run.error" ? "error" : "success" };
@@ -175,6 +188,7 @@ export async function loadDecisionTrace(artifactRoot: string, runId: string): Pr
   state: RunState;
   integrity: Awaited<ReturnType<typeof verifyAuditChain>>;
   timeline: DecisionTraceEvent[];
+  rawEvents: RawTraceEvent[];
   reviews: RunReview[];
 }> {
   assertRunId(runId);
@@ -195,8 +209,23 @@ export async function loadDecisionTrace(artifactRoot: string, runId: string): Pr
     sandboxNamespace: loadedState.sandboxNamespace ?? loadedState.id,
     scratchRoot: loadedState.scratchRoot ?? "legacy shared scratch",
     appliedExperienceIds: loadedState.appliedExperienceIds ?? [],
+    ...(loadedState.evidence ? { evidence: loadedState.evidence } : {}),
+    ...(loadedState.webReasoning ? { webReasoning: loadedState.webReasoning } : {}),
   };
-  return { state, integrity, timeline: records.map(traceEvent).filter((item): item is DecisionTraceEvent => Boolean(item)), reviews };
+  if (state.webReasoning) {
+    const fallback = createInitialWebReasoningState(state.webReasoning.taskClassification, state.webReasoning.budget.remainingRounds);
+    state.webReasoning = normalizeWebReasoningState(state.webReasoning, fallback);
+  }
+  return {
+    state,
+    integrity,
+    timeline: records.map((record) => {
+      const event = traceEvent(record);
+      return event ? { ...event, sourceEventType: record.type } : undefined;
+    }).filter((item): item is DecisionTraceEvent & { sourceEventType: string } => Boolean(item)),
+    rawEvents: records.map((record) => ({ sequence: record.sequence, timestamp: record.timestamp, type: record.type, data: truncate(record.data) })),
+    reviews,
+  };
 }
 
 export async function listPersistedRuns(artifactRoot: string): Promise<Array<{
@@ -235,4 +264,13 @@ export async function listPersistedRuns(artifactRoot: string): Promise<Array<{
     }
   }
   return summaries.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+}
+
+export async function loadPersistedRun(artifactRoot: string, runId: string): Promise<RunState | undefined> {
+  assertRunId(runId);
+  try {
+    return JSON.parse(await readFile(join(artifactRoot, runId, "state.json"), "utf8")) as RunState;
+  } catch {
+    return undefined;
+  }
 }

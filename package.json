@@ -13,7 +13,13 @@
   "bugs": {
     "url": "https://github.com/jiker666/zhulong-xuanshu/issues"
   },
-  "keywords": ["agent", "cybersecurity", "ctf", "sandbox", "typescript"],
+  "keywords": [
+    "agent",
+    "cybersecurity",
+    "ctf",
+    "sandbox",
+    "typescript"
+  ],
   "engines": {
     "node": ">=22.19.0"
   },
@@ -22,29 +28,39 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "check": "npm run typecheck && npm test && npm run build",
+    "check": "npm run typecheck && npm run lint && npm test && npm run build",
     "dev": "tsx src/cli.ts",
+    "lint": "eslint \"src/**/*.ts\" \"test/**/*.ts\"",
     "doctor": "tsx src/cli.ts doctor",
     "sandbox": "tsx src/cli.ts sandbox",
     "sandbox-health": "tsx src/cli.ts sandbox-health",
     "serve": "tsx src/cli.ts serve",
     "start": "node dist/cli.js",
-    "test": "vitest run",
+    "test": "vitest run test frontend/src/features/decision-stream/projection.test.ts frontend/src/features/evidence-graph/projection.test.ts frontend/src/features/realtime/merge.test.ts frontend/src/features/policy/projection.test.ts",
+    "test:benchmark": "vitest run test/web-benchmark.test.ts",
+    "test:browser": "vitest run test/browser-runtime.test.ts test/browser-live.test.ts",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "0.83.0",
     "@earendil-works/pi-ai": "0.83.0",
+    "domhandler": "^6.0.1",
+    "htmlparser2": "^12.0.0",
+    "playwright": "^1.62.1",
     "typebox": "1.3.9",
+    "undici": "7.29.0",
     "yaml": "2.9.0",
     "yauzl": "3.4.0"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/node": "22.19.19",
     "@types/yauzl": "2.10.3",
+    "eslint": "^10.8.0",
     "tsx": "4.22.1",
     "typescript": "5.9.3",
+    "typescript-eslint": "^8.66.0",
     "vitest": "4.1.9"
   }
 }

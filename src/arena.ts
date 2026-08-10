@@ -388,6 +388,7 @@ export function arenaAttemptToTask(attempt: ArenaAttempt): TaskRequest {
   const containerUrls = problem.container?.url ?? [];
   const lines = [
     "NSSCTF Agent Arena challenge. Solve it as a generic CTF task without using challenge IDs, memorized answers, or fixed flag templates.",
+    "Arena skill guidance: use the current attempt when active; use only registered tools and evidence-preserving scratch files; submit only after independent verification; abandon instead of guessing or retrying indefinitely.",
     "",
     `Attempt state: ${attempt.state_label ?? "unknown"}`,
     `Wrong submissions: ${attempt.wrong_count ?? 0}/${attempt.max_wrong_count ?? "unknown"}`,

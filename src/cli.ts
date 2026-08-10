@@ -19,6 +19,7 @@ import { SandboxClient, startSandboxServer } from "./sandbox.js";
 import { startApiServer } from "./server.js";
 import { resolveWorkspacePath } from "./policy.js";
 import type { AppConfig } from "./types.js";
+import { createTSecClient, solveTSecOnce, tsecReadiness } from "./tsec.js";
 
 interface ParsedArgs {
   command: string;
@@ -37,6 +38,7 @@ interface ParsedArgs {
   authKey?: string;
   model?: string;
   output?: string;
+  challengeCode?: string;
   attachments: string[];
 }
 
@@ -58,6 +60,8 @@ Usage:
   xuan-shu arena-solve-once [--no-auto-submit] [--config path]
   xuan-shu arena-loop [--no-auto-submit] [--max-attempts n] [--idle-seconds n] [--config path]
   xuan-shu arena-evaluate [--max-attempts 20] [--idle-seconds n] [--config path]
+  xuan-shu tsec-solve-once [--challenge-code code] [--config path]
+  xuan-shu tsec-doctor [--config path]
   xuan-shu resource-export --endpoint URL [--ids task_ids.json] [--output report.json] [--config path]
 `;
 }
@@ -77,7 +81,7 @@ function parseArgs(argv: string[]): ParsedArgs {
       continue;
     }
     if (
-      ["--config", "--task", "--task-file", "--scope", "--attach", "--attempt-id", "--flag", "--max-attempts", "--idle-seconds", "--ids", "--endpoint", "--app-id", "--auth-key", "--model", "--output"].includes(
+      ["--config", "--task", "--task-file", "--scope", "--attach", "--attempt-id", "--flag", "--max-attempts", "--idle-seconds", "--ids", "--endpoint", "--app-id", "--auth-key", "--model", "--output", "--challenge-code"].includes(
         arg,
       )
     ) {
@@ -109,6 +113,7 @@ function parseArgs(argv: string[]): ParsedArgs {
       if (arg === "--auth-key") result.authKey = value;
       if (arg === "--model") result.model = value;
       if (arg === "--output") result.output = value;
+      if (arg === "--challenge-code") result.challengeCode = value;
       index += 1;
       continue;
     }
@@ -207,8 +212,8 @@ function evaluationEventLogger() {
   };
 }
 
-function isRetryableInfrastructureError(message: string): boolean {
-  return /(?:\b429\b|too\s*many\s*requests|rate\s*limit|\b5\d\d\b|econnreset|etimedout|fetch failed|socket hang up|container unavailable)/i.test(
+export function isRetryableInfrastructureError(message: string): boolean {
+  return /(?:\b429\b|too\s*many\s*requests|rate\s*limit|\b5\d\d\b|econnreset|econnrefused|etimedout|fetch failed|socket hang up|connection\s+error|(?:upstream|service)\s+(?:service\s+)?temporarily\s+unavailable|service\s+unavailable|container unavailable)/i.test(
     message,
   );
 }
@@ -409,6 +414,18 @@ async function main(): Promise<void> {
     const targetAttempts = args.maxAttempts ?? 20;
     const idleSeconds = args.idleSeconds ?? 1;
     process.exitCode = await runArenaEvaluation(config, targetAttempts, args.autoSubmit ?? true, idleSeconds);
+    return;
+  }
+  if (args.command === "tsec-solve-once") {
+    const result = await solveTSecOnce(config, createTSecClient(), args.challengeCode);
+    printJson(result);
+    process.exitCode = result.outcome === "solved" ? 0 : 2;
+    return;
+  }
+  if (args.command === "tsec-doctor") {
+    const checks = await tsecReadiness(config);
+    printJson(checks);
+    process.exitCode = Object.values(checks).every((check) => (check as { ok: boolean }).ok) ? 0 : 2;
     return;
   }
   if (args.command === "resource-export") {

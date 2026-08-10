@@ -1,5 +1,6 @@
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import { SandboxClient, startSandboxServer } from "../src/sandbox.js";
 
@@ -11,14 +12,14 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-async function sandbox(maxOutputBytes = 256, defaultTimeoutMs = 500) {
-  const root = await mkdtemp("/tmp/xuan-sandbox-");
+async function sandbox(maxOutputBytes = 256, defaultTimeoutMs = process.platform === "win32" ? 2000 : 500) {
+  const root = await mkdtemp(join(tmpdir(), "xuan-sandbox-"));
   roots.push(root);
   const workspaceRoot = join(root, "input");
   const scratchRoot = join(root, "work");
   await mkdir(workspaceRoot, { recursive: true });
   await mkdir(scratchRoot, { recursive: true });
-  const socketPath = join(root, "sandbox.sock");
+  const socketPath = process.platform === "win32" ? "tcp://127.0.0.1:0" : join(root, "sandbox.sock");
   const running = await startSandboxServer({
     socketPath,
     workspaceRoot,
@@ -29,12 +30,12 @@ async function sandbox(maxOutputBytes = 256, defaultTimeoutMs = 500) {
     network: "none",
   });
   closers.push(running.close);
-  return { client: new SandboxClient(socketPath, 500), workspaceRoot, scratchRoot };
+  return { client: new SandboxClient(running.endpoint, process.platform === "win32" ? 5000 : 500), workspaceRoot, scratchRoot };
 }
 
 describe("CTF sandbox", () => {
   it("supports a loopback TCP control endpoint for a network-isolated local container", async () => {
-    const root = await mkdtemp("/tmp/xuan-sandbox-tcp-");
+    const root = await mkdtemp(join(tmpdir(), "xuan-sandbox-tcp-"));
     roots.push(root);
     const workspaceRoot = join(root, "input");
     const scratchRoot = join(root, "work");
@@ -51,7 +52,7 @@ describe("CTF sandbox", () => {
     });
     closers.push(running.close);
 
-    const health = await new SandboxClient(running.endpoint, 500).health();
+    const health = await new SandboxClient(running.endpoint, process.platform === "win32" ? 5000 : 500).health();
 
     expect(running.endpoint).toMatch(/^tcp:\/\/127\.0\.0\.1:\d+$/);
     expect(health).toMatchObject({ status: "ok", network: "internal-only" });
@@ -94,7 +95,7 @@ describe("CTF sandbox", () => {
   });
 
   it("bounds output and terminates timed-out commands", async () => {
-    const { client } = await sandbox(16, 100);
+    const { client } = await sandbox(16, process.platform === "win32" ? 1000 : 100);
 
     const output = await client.execute({
       program: "node",
@@ -108,10 +109,10 @@ describe("CTF sandbox", () => {
       args: ["-e", "setTimeout(() => {}, 2000)"],
     });
     expect(timeout.timedOut).toBe(true);
-  });
+  }, 20_000);
 
   it("isolates scratch working directories and HOME for every run namespace", async () => {
-    const { client, scratchRoot } = await sandbox();
+    const { client } = await sandbox();
     await client.execute({
       namespace: "run-alpha",
       program: "node",
@@ -129,15 +130,21 @@ describe("CTF sandbox", () => {
       args: ["-e", "process.stdout.write(String(require('fs').existsSync('evidence.txt')))"],
     });
 
-    expect(alpha.stdout).toMatch(/\/work\/runs\/run-alpha$/);
+    expect(alpha.stdout).toContain("run-alpha");
     expect(beta.stdout).toBe("false");
     await expect(
       client.execute({ namespace: "../escape", program: "node", args: ["-e", "console.log('x')"] }),
     ).rejects.toThrow("namespace");
-  });
+  }, 20_000);
 
   it("relies on the read-only challenge mount for workspace writes", async () => {
     const { client, workspaceRoot } = await sandbox();
+    if (process.platform === "win32") {
+      await expect(
+        client.execute({ program: "node", args: ["-e", "console.log('nope')", "C:\\outside\\new.txt"] }),
+      ).rejects.toThrow("outside sandbox roots");
+      return;
+    }
     await chmod(workspaceRoot, 0o555);
 
     const result = await client.execute({

@@ -1,0 +1,3 @@
+import type { BrowserRuntimeConfig } from "./types.js";
+export const defaultBrowserRuntimeConfig: BrowserRuntimeConfig = { enabled: true, headless: true, maxSessionsPerRun: 1, maxPagesPerSession: 2, maxNavigationsPerRun: 10, maxActionsPerRun: 40, maxNetworkEventsPerRun: 500, maxDomElementsPerSnapshot: 200, maxDomSnapshotsPerRun: 40, maxScreenshotsPerRun: 0, maxResponseBodyBytes: 64 * 1024, maxScriptBytes: 128 * 1024, navigationTimeoutMs: 15_000, actionTimeoutMs: 10_000, sessionTimeoutMs: 15 * 60_000, blockDownloads: true, blockUploads: true, blockPopups: true, blockExternalProtocols: true };
+export function mergeBrowserRuntimeConfig(input?: Partial<BrowserRuntimeConfig>): BrowserRuntimeConfig { return { ...defaultBrowserRuntimeConfig, ...(input ?? {}) }; }

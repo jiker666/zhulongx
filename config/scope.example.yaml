@@ -8,7 +8,10 @@ allowedHosts:
   - lab.example.invalid
   - "*.sandbox.invalid:*"
 allowedPrograms:
+  - dirsearch
+  - ffuf
   - file
+  - gobuster
   - jq
   - python3
   - rg

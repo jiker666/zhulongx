@@ -59,3 +59,10 @@ THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRI
 AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
 TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+## NSSCTF Agent Arena Skill
+
+The user-supplied `nssctf-agent-arena` skill archive declares the MIT license. Its reference material is included under `skills/nssctf-agent-arena/`; the project adaptation does not import its direct shell or network permission declarations. Arena execution remains implemented by this project's `ArenaClient`, `PolicyEngine`, scope configuration, budgets, and audit chain.
+
+## Imported CTF Web Skill
+
+The user requested import of `tokeii0-ctfskill-ctf-web-skill` version 1.0.1 from LobeHub. The package is retained as Markdown reference material under `skills/tokeii0-ctfskill-ctf-web-skill/`. Its upstream license was not present in the downloaded archive; review the upstream licensing terms before redistribution. No executable files are included in the imported package.

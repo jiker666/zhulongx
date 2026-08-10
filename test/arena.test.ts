@@ -12,6 +12,7 @@ import {
 } from "../src/arena.js";
 import type { RunState } from "../src/types.js";
 import { buildArenaEvaluationReport } from "../src/arena-evaluation.js";
+import { isRetryableInfrastructureError } from "../src/cli.js";
 import { testConfig } from "./helpers.js";
 
 const servers: Server[] = [];
@@ -38,6 +39,13 @@ async function listen(handler: RequestListener): Promise<string> {
 }
 
 describe("NSSCTF Arena integration", () => {
+  it("retries transient relay connection failures instead of stopping the active attempt", () => {
+    expect(isRetryableInfrastructureError("Connection error.")).toBe(true);
+    expect(isRetryableInfrastructureError("ECONNRESET from model relay")).toBe(true);
+    expect(isRetryableInfrastructureError("Upstream service temporarily unavailable")).toBe(true);
+    expect(isRetryableInfrastructureError("invalid API key")).toBe(false);
+  });
+
   it("uses the configured token env and Arena API policy prefix", async () => {
     process.env.XUANSHU_TEST_ARENA_TOKEN = "nss_agent_test";
     const baseUrl = await listen((request, response) => {

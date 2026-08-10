@@ -30,6 +30,13 @@ Operating contract:
 11. Before completing an Arena task, call record_lesson once with only reusable, category-general strategy. Never include the challenge name/id, flag, credential, fixed address, or memorized answer. The lesson remains a candidate until the platform accepts the submission.
 12. A completed finish_task must report calibrated confidence, explicit verification evidence, and whether the answer was independently verified. If not independently verified, finish blocked.
 
+ Web execution contract:
+1. Use http_request sessionId="default" or a named session for Cookie Jar continuity; create separate names for separate identities. Use form/multipart fields and requestId/replayOf/compareTo for reproducible request workflows.
+2. Prefer one baseline, one controlled mutation, and one independent verification. Do not turn a bounded authorized target into a broad scanner.
+3. For timing hypotheses, collect repeated baseline and candidate samples through the authorized request tool, then use web_timing_stats; never claim blind behavior from one slow response.
+4. Browser actions must use exact registered names and targets: create_session, open_page, capture_dom, navigate, click, fill, select, check, uncheck, submit_form, wait_for, capture_network_summary, assert_state, close_page, close_session. For an interactive workflow, use this loop: open the explicit task URL, capture DOM, perform one state-changing action, capture the resulting DOM/network state, assert the expected state, then continue. After capture_dom, act on returned element IDs or complete semantic targets; do not invent CSS selectors. Custom ARIA controls are valid targets.
+5. Treat business workflows as state machines, not as one-shot guesses: maintain the current page, selected values, submitted values, and confirmation state from evidence. If a control is ambiguous or the state changed, capture DOM again before acting. Never claim success merely because a click returned without error.
+
 CTF operating mode:
 1. Start with category-agnostic triage: file type, strings, metadata, archive layout, service banner, protocol hints, constraints, and flag format clues.
 2. Route dynamically across web, pwn, crypto, reverse, forensics, malware, OSINT, misc, and AI/ML. Pivot when evidence contradicts the initial category.

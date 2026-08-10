@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { parse } from "yaml";
 import { hostMatches, isPathInside } from "./policy.js";
-import type { AppConfig, ScopeConfig } from "./types.js";
+import type { AppConfig, ScopeConfig, WebReasoningConfig } from "./types.js";
 
 const DEFAULT_CONFIG_PATH = resolve("config/default.yaml");
 
@@ -40,6 +40,8 @@ function validateConfig(value: unknown, configPath: string): AppConfig {
   const scope = requireObject(root.scope, "scope");
   const server = requireObject(root.server, "server");
   const arena = root.arena === undefined ? undefined : requireObject(root.arena, "arena");
+  const webReasoning = root.webReasoning === undefined ? undefined : requireObject(root.webReasoning, "webReasoning");
+  const browser = root.browser === undefined ? undefined : requireObject(root.browser, "browser");
   const baseDir = resolve(configPath, "..");
   const workspaceRoot = requireString(scope.workspaceRoot, "scope.workspaceRoot");
   const artifactRoot = requireString(runtime.artifactRoot, "runtime.artifactRoot");
@@ -122,6 +124,26 @@ function validateConfig(value: unknown, configPath: string): AppConfig {
       timeoutMs: requireNumber(arena.timeoutMs, "arena.timeoutMs"),
       maxResponseBytes: requireNumber(arena.maxResponseBytes, "arena.maxResponseBytes"),
     };
+  }
+  if (webReasoning) {
+    const positiveOrDefault = (key: keyof WebReasoningConfig, fallback: number): number =>
+      webReasoning[key] === undefined ? fallback : requireNumber(webReasoning[key], `webReasoning.${String(key)}`);
+    result.webReasoning = {
+      enabled: webReasoning.enabled === undefined ? true : Boolean(webReasoning.enabled),
+      autoDetectWebTasks: webReasoning.autoDetectWebTasks === undefined ? true : Boolean(webReasoning.autoDetectWebTasks),
+      persistState: webReasoning.persistState === undefined ? true : Boolean(webReasoning.persistState),
+      enableHypothesisManagement: webReasoning.enableHypothesisManagement === undefined ? true : Boolean(webReasoning.enableHypothesisManagement),
+      enableReflection: webReasoning.enableReflection === undefined ? true : Boolean(webReasoning.enableReflection),
+      enableActionDeduplication: webReasoning.enableActionDeduplication === undefined ? true : Boolean(webReasoning.enableActionDeduplication),
+      noEvidenceRoundLimit: positiveOrDefault("noEvidenceRoundLimit", 3), duplicateActionLimit: positiveOrDefault("duplicateActionLimit", 2),
+      toolFailureLimit: positiveOrDefault("toolFailureLimit", 3), finalizationRoundReserve: positiveOrDefault("finalizationRoundReserve", 2),
+      maxObservations: positiveOrDefault("maxObservations", 80), maxHypotheses: positiveOrDefault("maxHypotheses", 40),
+      maxActions: positiveOrDefault("maxActions", 80), maxReflections: positiveOrDefault("maxReflections", 12),
+    };
+  }
+  if (browser) {
+    const positive = (key: string, fallback: number): number => browser[key] === undefined ? fallback : requireNumber(browser[key], "browser." + key);
+    result.browser = { enabled: browser.enabled === undefined ? true : Boolean(browser.enabled), headless: browser.headless === undefined ? true : Boolean(browser.headless), maxSessionsPerRun: positive("maxSessionsPerRun", 1), maxPagesPerSession: positive("maxPagesPerSession", 2), maxNavigationsPerRun: positive("maxNavigationsPerRun", 10), maxActionsPerRun: positive("maxActionsPerRun", 40), maxNetworkEventsPerRun: positive("maxNetworkEventsPerRun", 500), maxDomElementsPerSnapshot: positive("maxDomElementsPerSnapshot", 200), maxDomSnapshotsPerRun: positive("maxDomSnapshotsPerRun", 40), maxScreenshotsPerRun: browser.maxScreenshotsPerRun === undefined ? 0 : requireNumber(browser.maxScreenshotsPerRun, "browser.maxScreenshotsPerRun"), maxResponseBodyBytes: positive("maxResponseBodyBytes", 65536), maxScriptBytes: positive("maxScriptBytes", 131072), navigationTimeoutMs: positive("navigationTimeoutMs", 15000), actionTimeoutMs: positive("actionTimeoutMs", 10000), sessionTimeoutMs: positive("sessionTimeoutMs", 900000), blockDownloads: browser.blockDownloads === undefined ? true : Boolean(browser.blockDownloads), blockUploads: browser.blockUploads === undefined ? true : Boolean(browser.blockUploads), blockPopups: browser.blockPopups === undefined ? true : Boolean(browser.blockPopups), blockExternalProtocols: browser.blockExternalProtocols === undefined ? true : Boolean(browser.blockExternalProtocols) };
   }
   return result;
 }
