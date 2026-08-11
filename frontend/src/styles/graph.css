@@ -1,1 +1,206 @@
-.primary-tabs{margin:18px 0 14px;border-bottom:1px solid var(--border);padding-bottom:8px}.primary-tabs button{border:1px solid var(--border);border-radius:8px;padding:9px 14px;background:var(--surface);color:var(--muted);cursor:pointer}.primary-tabs button.active,.primary-tabs button:hover{background:var(--surface-elevated);border-color:#4d786c;color:var(--text)}.graph-layout{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:18px;align-items:start}.evidence-graph-shell{min-width:0;padding:14px;border:1px solid var(--border);border-radius:12px;background:#091411}.graph-toolbar{display:flex;align-items:center;gap:12px;min-height:32px;margin-bottom:10px}.graph-toolbar strong{font-size:14px}.graph-count{color:var(--muted);font:11px ui-monospace,SFMono-Regular,Menlo,monospace}.graph-toolbar-actions{display:flex;gap:6px;margin-left:auto}.graph-toolbar-actions button{border:1px solid var(--border);border-radius:7px;padding:6px 9px;background:var(--surface);color:var(--muted);cursor:pointer;font-size:12px}.graph-toolbar-actions button:hover{border-color:#4d786c;color:var(--text)}.evidence-graph-canvas{height:620px;min-width:0;border:1px solid #1c332c;border-radius:9px;overflow:hidden;background:#091411}.evidence-graph-canvas .react-flow{background:#091411}.evidence-graph-canvas .react-flow__attribution{background:rgba(9,20,17,.8);color:#688179}.evidence-graph-node{display:grid;gap:6px;width:190px;min-height:86px;padding:11px 12px;border:1px solid color-mix(in srgb,var(--node-accent) 48%,#20352f);border-left:3px solid var(--node-accent);border-radius:9px;background:#10201c;color:var(--text);box-shadow:0 8px 20px rgba(0,0,0,.2);cursor:pointer}.evidence-graph-node:hover,.evidence-graph-node.selected{border-color:var(--node-accent);box-shadow:0 0 0 2px color-mix(in srgb,var(--node-accent) 35%,transparent)}.evidence-graph-node.dimmed{opacity:.48}.graph-node-kind,.graph-node-state{color:var(--node-accent);font:10px ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.08em}.evidence-graph-node strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px}.graph-empty{min-height:360px}.graph-inspector .linked-decisions{display:grid;gap:8px;margin-top:16px}.graph-inspector .linked-decisions strong{font-size:12px;color:var(--muted)}.graph-inspector details{margin-top:12px}.graph-inspector summary{cursor:pointer;color:var(--muted);font-size:12px}.graph-link-button{width:100%;margin-bottom:10px}@media(max-width:800px){.graph-layout{grid-template-columns:1fr}.evidence-graph-canvas{height:520px}.graph-inspector{position:static}}@media(max-width:520px){.graph-toolbar{align-items:flex-start;flex-wrap:wrap}.graph-toolbar-actions{width:100%;margin-left:0}.graph-toolbar-actions button{flex:1}.evidence-graph-canvas{height:460px}}
+.primary-tabs {
+  margin: 18px 0 14px;
+  padding: 3px;
+  width: max-content;
+  max-width: 100%;
+  background: #f0eee8;
+  border-radius: var(--radius);
+}
+
+.primary-tabs button {
+  padding: 9px 14px;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+}
+
+.primary-tabs button:hover {
+  color: var(--text);
+}
+
+.primary-tabs button.active {
+  color: var(--text);
+  background: var(--surface);
+  border-color: var(--border);
+  box-shadow: 0 1px 2px rgb(48 43 34 / 5%);
+}
+
+.graph-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 18px;
+  align-items: start;
+}
+
+.evidence-graph-shell {
+  min-width: 0;
+  padding: 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.graph-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 32px;
+  margin-bottom: 10px;
+}
+
+.graph-toolbar strong {
+  font-size: 14px;
+}
+
+.graph-count {
+  color: var(--subtle);
+  font: 10px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.graph-toolbar-actions {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.graph-toolbar-actions button {
+  padding: 6px 9px;
+  color: var(--muted);
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+}
+
+.graph-toolbar-actions button:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.evidence-graph-canvas {
+  height: 620px;
+  min-width: 0;
+  overflow: hidden;
+  background: #f8f7f3;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.evidence-graph-canvas .react-flow {
+  background: #f8f7f3;
+}
+
+.evidence-graph-canvas .react-flow__attribution {
+  color: var(--subtle);
+  background: rgb(248 247 243 / 85%);
+}
+
+.evidence-graph-node {
+  display: grid;
+  gap: 6px;
+  width: 190px;
+  min-height: 86px;
+  padding: 11px 12px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid color-mix(in srgb, var(--node-accent) 42%, var(--border));
+  border-left: 3px solid var(--node-accent);
+  border-radius: var(--radius);
+  box-shadow: 0 5px 14px rgb(51 45 35 / 8%);
+  cursor: pointer;
+}
+
+.evidence-graph-node:hover,
+.evidence-graph-node.selected {
+  border-color: var(--node-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--node-accent) 20%, transparent);
+}
+
+.evidence-graph-node.dimmed {
+  opacity: 0.45;
+}
+
+.graph-node-kind,
+.graph-node-state {
+  color: var(--node-accent);
+  font: 10px ui-monospace, SFMono-Regular, Menlo, monospace;
+  letter-spacing: 0;
+}
+
+.evidence-graph-node strong {
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.graph-empty {
+  min-height: 360px;
+}
+
+.graph-inspector .linked-decisions {
+  display: grid;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.graph-inspector .linked-decisions strong {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.graph-inspector details {
+  margin-top: 12px;
+}
+
+.graph-inspector summary {
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.graph-link-button {
+  width: 100%;
+  margin-bottom: 10px;
+}
+
+@media (max-width: 800px) {
+  .graph-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .evidence-graph-canvas {
+    height: 520px;
+  }
+
+  .graph-inspector {
+    position: static;
+  }
+}
+
+@media (max-width: 520px) {
+  .primary-tabs {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    width: 100%;
+  }
+
+  .graph-toolbar {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .graph-toolbar-actions {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .graph-toolbar-actions button {
+    flex: 1;
+  }
+
+  .evidence-graph-canvas {
+    height: 460px;
+  }
+}

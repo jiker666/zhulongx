@@ -32,13 +32,13 @@ export function RunsPage() {
     <div className="page runs-page">
       <section className="runs-hero" aria-labelledby="runs-title">
         <div className="runs-hero-copy">
-          <div className="eyebrow">OPERATIONS / RUN REGISTRY</div>
+          <div className="eyebrow">WORKSPACE / RUN REGISTRY</div>
           <h1 id="runs-title">任务大厅</h1>
-          <p>把每一次受授权的安全分析，变成可追踪、可复核的作战记录。</p>
+          <p>查看每一次受授权的安全分析，以及它留下的决策、证据与审计记录。</p>
           <div className="runs-signal-line"><span />AUDIT STREAM <b>●</b> POLICY ENGINE ONLINE</div>
         </div>
         <div className="runs-hero-status">
-          <span className="section-label">当前作战面</span>
+          <span className="section-label">当前运行</span>
           <strong>{running.toString().padStart(2, "0")}</strong>
           <span>个任务正在运行</span>
         </div>
