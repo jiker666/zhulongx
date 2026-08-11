@@ -4,6 +4,8 @@ dist/
 .DS_Store
 .xuan-shu/
 coverage/
+playwright-report/
+test-results/
 *.log
 workspace/*
 !workspace/.gitkeep

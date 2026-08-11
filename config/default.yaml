@@ -54,9 +54,11 @@ scope:
     - ecm
     - exiftool
     - factor
+    - dirsearch
     - ffmpeg
     - ffprobe
     - file
+    - ffuf
     - find
     - fls
     - flask-unsign
@@ -68,6 +70,7 @@ scope:
     - gifsicle
     - gp
     - gzip
+    - gobuster
     - hashcat
     - icat
     - identify

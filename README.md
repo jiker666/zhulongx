@@ -13,6 +13,7 @@
 - Crypto/Misc core profile 提供可构建验证的 ECM、PARI/GP、fpylll、Z3、OR-Tools、Pickora、OCR、音频/调制解码和常见图像隐写工具。
 - 工具失败或策略拒绝后，必须分类失败、修订计划并说明新的行动依据。
 - 只读输入、逐运行 scratch、结构化沙箱命令，以及受策略约束的 HTTP/TCP 工具。
+- 可选 Playwright Chromium 运行时提供受控浏览器会话；导航、交互、DOM 与网络摘要仍由 `WebActionGuard`、`PolicyEngine`、scope 和独立预算约束。
 - 主机、程序、路径、轮次、工具调用、请求、输出、重复动作和总时长预算。
 - 每次运行可启用附件专属工作区；Arena 运行只暴露当前题目的只读附件，图片预算由 `runtime.maxImageBytes`、`runtime.maxImageObservations` 控制，并由 `runtime.finalizationReserveMs` 预留收尾时间。
 - 同题多 agent 竞速使用有界共享证据板交换事实、候选和 dead-end；每个 agent 保留独立 scratch，且必须独立复核共享内容。
@@ -49,7 +50,12 @@ OPENAI_API_KEY="..."
 
 ```bash
 npm run check
+
+npm --prefix frontend ci --ignore-scripts
+npm --prefix frontend run build
 ```
+
+真实 Chromium 集成测试默认跳过。需要验证本机浏览器运行时时，先安装 Playwright Chromium，再运行 `XUANSHU_RUN_LIVE_BROWSER=1 npm run test:browser`。
 
 启动本地无外网 sandbox sidecar：
 
@@ -75,6 +81,7 @@ npm run dev -- run \
 
 - `http_request`：有界 HTTP 请求，不跟随重定向。
 - `tcp_open/send/receive/close`：有界、精确 `host:port` 的状态化 TCP 会话。
+- `browser`：可选的逐运行 Chromium 上下文，只允许 scope 内 HTTP(S) 导航，禁止任意 JavaScript、下载、上传、弹窗和密码字段填充。
 - `run_command`：仅执行 allowlist 程序，不经过 shell；Docker sidecar 本身不能直接出网。
 - 长时间运行的 sandbox 命令会在超时或调用方取消时终止；stdout/stderr 共享单次运行输出上限。
 
@@ -193,9 +200,11 @@ heavy 构建会固定源码 commit 并运行 `verify-heavy-tools.sh`；包含 Sa
 - `src/arena*.ts`：Arena 客户端与评测闭环。
 - `src/question-bank.ts`、`src/manual-jobs.ts`：本地题库索引与可跳过的有界批处理。
 - `src/shared-evidence.ts`：同题竞速的有界、脱敏、进程内证据板。
+- `src/web-reasoning/`、`src/agents/web/`：Web 任务识别、证据推理、受控浏览器与角色编排。
+- `frontend/`：React 审计控制台源码与 Playwright 页面测试。
 - `test/`：确定性 faux-model、策略、沙箱和 API 测试。
 
-架构、CTF skills、参考项目研究、评测方法与路线图分别见 [docs/architecture.md](docs/architecture.md)、[skills/README.md](skills/README.md)、[docs/reference-agent-study.md](docs/reference-agent-study.md)、[docs/evaluation.md](docs/evaluation.md) 和 [docs/roadmap.md](docs/roadmap.md)。本项目当前仍缺少浏览器插件、DNS 解析锁定、出口代理和租户级 microVM 隔离，不应把当前版本视为无人值守生产安全扫描器。
+架构、CTF skills、参考项目研究、评测方法与路线图分别见 [docs/architecture.md](docs/architecture.md)、[skills/README.md](skills/README.md)、[docs/reference-agent-study.md](docs/reference-agent-study.md)、[docs/evaluation.md](docs/evaluation.md) 和 [docs/roadmap.md](docs/roadmap.md)。本项目当前仍缺少 DNS 解析锁定、统一出口代理和租户级 microVM 隔离；受控浏览器也不持久化登录会话，不应把当前版本视为无人值守生产安全扫描器。
 
 ## 贡献与许可证
 

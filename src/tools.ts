@@ -5,9 +5,12 @@ import { basename, dirname, relative, resolve } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "@earendil-works/pi-ai";
 import type { AuditChain } from "./audit.js";
-import { isPathInside, resolveWorkspacePath } from "./policy.js";
+import { hostMatches, isPathInside, resolveWorkspacePath } from "./policy.js";
 import { SandboxClient } from "./sandbox.js";
 import type { PublishSharedEvidenceInput, SharedEvidenceBoard, SharedEvidenceKind } from "./shared-evidence.js";
+import { searchWebKnowledge } from "./agents/web/web-knowledge.js";
+import { ControlledBrowserRuntime } from "./web-reasoning/browser/runtime.js";
+import type { BrowserRuntimeConfig, BrowserToolInput } from "./web-reasoning/browser/types.js";
 import type {
   ExperienceLesson,
   FailureClassification,
@@ -72,7 +75,66 @@ interface HttpRequestInput {
   body?: string;
   bodyEncoding?: "utf8" | "base64";
   responseEncoding?: "auto" | "utf8" | "base64";
+  sessionId?: string;
+  followRedirects?: boolean;
+  form?: Record<string, string>;
+  multipart?: Record<string, string>;
+  replayOf?: string;
+  compareTo?: string;
 }
+
+interface HttpSessionMemory {
+  cookies: Map<string, string>;
+}
+
+interface HttpReplayMemory {
+  method: HttpRequestInput["method"];
+  url: string;
+  headers: Record<string, string>;
+  body?: Uint8Array;
+}
+
+interface HttpResponseMemory {
+  status: number;
+  headers: Record<string, string>;
+  body: string;
+  bodySha256: string;
+  bytes: number;
+}
+
+function safeResponseHeaders(headers: Headers): Record<string, string> {
+  const result: Record<string, string> = {};
+  headers.forEach((value, key) => {
+    result[key] = /^(authorization|cookie|set-cookie|proxy-authorization)$/i.test(key) ? "[redacted]" : value.slice(0, 1000);
+  });
+  return result;
+}
+
+function setCookieHeaders(headers: Headers): string[] {
+  const extended = headers as Headers & { getSetCookie?: () => string[] };
+  return extended.getSetCookie?.() ?? (headers.get("set-cookie") ? [headers.get("set-cookie") as string] : []);
+}
+
+function cookieNames(headers: Headers): string[] {
+  return setCookieHeaders(headers).flatMap((value) => value.split(/,(?=[^;,]+=)/)).map((value) => value.split("=", 1)[0]?.trim() ?? "").filter(Boolean);
+}
+
+interface WebBaselineInput {
+  url: string;
+  includeBody?: boolean;
+}
+
+interface WebKnowledgeInput {
+  query: string;
+  limit?: number;
+}
+
+interface WebCompareInput {
+  baseline: string;
+  candidate: string;
+}
+
+interface WebTimingInput { samples: number[]; baselineSamples?: number[] }
 
 interface ScratchWriteInput {
   path: string;
@@ -134,6 +196,7 @@ interface ToolContext {
   audit: AuditChain;
   sandboxNamespace?: string;
   sharedEvidence?: SharedEvidenceBoard;
+  browser?: Partial<BrowserRuntimeConfig>;
 }
 
 export interface ToolSet {
@@ -498,9 +561,14 @@ async function receiveTcp(session: TcpSession, length: number, timeoutMs: number
 }
 
 export function createToolSet(context: ToolContext): ToolSet {
-  const { state, scope, runtime, audit, sandboxNamespace, sharedEvidence } = context;
+  const { state, scope, runtime, audit, sandboxNamespace, sharedEvidence, browser } = context;
   const sandbox = new SandboxClient(runtime.sandbox.socketPath, runtime.sandbox.connectTimeoutMs);
   const tcpSessions = new Map<string, TcpSession>();
+  const httpSessions = new Map<string, HttpSessionMemory>();
+  const httpReplays = new Map<string, HttpReplayMemory>();
+  const httpResponses = new Map<string, HttpResponseMemory>();
+  const browserRuntime = state.webReasoning?.browser ? new ControlledBrowserRuntime({ runId: state.id, scope, state: state.webReasoning.browser, ...(browser ? { config: browser } : {}) }) : undefined;
+  if (browserRuntime) void audit.append(browserRuntime.capability.available ? "BROWSER_CAPABILITY_DETECTED" : "BROWSER_CAPABILITY_UNAVAILABLE", { provider: browserRuntime.capability.provider, browserType: browserRuntime.capability.browserType, reason: browserRuntime.capability.reason });
 
   const closeTcpSession = async (id: string): Promise<boolean> => {
     const session = tcpSessions.get(id);
@@ -513,9 +581,40 @@ export function createToolSet(context: ToolContext): ToolSet {
 
   const cleanup = async () => {
     await Promise.all([...tcpSessions.keys()].map((id) => closeTcpSession(id)));
+    await browserRuntime?.cleanup();
+    httpSessions.clear();
+    httpReplays.clear();
+    httpResponses.clear();
   };
 
   const tools: AgentTool<any, any>[] = [
+    {
+      name: "browser",
+      label: "Controlled browser",
+      description: "Perform one registered, scope-checked browser action. Use the exact action names: create_session, open_page, navigate, reload, go_back, capture_dom, capture_network_summary, assert_state, click, fill, select, check, uncheck, submit_form, wait_for, capture_screenshot, close_page, close_session. Browser results are bounded and persisted as structured evidence.",
+      parameters: Type.Object({
+        action: Type.String(),
+        sessionId: Type.Optional(Type.String()),
+        pageId: Type.Optional(Type.String()),
+        url: Type.Optional(Type.String()),
+        target: Type.Optional(Type.Unknown()),
+        value: Type.Optional(Type.String()),
+        expectedText: Type.Optional(Type.String({ maxLength: 2000 })),
+        expectedUrl: Type.Optional(Type.String({ maxLength: 500 })),
+        timeoutMs: Type.Optional(Type.Number()),
+      }),
+      async execute(_id, params, signal) {
+        if (!browserRuntime) throw new Error("Browser runtime is unavailable for this run");
+        try {
+          const result = await browserRuntime.execute(params as BrowserToolInput, signal);
+          await audit.append("BROWSER_ACTION_COMPLETED", { action: (params as { action?: unknown }).action, details: result.details });
+          return textResult(result.content, result.details);
+        } catch (error) {
+          await audit.append("BROWSER_ACTION_FAILED", { action: (params as { action?: unknown }).action, failureSummary: String(error).slice(0, 240) });
+          throw error;
+        }
+      },
+    },
     {
       name: "submit_plan",
       label: "Submit plan",
@@ -946,9 +1045,89 @@ export function createToolSet(context: ToolContext): ToolSet {
       },
     },
     {
+      name: "web_collect_baseline",
+      label: "Collect Web baseline",
+      description: "Perform one bounded GET against an authorized Web target and return structured response evidence.",
+      parameters: Type.Object({
+        url: Type.String({ minLength: 1 }),
+        includeBody: Type.Optional(Type.Boolean({ default: true })),
+      }),
+      executionMode: "sequential",
+      async execute(_id, params, signal) {
+        const input = params as WebBaselineInput;
+        const timeoutSignal = AbortSignal.timeout(runtime.httpTimeoutMs);
+        const combined = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+        const startedAt = Date.now();
+        const response = await fetch(input.url, { method: "GET", redirect: "manual", signal: combined });
+        const body = await boundedResponseBytes(response, runtime.maxOutputBytes);
+        const rendered = input.includeBody === false ? { encoding: "utf8", text: "[body omitted]" } : renderBytes(body.bytes, "auto");
+        const headers = safeResponseHeaders(response.headers);
+        const responseSha256 = createHash("sha256").update(body.bytes).digest("hex");
+        const durationMs = Date.now() - startedAt;
+        return textResult(
+          [
+            `url=${input.url}`,
+            `status=${response.status}`,
+            `headers=${JSON.stringify(headers)}`,
+            `bodyEncoding=${rendered.encoding}`,
+            `bodyBytes=${body.bytes.length}`,
+            `bodySha256=${responseSha256}`,
+            `durationMs=${durationMs}`,
+            `body:\n${rendered.text}`,
+          ].join("\n"),
+          { url: input.url, status: response.status, headers, encoding: rendered.encoding, bytes: body.bytes.length, truncated: body.truncated, responseSha256, durationMs },
+        );
+      },
+    },
+    {
+      name: "web_knowledge_lookup",
+      label: "Lookup Web knowledge",
+      description: "Search the reviewed Web vulnerability knowledge base for evidence signals, bounded tests, and verification requirements.",
+      parameters: Type.Object({
+        query: Type.String({ minLength: 1, maxLength: 200 }),
+        limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 8, default: 5 })),
+      }),
+      executionMode: "parallel",
+      async execute(_id, params) {
+        const input = params as WebKnowledgeInput;
+        const matches = searchWebKnowledge(input.query, input.limit ?? 5);
+        return textResult(JSON.stringify({ query: input.query, matches }, null, 2), { query: input.query, count: matches.length });
+      },
+    },
+    {
+      name: "web_compare_responses",
+      label: "Compare Web responses",
+      description: "Compare two bounded response bodies and report deterministic differences without making a vulnerability claim.",
+      parameters: Type.Object({
+        baseline: Type.String({ maxLength: 65536 }),
+        candidate: Type.String({ maxLength: 65536 }),
+      }),
+      executionMode: "parallel",
+      async execute(_id, params) {
+        const input = params as WebCompareInput;
+        const baselineLines = input.baseline.split(/\r?\n/);
+        const candidateLines = input.candidate.split(/\r?\n/);
+        const changedLines = Math.abs(candidateLines.length - baselineLines.length) + baselineLines.reduce(
+          (count, line, index) => count + (candidateLines[index] === line ? 0 : 1),
+          0,
+        );
+        const details = {
+          baselineSha256: createHash("sha256").update(input.baseline).digest("hex"),
+          candidateSha256: createHash("sha256").update(input.candidate).digest("hex"),
+          baselineBytes: Buffer.byteLength(input.baseline),
+          candidateBytes: Buffer.byteLength(input.candidate),
+          baselineLines: baselineLines.length,
+          candidateLines: candidateLines.length,
+          changedLines,
+          different: input.baseline !== input.candidate,
+        };
+        return textResult(JSON.stringify(details, null, 2), details);
+      },
+    },
+    {
       name: "http_request",
       label: "Scoped HTTP request",
-      description: "Send one bounded HTTP request to an explicitly authorized host. Redirects are not followed.",
+      description: "Send one bounded HTTP request to an explicitly authorized host. Supports an in-memory per-run Cookie Jar, form or string-only multipart fields, bounded redirect following, and replay of a prior request. Cookie values never appear in results or artifacts.",
       parameters: Type.Object({
         method: Type.Union([
           Type.Literal("GET"),
@@ -964,19 +1143,43 @@ export function createToolSet(context: ToolContext): ToolSet {
         body: Type.Optional(Type.String({ maxLength: 65536 })),
         bodyEncoding: Type.Optional(Type.Union([Type.Literal("utf8"), Type.Literal("base64")])),
         responseEncoding: Type.Optional(Type.Union([Type.Literal("auto"), Type.Literal("utf8"), Type.Literal("base64")])),
+        sessionId: Type.Optional(Type.String({ minLength: 1, maxLength: 80 })),
+        followRedirects: Type.Optional(Type.Boolean({ default: false })),
+        form: Type.Optional(Type.Record(Type.String(), Type.String({ maxLength: 8192 }))),
+        multipart: Type.Optional(Type.Record(Type.String(), Type.String({ maxLength: 8192 }))),
+        replayOf: Type.Optional(Type.String({ minLength: 1, maxLength: 80 })),
+        compareTo: Type.Optional(Type.String({ minLength: 1, maxLength: 80 })),
       }),
       executionMode: "sequential",
       async execute(_id, params, signal) {
         const input = params as HttpRequestInput;
         const timeoutSignal = AbortSignal.timeout(runtime.httpTimeoutMs);
         const combined = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
-        const bodyBytes = input.body === undefined ? undefined : decodeToolData(input.body, input.bodyEncoding ?? "utf8");
-        const requestInit: RequestInit = {
-          method: input.method,
-          redirect: "manual",
-          signal: combined,
-        };
-        if (input.headers) requestInit.headers = input.headers;
+        const replay = input.replayOf ? httpReplays.get(input.replayOf) : undefined;
+        if (input.replayOf && !replay) throw new Error("Unknown HTTP replay id");
+        const sessionId = input.sessionId ?? "default";
+        const session = sessionId ? (httpSessions.get(sessionId) ?? (() => { const created = { cookies: new Map<string, string>() }; httpSessions.set(sessionId, created); return created; })()) : undefined;
+        const requestHeaders: Record<string, string> = { ...(replay?.headers ?? {}), ...(input.headers ?? {}) };
+        if (session && !Object.keys(requestHeaders).some((key) => key.toLowerCase() === "cookie") && session.cookies.size > 0) {
+          requestHeaders.Cookie = [...session.cookies.entries()].map(([name, value]) => `${name}=${value}`).join("; ");
+        }
+        let bodyBytes = input.body === undefined ? replay?.body : decodeToolData(input.body, input.bodyEncoding ?? "utf8");
+        if (input.form) {
+          bodyBytes = new TextEncoder().encode(new URLSearchParams(input.form).toString());
+          requestHeaders["content-type"] ??= "application/x-www-form-urlencoded";
+        }
+        if (input.multipart) {
+          const multipart = new FormData();
+          for (const [key, value] of Object.entries(input.multipart)) multipart.append(key, value);
+          const multipartResponse = new Response(multipart);
+          const encoded = await multipartResponse.arrayBuffer();
+          bodyBytes = new Uint8Array(encoded);
+          requestHeaders["content-type"] = multipartResponse.headers.get("content-type") ?? "multipart/form-data";
+        }
+        const initialMethod = replay?.method ?? input.method;
+        const initialUrl = replay?.url ?? input.url;
+        const requestInit: RequestInit = { method: initialMethod, redirect: "manual", signal: combined };
+        if (Object.keys(requestHeaders).length > 0) requestInit.headers = requestHeaders;
         if (bodyBytes !== undefined) {
           requestInit.body = bodyBytes.buffer.slice(
             bodyBytes.byteOffset,
@@ -984,28 +1187,64 @@ export function createToolSet(context: ToolContext): ToolSet {
           ) as ArrayBuffer;
         }
         const startedAt = Date.now();
-        const response = await fetch(input.url, requestInit);
+        let currentUrl = initialUrl;
+        let currentMethod = initialMethod;
+        let currentBody = bodyBytes;
+        const redirects: string[] = [];
+        let response: Response;
+        for (let redirectCount = 0; ; redirectCount += 1) {
+          const nextInit: RequestInit = { ...requestInit, method: currentMethod };
+          if (currentBody) nextInit.body = currentBody.buffer.slice(currentBody.byteOffset, currentBody.byteOffset + currentBody.byteLength) as ArrayBuffer;
+          else delete nextInit.body;
+          response = await fetch(currentUrl, nextInit);
+          if (!input.followRedirects || response.status < 300 || response.status >= 400) break;
+          if (redirectCount >= 5) throw new Error("HTTP redirect limit exceeded");
+          const location = response.headers.get("location");
+          if (!location) break;
+          const nextUrl = new URL(location, currentUrl);
+          const allowed = (host: string) => scope.allowedHosts.some((pattern) => hostMatches(host, pattern));
+          if (!allowed(nextUrl.host) && !allowed(nextUrl.hostname)) throw new Error(`Redirect target is outside the authorized scope: ${nextUrl.host}`);
+          redirects.push(nextUrl.toString());
+          currentUrl = nextUrl.toString();
+          if (response.status === 301 || response.status === 302 || response.status === 303) {
+            currentMethod = "GET";
+            currentBody = undefined;
+          }
+        }
         const body = await boundedResponseBytes(response, runtime.maxOutputBytes);
         const rendered = renderBytes(body.bytes, input.responseEncoding ?? "auto");
-        const headers: Record<string, string> = {};
-        response.headers.forEach((value, key) => {
-          headers[key] = value;
-        });
+        const headers = safeResponseHeaders(response.headers);
+        if (session) for (const cookie of setCookieHeaders(response.headers)) { const first = cookie.split(";", 1)[0] ?? ""; const separator = first.indexOf("="); if (separator > 0) session.cookies.set(first.slice(0, separator).trim(), first.slice(separator + 1)); }
+        const requestId = randomUUID();
+        httpReplays.set(requestId, { method: currentMethod, url: currentUrl, headers: requestHeaders, ...(currentBody ? { body: currentBody } : {}) });
         const responseSha256 = createHash("sha256").update(body.bytes).digest("hex");
         const durationMs = Date.now() - startedAt;
+        const currentResponse: HttpResponseMemory = { status: response.status, headers, body: rendered.text, bodySha256: responseSha256, bytes: body.bytes.length };
+        const comparison = input.compareTo ? (() => { const baseline = httpResponses.get(input.compareTo as string); if (!baseline) throw new Error("Unknown HTTP response comparison id"); return { statusChanged: baseline.status !== currentResponse.status, bodyLengthChanged: baseline.bytes !== currentResponse.bytes, bodyChanged: baseline.bodySha256 !== currentResponse.bodySha256, headerChanges: Object.keys({ ...baseline.headers, ...currentResponse.headers }).filter((key) => baseline.headers[key] !== currentResponse.headers[key]).slice(0, 40) }; })() : undefined;
+        httpResponses.set(requestId, currentResponse);
         return textResult(
           [
+            `requestId=${requestId}`,
+            `sessionId=${sessionId}`,
             `status=${response.status}`,
             `headers=${JSON.stringify(headers)}`,
             `bodyEncoding=${rendered.encoding}`,
             `bodyBytes=${body.bytes.length}`,
             `bodySha256=${responseSha256}`,
+            ...(redirects.length ? [`redirects=${JSON.stringify(redirects)}`] : []),
+            ...(comparison ? [`comparison=${JSON.stringify(comparison)}`] : []),
             `durationMs=${durationMs}`,
             `body:\n${rendered.text}`,
           ].join("\n"),
           {
+            requestId,
+            sessionId,
             status: response.status,
             headers,
+            cookieNames: cookieNames(response.headers),
+            redirect: response.redirected,
+            redirects,
+            ...(comparison ? { comparison } : {}),
             encoding: rendered.encoding,
             bytes: body.bytes.length,
             truncated: body.truncated,
@@ -1013,6 +1252,27 @@ export function createToolSet(context: ToolContext): ToolSet {
             durationMs,
           },
         );
+      },
+    },
+    {
+      name: "web_timing_stats",
+      label: "Analyze Web timing samples",
+      description: "Compute bounded deterministic timing statistics for samples already collected through authorized requests. This is an analysis helper, not a network scanner.",
+      parameters: Type.Object({
+        samples: Type.Array(Type.Number({ minimum: 0, maximum: 300000 }), { minItems: 2, maxItems: 30 }),
+        baselineSamples: Type.Optional(Type.Array(Type.Number({ minimum: 0, maximum: 300000 }), { minItems: 2, maxItems: 30 })),
+      }),
+      executionMode: "parallel",
+      async execute(_id, params) {
+        const input = params as WebTimingInput;
+        const stats = (values: number[]) => {
+          const sorted = [...values].sort((left, right) => left - right);
+          const mean = values.reduce((sum, value) => sum + value, 0) / values.length;
+          const variance = values.reduce((sum, value) => sum + (value - mean) ** 2, 0) / values.length;
+          return { count: values.length, min: sorted[0], max: sorted.at(-1), mean, median: sorted[Math.floor(sorted.length / 2)], stddev: Math.sqrt(variance) };
+        };
+        const result = { samples: stats(input.samples), ...(input.baselineSamples ? { baseline: stats(input.baselineSamples), meanDeltaMs: stats(input.samples).mean - stats(input.baselineSamples).mean } : {}) };
+        return textResult(JSON.stringify(result), result);
       },
     },
     {

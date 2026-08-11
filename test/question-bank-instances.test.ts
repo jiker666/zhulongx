@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { QuestionBankInstanceRunner } from "../src/question-bank-instances.js";
 import type { QuestionBankQuestion } from "../src/question-bank.js";
-import type { AppConfig } from "../src/types.js";
 import { testConfig } from "./helpers.js";
 
 const roots: string[] = [];

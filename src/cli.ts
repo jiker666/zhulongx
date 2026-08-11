@@ -25,6 +25,7 @@ import { QuestionBankProgressStore } from "./question-bank-progress.js";
 import { ManualJobManager } from "./manual-jobs.js";
 import { RunManager } from "./run-manager.js";
 import type { AppConfig } from "./types.js";
+import { createTSecClient, solveTSecOnce, tsecReadiness } from "./tsec.js";
 
 const MAX_CLI_ATTEMPT_HISTORY = 200;
 const MAX_CLI_SEEN_ATTEMPTS = 1000;
@@ -49,6 +50,7 @@ interface ParsedArgs {
   concurrency?: number;
   raceAgents?: number;
   writeup?: boolean;
+  challengeCode?: string;
   attachments: string[];
 }
 
@@ -70,6 +72,8 @@ Usage:
   xuan-shu arena-solve-once [--no-auto-submit] [--config path]
   xuan-shu arena-loop [--max-attempts n] [--idle-seconds n] [--config path]  # continuous unless bounded
   xuan-shu arena-evaluate [--max-attempts 20] [--idle-seconds n] [--config path]
+  xuan-shu tsec-solve-once [--challenge-code code] [--config path]
+  xuan-shu tsec-doctor [--config path]
   xuan-shu resource-export --endpoint URL [--ids task_ids.json] [--output report.json] [--config path]
   xuan-shu question-bank-list [--config path]
   xuan-shu question-bank-solve [--concurrency n] [--race-agents n] [--no-writeup] [--config path]
@@ -95,7 +99,7 @@ function parseArgs(argv: string[]): ParsedArgs {
       continue;
     }
     if (
-      ["--config", "--task", "--task-file", "--scope", "--attach", "--attempt-id", "--flag", "--max-attempts", "--idle-seconds", "--ids", "--endpoint", "--app-id", "--auth-key", "--model", "--output", "--concurrency", "--race-agents"].includes(
+      ["--config", "--task", "--task-file", "--scope", "--attach", "--attempt-id", "--flag", "--max-attempts", "--idle-seconds", "--ids", "--endpoint", "--app-id", "--auth-key", "--model", "--output", "--concurrency", "--race-agents", "--challenge-code"].includes(
         arg,
       )
     ) {
@@ -137,6 +141,7 @@ function parseArgs(argv: string[]): ParsedArgs {
         if (!Number.isInteger(raceAgents) || raceAgents < 1 || raceAgents > 8) throw new Error("--race-agents must be an integer between 1 and 8");
         result.raceAgents = raceAgents;
       }
+      if (arg === "--challenge-code") result.challengeCode = value;
       index += 1;
       continue;
     }
@@ -235,8 +240,8 @@ function evaluationEventLogger() {
   };
 }
 
-function isRetryableInfrastructureError(message: string): boolean {
-  return /(?:\b429\b|too\s*many\s*requests|rate\s*limit|\b5\d\d\b|econnreset|etimedout|fetch failed|socket hang up|container unavailable)/i.test(
+export function isRetryableInfrastructureError(message: string): boolean {
+  return /(?:\b429\b|too\s*many\s*requests|rate\s*limit|\b5\d\d\b|econnreset|econnrefused|etimedout|fetch failed|socket hang up|connection\s+error|(?:upstream|service)\s+(?:service\s+)?temporarily\s+unavailable|service\s+unavailable|container unavailable)/i.test(
     message,
   );
 }
@@ -565,6 +570,18 @@ async function main(): Promise<void> {
     const targetAttempts = args.maxAttempts ?? 20;
     const idleSeconds = args.idleSeconds ?? 1;
     process.exitCode = await runArenaEvaluation(config, targetAttempts, args.autoSubmit ?? true, idleSeconds);
+    return;
+  }
+  if (args.command === "tsec-solve-once") {
+    const result = await solveTSecOnce(config, createTSecClient(), args.challengeCode);
+    printJson(result);
+    process.exitCode = result.outcome === "solved" ? 0 : 2;
+    return;
+  }
+  if (args.command === "tsec-doctor") {
+    const checks = await tsecReadiness(config);
+    printJson(checks);
+    process.exitCode = Object.values(checks).every((check) => (check as { ok: boolean }).ok) ? 0 : 2;
     return;
   }
   if (args.command === "resource-export") {

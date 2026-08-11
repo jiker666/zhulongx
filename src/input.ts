@@ -79,7 +79,8 @@ async function listDirectory(root: string): Promise<{ entries: string[]; truncat
     if (!directory) break;
     for await (const item of await opendir(directory)) {
       const absolute = resolve(directory, item.name);
-      entries.push(relative(root, absolute) + (item.isDirectory() ? "/" : ""));
+      const relativePath = relative(root, absolute).replaceAll("\\", "/");
+      entries.push(relativePath + (item.isDirectory() ? "/" : ""));
       if (item.isDirectory()) queue.push(absolute);
       if (entries.length >= MAX_DIRECTORY_ENTRIES) break;
     }

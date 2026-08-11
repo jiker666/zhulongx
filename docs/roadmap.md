@@ -18,7 +18,7 @@
 
 ## v0.3 受控网站接入
 
-- 基于 Playwright 的浏览器插件，复用登录会话并记录 DOM/截图证据。
+- 已完成基础 Playwright 逐运行浏览器上下文、DOM/网络摘要、导航 scope 和交互预算；持久登录会话与截图证据仍待补全。
 - DNS 解析锁定、出口代理、每目标速率限制和精确 URL 路径范围。
 - OpenAPI/HAR 接口建模、请求去重、响应差异比较和敏感字段自动脱敏。
 - 主办方测试站点到位后建立 development/validation/hidden 三分评测集。

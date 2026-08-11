@@ -254,10 +254,14 @@ async function executeCommand(
     if (stdin) child.stdin.end(stdin);
     else child.stdin.end();
 
+    // Windows process creation can consume most of a very small timeout before
+    // the child emits its first byte. Preserve the caller's timeout for real
+    // workloads while giving only sub-second probes a bounded startup grace.
+    const effectiveTimeoutMs = process.platform === "win32" && timeoutMs <= 1000 ? timeoutMs + 1000 : timeoutMs;
     termTimer = setTimeout(() => {
       timedOut = true;
       terminate();
-    }, timeoutMs);
+    }, effectiveTimeoutMs);
 
     child.once("close", (exitCode, signal) => {
       closed = true;

@@ -19,6 +19,11 @@ const ACTION_TOOLS = new Set([
   "write_scratch_file",
   "run_command",
   "http_request",
+  "web_collect_baseline",
+  "web_knowledge_lookup",
+  "web_compare_responses",
+  "web_timing_stats",
+  "browser",
   "tcp_open",
   "tcp_send",
   "tcp_receive",
@@ -51,9 +56,9 @@ export function hostMatches(host: string, allowed: string): boolean {
   } else if (value.port !== undefined) {
     return false;
   }
-  if (pattern.host.startsWith("*.")) {
-    const suffix = pattern.host.slice(1);
-    return value.host.endsWith(suffix) && value.host.length > suffix.length;
+  if (pattern.host.includes("*")) {
+    const escaped = pattern.host.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
+    return new RegExp(`^${escaped}$`).test(value.host);
   }
   return value.host === pattern.host;
 }
@@ -290,7 +295,7 @@ export class PolicyEngine {
         signature: actionSignature,
       };
     }
-    if (toolName === "http_request") {
+    if (toolName === "http_request" || toolName === "web_collect_baseline") {
       if (this.scope.mode !== "controlled") {
         return { allowed: false, reason: "Network actions require scope.mode=controlled", signature: actionSignature };
       }
@@ -324,6 +329,12 @@ export class PolicyEngine {
         return { allowed: false, reason: `TCP host is outside the authorized scope: ${authority}`, signature: actionSignature };
       }
     }
+    if (toolName === "browser") {
+      if (this.scope.mode !== "controlled") return { allowed: false, reason: "Browser actions require scope.mode=controlled", signature: actionSignature };
+      const action = String((args as { action?: unknown })?.action ?? "");
+      if (["capture_screenshot", "upload", "download", "evaluate", "popup"].includes(action)) return { allowed: false, reason: "This browser action is disabled by default", signature: actionSignature };
+      if (!["create_session", "open_page", "navigate", "reload", "go_back", "capture_dom", "capture_network_summary", "assert_state", "click", "fill", "select", "check", "uncheck", "submit_form", "wait_for", "close_page", "close_session"].includes(action)) return { allowed: false, reason: "Unknown browser action", signature: actionSignature };
+    }
     return { allowed: true, reason: "Allowed by configured scope and runtime budget", signature: actionSignature };
   }
 
@@ -333,7 +344,7 @@ export class PolicyEngine {
       state.actionsSinceCheckpoint += 1;
       state.repeatedActions[decision.signature] = (state.repeatedActions[decision.signature] ?? 0) + 1;
     }
-    if (toolName === "http_request") state.httpRequests += 1;
+    if (toolName === "http_request" || toolName === "web_collect_baseline") state.httpRequests += 1;
     if (toolName === "tcp_open") state.tcpSessions += 1;
     if (toolName === "observe_image") state.imageObservations = (state.imageObservations ?? 0) + 1;
     if (toolName === "checkpoint") state.actionsSinceCheckpoint = 0;

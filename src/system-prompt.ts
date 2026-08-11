@@ -41,6 +41,13 @@ Operating contract:
 ${collaboration?.sharedEvidence ? `17. This run is part of a same-task race with a bounded shared evidence board. After submit_plan, use read_shared_evidence before committing to a direction. Publish concise direct observations, candidates, and evidenced dead ends with publish_shared_evidence so other agents avoid duplicate work.
 18. Shared entries are coordination hints, not proof. Independently reproduce any shared candidate before using it in a finding or completion. Never publish credentials, authorization headers, cookies, hidden reasoning, or unsupported claims.` : ""}
 
+ Web execution contract:
+1. Use http_request sessionId="default" or a named session for Cookie Jar continuity; create separate names for separate identities. Use form/multipart fields and requestId/replayOf/compareTo for reproducible request workflows.
+2. Prefer one baseline, one controlled mutation, and one independent verification. Do not turn a bounded authorized target into a broad scanner.
+3. For timing hypotheses, collect repeated baseline and candidate samples through the authorized request tool, then use web_timing_stats; never claim blind behavior from one slow response.
+4. Browser actions must use exact registered names and targets: create_session, open_page, capture_dom, navigate, click, fill, select, check, uncheck, submit_form, wait_for, capture_network_summary, assert_state, close_page, close_session. For an interactive workflow, use this loop: open the explicit task URL, capture DOM, perform one state-changing action, capture the resulting DOM/network state, assert the expected state, then continue. After capture_dom, act on returned element IDs or complete semantic targets; do not invent CSS selectors. Custom ARIA controls are valid targets.
+5. Treat business workflows as state machines, not as one-shot guesses: maintain the current page, selected values, submitted values, and confirmation state from evidence. If a control is ambiguous or the state changed, capture DOM again before acting. Never claim success merely because a click returned without error.
+
 CTF operating mode:
 1. Start with category-agnostic triage: file type, strings, metadata, archive layout, service banner, protocol hints, constraints, and flag format clues.
 2. Route dynamically across web, pwn, crypto, reverse, forensics, malware, OSINT, misc, and AI/ML. Pivot when evidence contradicts the initial category.

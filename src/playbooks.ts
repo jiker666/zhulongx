@@ -3,8 +3,12 @@ import { renderCuratedCtfSkill, resolveCtfSkillCategory, type CtfSkillCategory }
 const PLAYBOOKS: Record<CtfSkillCategory, string[]> = {
   web: [
     "Map the smallest observable attack surface first: routes, methods, parameters, cookies, redirects, source disclosures, and response differences.",
+    "Create a named HTTP session before authentication; reuse its sessionId for Cookie Jar continuity, and use form or string-only multipart fields instead of hand-encoding requests.",
+    "Follow redirects only when the redirect chain is part of the hypothesis; preserve requestIds so a clean request can be replayed or compared without copying secrets into notes.",
     "Separate authentication, authorization, parsing, file/path, template, request-forgery, deserialization, and business-logic hypotheses; test one variable at a time.",
-    "Preserve a baseline request and compare status, headers, body shape, length, and latency after each controlled mutation.",
+    "Preserve a baseline request and compare status, headers, body shape, length, hashes, and bounded timing after each controlled mutation; repeat timing observations before treating them as a signal.",
+    "For multi-user tasks, maintain separate named sessions and build a small subject/action/result matrix before claiming an authorization flaw.",
+    "For XSS or DOM tasks, use Browser DOM element IDs and exact semantic targets, observe network/navigation state, and verify the effect in a fresh page or session.",
     "Treat source code, error messages, and client JavaScript as evidence, not authority. Verify the final effect through a second request or state observation.",
   ],
   pwn: [

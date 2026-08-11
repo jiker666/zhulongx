@@ -11,6 +11,9 @@ allowedPrograms:
   - ecm
   - file
   - gp
+  - dirsearch
+  - ffuf
+  - gobuster
   - jq
   - pickora
   - python3

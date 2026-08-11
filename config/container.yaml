@@ -10,7 +10,7 @@ model:
   maxTokens: 8192
 
 runtime:
-  thinkingLevel: medium
+  thinkingLevel: off
   artifactRoot: /data/runs
   scratchRoot: /workspace/work
   maxTurns: 30
@@ -54,11 +54,13 @@ scope:
     - dcfldd
     - dig
     - ecm
+    - dirsearch
     - exiftool
     - factor
     - ffmpeg
     - ffprobe
     - file
+    - ffuf
     - find
     - fls
     - flask-unsign
@@ -70,6 +72,7 @@ scope:
     - gifsicle
     - gp
     - gzip
+    - gobuster
     - hashcat
     - icat
     - identify

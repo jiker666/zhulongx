@@ -1,0 +1,36 @@
+export { extractOpenApiStructure } from "./parser.js";
+export {
+  componentParameterSemanticKey,
+  endpointSemanticKey,
+  openApiFindingId,
+  openApiOccurrenceId,
+  parameterSemanticKey,
+  requestBodySemanticKey,
+  responseSemanticKey,
+  schemaSemanticKey,
+  securitySchemeSemanticKey,
+  serverSemanticKey,
+} from "./identity.js";
+export type {
+  OpenApiEndpoint,
+  OpenApiExtractionError,
+  OpenApiExtractionResult,
+  OpenApiExtractionSummary,
+  OpenApiMediaType,
+  OpenApiMethod,
+  OpenApiParameter,
+  OpenApiParameterLocation,
+  OpenApiProvenance,
+  OpenApiRequestBody,
+  OpenApiResponse,
+  OpenApiSchema,
+  OpenApiSchemaType,
+  OpenApiSecurityRequirement,
+  OpenApiSecurityRequirementEntry,
+  OpenApiSecurityScheme,
+  OpenApiServer,
+  OpenApiServerVariable,
+  OpenApiSpecInfo,
+  OpenApiSpecKind,
+} from "./types.js";
+export { OPENAPI_METHODS } from "./types.js";

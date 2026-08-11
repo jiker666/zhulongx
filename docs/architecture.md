@@ -106,4 +106,4 @@ Heavy profile 通过 `INSTALL_HEAVY=true` 可选安装 angr、qiling、frida-too
 
 ## 扩展协议
 
-新增核心 AgentTool 需要同时提交：TypeBox 输入模式、工具实现、策略规则、审计事件、输出上限、AbortSignal 处理、单元测试和副作用说明。新增 sandbox program 需要更新锁定依赖、能力 manifest、operator allowlist、构建期 smoke check、策略/预算回归和副作用说明；它仍只能经 `run_command` 进入审计链。浏览器、Burp、重型反编译器或取证工具应作为插件或 sandbox profile 加入，不应修改核心状态机。
+新增核心 AgentTool 需要同时提交：TypeBox 输入模式、工具实现、策略规则、审计事件、输出上限、AbortSignal 处理、单元测试和副作用说明。新增 sandbox program 需要更新锁定依赖、能力 manifest、operator allowlist、构建期 smoke check、策略/预算回归和副作用说明；它仍只能经 `run_command` 进入审计链。受控浏览器等主动网络工具必须保持逐运行隔离并经过 `PolicyEngine`；Burp、重型反编译器或取证工具应作为插件或 sandbox profile 加入，不应修改核心状态机。

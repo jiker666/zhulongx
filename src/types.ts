@@ -44,6 +44,23 @@ export interface RuntimeConfig {
   sandbox: SandboxConfig;
 }
 
+export interface WebReasoningConfig {
+  enabled: boolean;
+  autoDetectWebTasks: boolean;
+  persistState: boolean;
+  enableHypothesisManagement: boolean;
+  enableReflection: boolean;
+  enableActionDeduplication: boolean;
+  noEvidenceRoundLimit: number;
+  duplicateActionLimit: number;
+  toolFailureLimit: number;
+  finalizationRoundReserve: number;
+  maxObservations: number;
+  maxHypotheses: number;
+  maxActions: number;
+  maxReflections: number;
+}
+
 export interface SandboxConfig {
   socketPath: string;
   connectTimeoutMs: number;
@@ -95,6 +112,8 @@ export interface AppConfig {
   server: ServerConfig;
   arena?: ArenaConfig;
   questionBank?: QuestionBankConfig;
+  webReasoning?: WebReasoningConfig;
+  browser?: import("./web-reasoning/browser/types.js").BrowserRuntimeConfig;
 }
 
 export interface TaskRequest {
@@ -174,6 +193,24 @@ export interface Finding {
   remediation?: string;
 }
 
+export type EvidenceLifecycleStatus = "created" | "attached" | "evaluated" | "used" | "invalidated" | "superseded";
+
+export interface EvidenceRecord {
+  id: string;
+  summary: string;
+  source: "task" | "tool" | "provider" | "benchmark" | "verifier" | "system";
+  lifecycle: EvidenceLifecycleStatus;
+  toolCallId?: string;
+  observationIds: string[];
+  hypothesisIds: string[];
+  actionIds: string[];
+  candidateIds: string[];
+  verificationIds: string[];
+  fingerprint?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface ExperienceLesson {
   id: string;
   title: string;
@@ -225,6 +262,9 @@ export interface RunState {
   tcpSessions: number;
   actionsSinceCheckpoint: number;
   repeatedActions: Record<string, number>;
+  evidence?: EvidenceRecord[];
+  webAgent?: import("./agents/web/types.js").WebAgentState;
+  webReasoning?: import("./web-reasoning/types.js").WebReasoningState;
 }
 
 export interface AuditRecord {

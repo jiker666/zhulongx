@@ -100,6 +100,11 @@ describe("PolicyEngine", () => {
     run.plan = { goal: "inspect", assumptions: [], hypotheses: [], steps: [{ id: "1", objective: "request", successCriteria: [], tools: ["http_request"] }] };
 
     expect(policy.evaluate("http_request", { method: "GET", url: "https://lab.example.invalid/a" }, run).allowed).toBe(true);
+    expect(policy.evaluate("web_collect_baseline", { url: "https://lab.example.invalid/a" }, run).allowed).toBe(true);
+    expect(policy.evaluate("web_collect_baseline", { url: "https://evil.invalid/a" }, run).allowed).toBe(false);
+    expect(policy.evaluate("web_knowledge_lookup", { query: "upload" }, run).allowed).toBe(true);
+    expect(policy.evaluate("web_compare_responses", { baseline: "a", candidate: "b" }, run).allowed).toBe(true);
+    expect(policy.evaluate("web_timing_stats", { samples: [10, 11] }, run).allowed).toBe(true);
     expect(policy.evaluate("http_request", { method: "PATCH", url: "https://lab.example.invalid/a" }, run).allowed).toBe(true);
     expect(policy.evaluate("http_request", { method: "GET", url: "https://evil.invalid/a" }, run).allowed).toBe(false);
     expect(policy.evaluate("tcp_open", { host: "pwn.example.invalid", port: 31337 }, run).allowed).toBe(true);

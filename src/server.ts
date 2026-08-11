@@ -1,12 +1,13 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { readFile } from "node:fs/promises";
+import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import type { AddressInfo } from "node:net";
-import { join } from "node:path";
 import type { AppConfig, TaskRequest } from "./types.js";
 import { dashboardHtml } from "./dashboard.js";
 import { ExperienceStore, type ExperienceUpdate } from "./experience.js";
 import { RunManager } from "./run-manager.js";
 import { XuanShuRuntime } from "./runtime.js";
-import { appendRunReview, listPersistedRuns, loadDecisionTrace } from "./trace.js";
+import { appendRunReview, listPersistedRuns, loadDecisionTrace, loadPersistedRun, readAuditRecords, truncateTraceData } from "./trace.js";
 import { ArenaJobManager } from "./arena-jobs.js";
 import { ManualJobManager, validateManualJobInput } from "./manual-jobs.js";
 import { ManualUploadError, ManualUploadStore } from "./manual-uploads.js";
@@ -29,6 +30,24 @@ function html(response: ServerResponse, value: string): void {
     "x-content-type-options": "nosniff",
   });
   response.end(value);
+}
+
+async function frontendAsset(pathname: string, configuredRoot: string): Promise<{ body: Buffer; contentType: string } | undefined> {
+  const assetRoot = resolve(configuredRoot);
+  const requested = pathname === "/" || !extname(pathname) ? "index.html" : pathname.slice(1);
+  const candidate = resolve(assetRoot, requested);
+  const relativePath = relative(assetRoot, candidate);
+  if (relativePath.startsWith("..") || isAbsolute(relativePath)) return undefined;
+  try {
+    const body = await readFile(candidate);
+    const contentType = ({ ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".json": "application/json" } as Record<string, string>)[extname(candidate)] ?? "application/octet-stream";
+    return { body, contentType };
+  } catch { return undefined; }
+}
+
+function asset(response: ServerResponse, value: { body: Buffer; contentType: string }): void {
+  response.writeHead(200, { "content-type": value.contentType, "cache-control": "no-cache", "x-content-type-options": "nosniff" });
+  response.end(value.body);
 }
 
 async function bodyJson(request: IncomingMessage): Promise<unknown> {
@@ -101,6 +120,7 @@ export interface ApiServerDependencies {
   questionBank?: QuestionBank;
   questionBankProgress?: QuestionBankProgressStore;
   questionBankInstances?: QuestionBankInstanceRunner;
+  frontendRoot?: string;
 }
 
 async function questionBankSnapshot(questionBank: QuestionBank, progress: QuestionBankProgressStore) {
@@ -138,6 +158,43 @@ export function createApiServer(config: AppConfig, dependencies: ApiServerDepend
   const questionBank = dependencies.questionBank ?? new QuestionBank(config.questionBank);
   const questionBankProgress = dependencies.questionBankProgress ?? new QuestionBankProgressStore(config);
   const questionBankInstances = dependencies.questionBankInstances ?? new QuestionBankInstanceRunner(config);
+  const frontendRoot = dependencies.frontendRoot ?? join(process.cwd(), "frontend", "dist");
+  const streamClients = new Set<ServerResponse>();
+  const terminalStatuses = new Set(["completed", "blocked", "failed", "aborted"]);
+  const sendStreamRecord = (response: ServerResponse, runId: string, record: Awaited<ReturnType<typeof readAuditRecords>>[number]): void => {
+    const eventId = `${runId}:${record.sequence}`;
+    const envelope = { streamVersion: 1, runId, eventId, sequence: record.sequence, type: record.type, timestamp: record.timestamp, data: truncateTraceData(record.data) };
+    response.write(`id: ${eventId}\nevent: run-event\ndata: ${JSON.stringify(envelope)}\n\n`);
+  };
+  const streamRunEvents = async (request: IncomingMessage, response: ServerResponse, runId: string): Promise<void> => {
+    const active = manager.get(runId);
+    const persisted = await loadPersistedRun(config.runtime.artifactRoot, runId);
+    if (!active && !persisted) { json(response, 404, { error: "run not found" }); return; }
+    response.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache, no-store", connection: "keep-alive", "x-accel-buffering": "no" });
+    response.write("retry: 2000\n\n");
+    streamClients.add(response);
+    let closed = false;
+    const lastEventId = String(request.headers["last-event-id"] ?? "");
+    const resumeValue = lastEventId.includes(":") ? lastEventId.slice(lastEventId.lastIndexOf(":") + 1) : (lastEventId || new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`).searchParams.get("after") || "0");
+    let lastSequence = Number(resumeValue);
+    if (!Number.isSafeInteger(lastSequence) || lastSequence < 0) lastSequence = 0;
+    let timer: NodeJS.Timeout | undefined;
+    const cleanup = () => { if (closed) return; closed = true; if (timer) clearTimeout(timer); streamClients.delete(response); };
+    response.on("close", cleanup);
+    const poll = async () => {
+      if (closed) return;
+      try {
+        const records = await readAuditRecords(join(config.runtime.artifactRoot, runId, "audit.jsonl"));
+        for (const record of records.sort((left, right) => left.sequence - right.sequence)) if (record.sequence > lastSequence) { sendStreamRecord(response, runId, record); lastSequence = record.sequence; }
+        const current = manager.get(runId)?.status ?? (await loadPersistedRun(config.runtime.artifactRoot, runId))?.status;
+        if (current && terminalStatuses.has(current)) { response.end(); cleanup(); return; }
+      } catch {
+        // The stream is a delivery channel; the HTTP snapshot and trace remain authoritative.
+      }
+      timer = setTimeout(() => { void poll(); }, 250);
+    };
+    await poll();
+  };
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
@@ -145,7 +202,9 @@ export function createApiServer(config: AppConfig, dependencies: ApiServerDepend
         json(response, 200, { status: "ok", service: "zhulong-xuanshu", version: "0.2.2" });
         return;
       }
-      if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/ui")) {
+      if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/ui" || !url.pathname.startsWith("/v1/") && !url.pathname.startsWith("/health"))) {
+        const built = await frontendAsset(url.pathname, frontendRoot);
+        if (built) { asset(response, built); return; }
         html(response, dashboardHtml());
         return;
       }
@@ -340,6 +399,11 @@ export function createApiServer(config: AppConfig, dependencies: ApiServerDepend
         json(response, 200, { runs: [...active, ...persisted] });
         return;
       }
+      const eventsMatch = url.pathname.match(/^\/v1\/runs\/([0-9a-f-]+)\/events$/i);
+      if (request.method === "GET" && eventsMatch?.[1]) {
+        await streamRunEvents(request, response, eventsMatch[1]);
+        return;
+      }
       const traceMatch = url.pathname.match(/^\/v1\/runs\/([0-9a-f-]+)\/trace$/i);
       if (request.method === "GET" && traceMatch?.[1]) {
         json(response, 200, await loadDecisionTrace(config.runtime.artifactRoot, traceMatch[1]));
@@ -381,7 +445,10 @@ export function createApiServer(config: AppConfig, dependencies: ApiServerDepend
       }
       const match = url.pathname.match(/^\/v1\/runs\/([0-9a-f-]+)$/i);
       if (request.method === "GET" && match?.[1]) {
-        const snapshot = manager.get(match[1]);
+        const id = match[1];
+        const active = manager.get(id);
+        const persistedState = active ? undefined : await loadPersistedRun(config.runtime.artifactRoot, id);
+        const snapshot = active ?? (persistedState ? { id, status: persistedState.status, state: persistedState, events: [] } : undefined);
         if (!snapshot) json(response, 404, { error: "run not found" });
         else json(response, 200, snapshot);
         return;
@@ -391,7 +458,7 @@ export function createApiServer(config: AppConfig, dependencies: ApiServerDepend
       json(response, 500, { error: error instanceof Error ? error.message : String(error) });
     }
   });
-  return { server, manager, arenaJobs, manualJobs, manualUploads, questionBank };
+  return { server, manager, arenaJobs, manualJobs, manualUploads, questionBank, closeStreams: () => { for (const client of streamClients) client.end(); streamClients.clear(); } };
 }
 
 export async function startApiServer(
@@ -402,7 +469,7 @@ export async function startApiServer(
   if (!loopbackHosts.has(config.server.host) && !process.env[config.server.tokenEnv]) {
     throw new Error(`Refusing non-loopback API without ${config.server.tokenEnv}`);
   }
-  const { server, arenaJobs, manualJobs, manualUploads } = createApiServer(config, dependencies);
+  const { server, arenaJobs, manualJobs, manualUploads, closeStreams } = createApiServer(config, dependencies);
   await new Promise<void>((resolveListen, reject) => {
     server.once("error", reject);
     server.listen(config.server.port, config.server.host, resolveListen);
@@ -412,6 +479,7 @@ export async function startApiServer(
   return {
     url: `http://${host}:${address.port}`,
     close: async () => {
+      closeStreams();
       await new Promise<void>((resolveClose, reject) => server.close((error) => (error ? reject(error) : resolveClose())));
       await arenaJobs.close();
       await manualJobs.close();

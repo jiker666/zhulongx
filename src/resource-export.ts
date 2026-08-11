@@ -214,7 +214,7 @@ export async function exportResources(options: ResourceExportOptions): Promise<R
   const policy = new PolicyEngine(options.scope, options.runtime);
   const state = createRunState(options.runtime);
   const fetcher = options.fetchImpl ?? fetch;
-  const minIntervalMs = Math.max(500, options.minIntervalMs ?? 500);
+  const minIntervalMs = Math.max(550, options.minIntervalMs ?? 500);
   const successful: ResourceExportSuccess[] = [];
   const failed: ResourceExportFailure[] = [];
   let lastStartedAt: number | undefined;

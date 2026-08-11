@@ -1,0 +1,27 @@
+{
+  "name": "xuan-shu-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "e2e": "playwright test"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "^5.85.5",
+    "@xyflow/react": "^12.11.2",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "react-router-dom": "7.18.2"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1",
+    "@types/react": "^19.1.10",
+    "@types/react-dom": "^19.1.7",
+    "@vitejs/plugin-react": "^5.0.2",
+    "typescript": "^5.9.3",
+    "vite": "7.3.6"
+  }
+}

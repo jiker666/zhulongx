@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { chmod, copyFile, lstat, mkdir, writeFile } from "node:fs/promises";
 import { basename, join, relative, resolve } from "node:path";
-import { Agent, type AgentEvent, type StreamFn } from "@earendil-works/pi-agent-core";
+import { ProxyAgent } from "undici";
+import { Agent, type StreamFn } from "@earendil-works/pi-agent-core";
 import { lazyStream, type AssistantMessage, type Model } from "@earendil-works/pi-ai";
 import { streamSimple as streamAnthropicMessages } from "@earendil-works/pi-ai/api/anthropic-messages";
 import { streamSimple as streamOpenAICompletions } from "@earendil-works/pi-ai/api/openai-completions";
@@ -19,6 +20,8 @@ import type { SharedEvidenceBoard } from "./shared-evidence.js";
 import { buildSystemPrompt } from "./system-prompt.js";
 import { createToolSet } from "./tools.js";
 import type { AppConfig, NormalizedTask, RunEvent, RunState, RuntimeOverrides, TaskRequest } from "./types.js";
+import { createWebReasoningController } from "./web-reasoning/controller.js";
+import { detectWebTask } from "./web-reasoning/task-detector.js";
 
 type SupportedModelApi = "anthropic-messages" | "openai-completions" | "openai-responses";
 const MAX_LENGTH_RECOVERY_ATTEMPTS = 2;
@@ -75,14 +78,19 @@ export function createModel(config: AppConfig["model"]): Model<SupportedModelApi
 }
 
 function defaultStreamFn(): StreamFn {
+  const proxyUrl = process.env.TSEC_PROXY?.trim();
+  const proxy = proxyUrl ? new ProxyAgent(proxyUrl) : undefined;
+  const modelFetch = proxy
+    ? ((input: string | URL | Request, init?: RequestInit) => fetch(input, { ...(init ?? {}), dispatcher: proxy } as RequestInit))
+    : undefined;
   return (model, context, options) => {
     if (model.api === "anthropic-messages") {
-      return streamAnthropicMessages(model as Model<"anthropic-messages">, context, options);
+      return streamAnthropicMessages(model as Model<"anthropic-messages">, context, { ...options, ...(modelFetch ? { fetch: modelFetch } : {}) });
     }
     if (model.api === "openai-responses") {
-      return streamOpenAIResponses(model as Model<"openai-responses">, context, options);
+      return streamOpenAIResponses(model as Model<"openai-responses">, context, { ...options, ...(modelFetch ? { fetch: modelFetch } : {}) });
     }
-    return streamOpenAICompletions(model as Model<"openai-completions">, context, options);
+    return streamOpenAICompletions(model as Model<"openai-completions">, context, { ...options, ...(modelFetch ? { fetch: modelFetch } : {}) });
   };
 }
 
@@ -217,7 +225,10 @@ export class XuanShuRuntime {
       allowedPrograms: availablePrograms,
     };
     const audit = new AuditChain(join(runDirectory, "audit.jsonl"), id);
-    const experience = await new ExperienceStore(this.config.runtime.artifactRoot).relevant(task.metadata.category);
+    const webClassification = detectWebTask(task);
+    const experience = await new ExperienceStore(this.config.runtime.artifactRoot).relevant(
+      task.metadata.category ?? (webClassification.isWeb ? "Web" : undefined),
+    );
     const now = new Date().toISOString();
     const state: RunState = {
       id,
@@ -271,6 +282,9 @@ export class XuanShuRuntime {
     });
     await writeJson(join(runDirectory, "state.json"), state);
     await emit("run.started", { status: state.status, phase: state.phase });
+    const webReasoning = createWebReasoningController(state, audit, this.config.webReasoning);
+    await webReasoning.initialize();
+    if (webReasoning.enabled && this.config.webReasoning?.persistState !== false) await writeJson(join(runDirectory, "state.json"), state);
 
     const policy = new PolicyEngine(scope, runtimeConfig);
     const toolSet = createToolSet({
@@ -280,6 +294,7 @@ export class XuanShuRuntime {
       audit,
       sandboxNamespace: id,
       ...(options.sharedEvidence ? { sharedEvidence: options.sharedEvidence } : {}),
+      ...(this.config.browser ? { browser: this.config.browser } : {}),
     });
     const model = this.overrides.model ?? createModel(this.config.model);
     const providerStreamFn = this.overrides.streamFn ?? defaultStreamFn();
@@ -327,6 +342,17 @@ export class XuanShuRuntime {
         tools: toolSet.tools,
       },
       beforeToolCall: async ({ toolCall, args }) => {
+        const guard = webReasoning.guardToolCall(toolCall.name, args, toolSet.tools.map((tool) => tool.name));
+        if (!guard.allowed) {
+          await audit.append("WEB_ACTION_GUARD_REJECTED", { toolCallId: toolCall.id, toolName: toolCall.name, decision: guard.decision, reason: guard.reason });
+          await emit("WEB_ACTION_GUARD_REJECTED", { toolName: toolCall.name, decision: guard.decision, reason: guard.reason });
+          return { block: true, reason: guard.reason };
+        }
+        const webAction = webReasoning.prepareToolCall(toolCall.name, args, toolCall.id);
+        if (webAction.duplicate) {
+          await audit.append("WEB_ACTION_SKIPPED_DUPLICATE", { actionId: webAction.actionId, toolName: toolCall.name });
+          return { block: true, reason: "Duplicate Web action skipped; use new evidence or change strategy." };
+        }
         const decision = policy.evaluate(toolCall.name, args, state);
         await audit.append("policy.decision", {
           toolCallId: toolCall.id,
@@ -338,6 +364,7 @@ export class XuanShuRuntime {
         });
         await emit("policy.decision", { toolName: toolCall.name, allowed: decision.allowed, reason: decision.reason });
         if (!decision.allowed) {
+          webReasoning.markPolicyRejected(toolCall.id, decision.reason);
           if (state.plan && !["submit_plan", "checkpoint", "record_finding", "record_lesson", "finish_task"].includes(toolCall.name)) {
             state.actionsSinceCheckpoint = runtimeConfig.maxActionsWithoutCheckpoint;
             state.strategyRevisionRequired = true;
@@ -374,6 +401,8 @@ export class XuanShuRuntime {
           };
         }
         await writeJson(join(runDirectory, "state.json"), state);
+        await webReasoning.afterToolResult({ toolName: toolCall.name, toolCallId: toolCall.id, args, result: { content: result.content, details: result.details }, isError });
+        if (webReasoning.enabled && this.config.webReasoning?.persistState !== false) await writeJson(join(runDirectory, "state.json"), state);
         await emit("tool.result", { toolName: toolCall.name, isError });
         return undefined;
       },
@@ -391,8 +420,11 @@ export class XuanShuRuntime {
         await audit.append("turn.started", { turn: state.turns });
         await emit("turn.started", { turn: state.turns });
         if (state.turns > runtimeConfig.maxTurns) {
+          if (webReasoning.enabled) await webReasoning.beforeFinalization(0);
           state.stopReason = "Turn budget exhausted";
           agent.abort();
+        } else if (webReasoning.enabled && state.turns >= Math.max(1, runtimeConfig.maxTurns - webReasoning.config.finalizationRoundReserve)) {
+          await webReasoning.beforeFinalization(runtimeConfig.maxTurns - state.turns);
         }
       } else if (event.type === "message_end" && event.message.role === "assistant") {
         await audit.append("assistant.message", publicMessage(event.message));
@@ -437,8 +469,12 @@ export class XuanShuRuntime {
       if (!this.overrides.streamFn && !apiKey) {
         throw new Error(`Missing model credential in environment variable ${this.config.model.apiKeyEnv}`);
       }
+      const reasoningContext = webReasoning.enabled
+        ? await webReasoning.beforeTurn(runtimeConfig.maxTurns - state.turns, runtimeConfig.maxToolCalls - state.toolCalls, toolSet.tools.map((tool) => tool.name))
+        : "";
       await agent.prompt([
-        renderCapabilityPlaybook(task.metadata.category),
+        renderCapabilityPlaybook(task.metadata.category ?? (webReasoning.enabled ? "Web" : undefined)),
+        reasoningContext,
         renderExperienceContext(experience),
         renderTaskContext(task),
       ].filter(Boolean).join("\n\n"));
@@ -469,6 +505,11 @@ export class XuanShuRuntime {
       options.signal?.removeEventListener("abort", abortRun);
       await toolSet.cleanup();
       state.phase = "done";
+      if (webReasoning.enabled && state.status !== "completed") {
+        await webReasoning.beforeFinalization(0);
+      }
+      if (webReasoning.enabled) await webReasoning.complete(state.status === "completed" ? "completed" : "blocked");
+      if (webReasoning.enabled) state.webReasoning = webReasoning.serialize();
       state.updatedAt = new Date().toISOString();
       state.finishedAt = state.updatedAt;
       const transcript = agent.state.messages.map(publicMessage);
