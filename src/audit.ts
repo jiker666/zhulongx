@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { dirname } from "node:path";
+import { sanitizeSecrets } from "./sanitize.js";
 import type { AuditRecord } from "./types.js";
 
 function digest(value: unknown): string {
@@ -27,7 +28,7 @@ export class AuditChain {
         timestamp: new Date().toISOString(),
         runId: this.runId,
         type,
-        data,
+        data: sanitizeSecrets(data),
         previousHash: this.previousHash,
       };
       result = { ...unsigned, hash: digest(unsigned) };

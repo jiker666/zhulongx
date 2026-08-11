@@ -162,7 +162,12 @@ async function programAvailable(program: string): Promise<boolean> {
   return false;
 }
 
-async function executeCommand(input: SandboxExecRequest, options: SandboxServerOptions): Promise<SandboxExecResult> {
+async function executeCommand(
+  input: SandboxExecRequest,
+  options: SandboxServerOptions,
+  signal?: AbortSignal,
+): Promise<SandboxExecResult> {
+  signal?.throwIfAborted();
   const program = basename(input.program);
   if (!options.allowedPrograms.includes(program)) throw new Error(`Program is outside the sandbox allowlist: ${program}`);
   const scratchRoot = input.namespace
@@ -202,6 +207,29 @@ async function executeCommand(input: SandboxExecRequest, options: SandboxServerO
     let outputBytes = 0;
     let truncated = false;
     let timedOut = false;
+    let closed = false;
+    let settled = false;
+    let termTimer: NodeJS.Timeout | undefined;
+    let killTimer: NodeJS.Timeout | undefined;
+
+    const cleanup = () => {
+      if (termTimer) clearTimeout(termTimer);
+      if (killTimer) clearTimeout(killTimer);
+      signal?.removeEventListener("abort", abortCommand);
+    };
+
+    const terminate = () => {
+      if (closed) return;
+      child.kill("SIGTERM");
+      killTimer ??= setTimeout(() => {
+        if (!closed) child.kill("SIGKILL");
+      }, 500);
+      killTimer.unref();
+    };
+
+    const abortCommand = () => terminate();
+    signal?.addEventListener("abort", abortCommand, { once: true });
+    if (signal?.aborted) abortCommand();
 
     const collect = (target: Buffer[], chunk: Buffer) => {
       const remaining = maxOutputBytes - outputBytes;
@@ -216,21 +244,26 @@ async function executeCommand(input: SandboxExecRequest, options: SandboxServerO
 
     child.stdout.on("data", (chunk: Buffer) => collect(stdout, chunk));
     child.stderr.on("data", (chunk: Buffer) => collect(stderr, chunk));
-    child.once("error", reject);
+    child.once("error", (error) => {
+      cleanup();
+      if (settled) return;
+      settled = true;
+      reject(error);
+    });
 
     if (stdin) child.stdin.end(stdin);
     else child.stdin.end();
 
-    const termTimer = setTimeout(() => {
+    termTimer = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGTERM");
-      setTimeout(() => {
-        if (!child.killed) child.kill("SIGKILL");
-      }, 500).unref();
+      terminate();
     }, timeoutMs);
 
     child.once("close", (exitCode, signal) => {
-      clearTimeout(termTimer);
+      closed = true;
+      cleanup();
+      if (settled) return;
+      settled = true;
       const stdoutBuffer = Buffer.concat(stdout);
       const stderrBuffer = Buffer.concat(stderr);
       resolveCommand({
@@ -280,7 +313,17 @@ export async function startSandboxServer(options: SandboxServerOptions): Promise
       }
       if (request.method === "POST" && url.pathname === "/v1/exec") {
         const input = validateExecInput(await bodyJson(request));
-        json(response, 200, await executeCommand(input, options));
+        const abortController = new AbortController();
+        const abortCommand = () => {
+          if (!response.writableEnded) abortController.abort(new Error("Sandbox client disconnected"));
+        };
+        response.once("close", abortCommand);
+        try {
+          const result = await executeCommand(input, options, abortController.signal);
+          if (!response.destroyed) json(response, 200, result);
+        } finally {
+          response.off("close", abortCommand);
+        }
         return;
       }
       json(response, 404, { error: "not found" });

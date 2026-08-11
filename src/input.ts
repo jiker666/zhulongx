@@ -36,6 +36,20 @@ const TEXT_EXTENSIONS = new Set([
   ".yml",
 ]);
 
+function imageMimeType(bytes: Buffer): string | undefined {
+  if (bytes.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]))) return "image/jpeg";
+  if (bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    return "image/png";
+  }
+  if (bytes.subarray(0, 6).toString("ascii") === "GIF87a" || bytes.subarray(0, 6).toString("ascii") === "GIF89a") {
+    return "image/gif";
+  }
+  if (bytes.subarray(0, 4).toString("ascii") === "RIFF" && bytes.subarray(8, 12).toString("ascii") === "WEBP") {
+    return "image/webp";
+  }
+  return undefined;
+}
+
 function isSafeArchivePath(path: string): boolean {
   return !path.startsWith("/") && !path.startsWith("\\") && !path.split(/[\\/]/).includes("..");
 }
@@ -169,7 +183,7 @@ async function normalizeAttachment(source: string): Promise<NormalizedAttachment
   if (stats.size > MAX_ATTACHMENT_BYTES) throw new Error(`Attachment exceeds ${MAX_ATTACHMENT_BYTES} bytes: ${source}`);
   const extension = extname(path).toLowerCase();
   const sha256 = await sha256File(path);
-  const magic = await readPrefix(path, 4);
+  const magic = await readPrefix(path, 12);
   const zipMagic =
     magic.length >= 4 &&
     magic[0] === 0x50 &&
@@ -189,6 +203,17 @@ async function normalizeAttachment(source: string): Promise<NormalizedAttachment
       content: archive.previews.join("\n\n").slice(0, MAX_PREVIEW_BYTES),
       entries: archive.entries,
       truncated: archive.truncated || archive.previews.join("").length >= MAX_PREVIEW_BYTES,
+    };
+  }
+  const imageMime = imageMimeType(magic);
+  if (imageMime) {
+    return {
+      source: path,
+      kind: "image",
+      size: stats.size,
+      sha256,
+      summary: `Image file (${imageMime}, ${stats.size} bytes); observe it with the bounded image tool`,
+      truncated: false,
     };
   }
   if (TEXT_EXTENSIONS.has(extension) || stats.size === 0) {
@@ -232,6 +257,7 @@ export function renderTaskContext(task: NormalizedTask): string {
       `kind=${attachment.kind} size=${attachment.size} sha256=${attachment.sha256 ?? "n/a"}`,
       attachment.summary,
       attachment.entries?.length ? `entries:\n${attachment.entries.join("\n")}` : "",
+      attachment.toolPath ? `toolPath=${attachment.toolPath.source}:${attachment.toolPath.path}` : "",
       attachment.content ? `preview:\n${attachment.content}` : "",
       attachment.truncated ? "[preview truncated]" : "",
     ].filter(Boolean);

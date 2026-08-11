@@ -35,4 +35,15 @@ describe("task input normalization", () => {
     const task = await normalizeTask({ task: "识别附件", attachments: [disguised] });
     expect(task.attachments[0]?.kind).toBe("binary");
   });
+
+  it("classifies image attachments by magic and exposes a bounded observation hint", async () => {
+    const root = await mkdtemp(join(tmpdir(), "xuan-input-image-"));
+    roots.push(root);
+    const image = join(root, "clue.jpg");
+    await writeFile(image, Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]));
+    const task = await normalizeTask({ task: "观察图片", attachments: [image] });
+    expect(task.attachments[0]?.kind).toBe("image");
+    expect(task.attachments[0]?.summary).toContain("image/jpeg");
+    expect(renderTaskContext(task)).toContain("observe it with the bounded image tool");
+  });
 });

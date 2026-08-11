@@ -94,7 +94,10 @@ export class ExperienceStore {
       return { record, score: categoryMatch + mention };
     });
     ranked.sort((left, right) => right.score - left.score || right.record.promotedAt.localeCompare(left.record.promotedAt));
-    return ranked.slice(0, Math.max(0, Math.min(limit, 12))).map((item) => item.record);
+    return ranked
+      .filter((item) => item.score > 0)
+      .slice(0, Math.max(0, Math.min(limit, 12)))
+      .map((item) => item.record);
   }
 
   async promoteArenaSuccess(state: RunState): Promise<ExperienceRecord[]> {

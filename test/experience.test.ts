@@ -39,10 +39,12 @@ describe("validated experience store", () => {
       strategyRevisionRequired: false,
       sandboxNamespace: "11111111-1111-4111-8111-111111111111",
       scratchRoot: join(root, "scratch"),
+      workspaceMode: "configured",
       appliedExperienceIds: [],
       submission: "NSSCTF{secret-value}",
       turns: 1,
       toolCalls: 1,
+      imageObservations: 0,
       httpRequests: 0,
       tcpSessions: 0,
       actionsSinceCheckpoint: 0,
@@ -55,6 +57,7 @@ describe("validated experience store", () => {
     expect(promoted?.strategy.join(" ")).not.toContain("0x401229");
     expect(promoted?.tools).toEqual(["objdump", "python3"]);
     expect(renderExperienceContext(await store.relevant("Pwn"))).toContain("externally accepted");
+    expect(await store.relevant("Crypto")).toEqual([]);
 
     await store.update(promoted!.id, { status: "disabled", reviewNote: "Needs correction" });
     expect(await store.relevant("Pwn")).toEqual([]);

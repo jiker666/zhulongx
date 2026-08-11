@@ -3,6 +3,7 @@ import { chmod, copyFile, mkdir, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import {
   ArenaClient,
+  arenaCategoryAllowed,
   arenaAttemptToTask,
   arenaSubmissionCorrect,
   extractArenaAnnexes,
@@ -20,7 +21,7 @@ import type { AppConfig, RunEvent, RunState } from "./types.js";
 const MAX_ANNEX_BYTES = 100 * 1024 * 1024;
 const CONTAINER_READY_WAIT_MS = 15000;
 
-export type ArenaOutcome = "solved" | "wrong" | "abandoned" | "dry-run" | "infrastructure-error";
+export type ArenaOutcome = "solved" | "wrong" | "blocked" | "abandoned" | "skipped" | "dry-run" | "infrastructure-error";
 
 export interface ArenaAttemptEvaluation {
   attemptId: number;
@@ -62,7 +63,7 @@ export interface ArenaEvaluationReport {
   startedAt: string;
   finishedAt: string;
   model: { provider: string; id: string; name: string };
-  targetAttempts: number;
+  targetAttempts: number | null;
   evaluatedAttempts: number;
   correct: number;
   incorrect: number;
@@ -83,6 +84,8 @@ export interface SolveArenaOptions {
   previousRejectedCandidates?: string[];
   preparedAttachments?: string[];
   modelRetryCount?: number;
+  attemptData?: ArenaNextData;
+  signal?: AbortSignal;
 }
 
 function requireAttempt(data: ArenaNextData): ArenaAttempt {
@@ -90,14 +93,39 @@ function requireAttempt(data: ArenaNextData): ArenaAttempt {
   return data.attempt;
 }
 
-async function waitForContainerMetadata(client: ArenaClient, data: ArenaNextData): Promise<ArenaNextData> {
+async function abortableDelay(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) throw signal.reason ?? new Error("Arena solve stopped by operator");
+  await new Promise<void>((resolveWait, rejectWait) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolveWait();
+    }, milliseconds);
+    const onAbort = () => {
+      clearTimeout(timer);
+      rejectWait(signal?.reason ?? new Error("Arena solve stopped by operator"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+export function isRetryableModelFailure(reason: string | undefined): boolean {
+  return /(?:connection\s+error|fetch\s+failed|socket\s+hang\s*up|econn(?:reset|refused)|etimedout|network\s+error|gateway\s+timeout)/i.test(
+    reason ?? "",
+  );
+}
+
+async function waitForContainerMetadata(
+  client: ArenaClient,
+  data: ArenaNextData,
+  signal?: AbortSignal,
+): Promise<ArenaNextData> {
   let latest = data;
   let attempt = requireAttempt(latest);
   if (!attempt.problem?.container_enabled || (attempt.problem.container?.url?.length ?? 0) > 0) return latest;
   const deadline = Date.now() + CONTAINER_READY_WAIT_MS;
   while (Date.now() < deadline) {
-    await new Promise<void>((resolveWait) => setTimeout(resolveWait, 2000));
-    const refreshed = await client.attempt(attempt.id);
+    await abortableDelay(2000, signal);
+    const refreshed = await client.attempt(attempt.id, signal);
     if (refreshed.attempt?.id === attempt.id) {
       const merged: ArenaNextData = { ...latest, ...refreshed };
       if (latest.reused !== undefined) merged.reused = latest.reused;
@@ -120,6 +148,7 @@ export async function downloadArenaAttachments(
   client: ArenaClient,
   attempt: ArenaAttempt,
   runId = randomUUID(),
+  signal?: AbortSignal,
 ): Promise<string[]> {
   const annexes = extractArenaAnnexes(attempt);
   if (annexes.length === 0) return [];
@@ -130,7 +159,8 @@ export async function downloadArenaAttachments(
     if (annex.size !== undefined && annex.size > MAX_ANNEX_BYTES) {
       throw new Error(`Arena annex ${index + 1} exceeds the ${MAX_ANNEX_BYTES}-byte download limit`);
     }
-    const bytes = await client.downloadAnnex(annex.url, config.scope, MAX_ANNEX_BYTES);
+    if (signal?.aborted) throw signal.reason ?? new Error("Arena solve stopped by operator");
+    const bytes = await client.downloadAnnex(annex.url, config.scope, MAX_ANNEX_BYTES, signal);
     const target = join(directory, `${String(index + 1).padStart(2, "0")}-${safeAnnexName(annex.name, index)}`);
     await writeFile(target, bytes, { flag: "wx" });
     await chmod(target, 0o444);
@@ -140,12 +170,18 @@ export async function downloadArenaAttachments(
   return paths;
 }
 
-async function copyArenaAttachments(config: AppConfig, sources: string[], runId: string): Promise<string[]> {
+async function copyArenaAttachments(
+  config: AppConfig,
+  sources: string[],
+  runId: string,
+  signal?: AbortSignal,
+): Promise<string[]> {
   if (sources.length === 0) return [];
   const directory = join(config.runtime.scratchRoot, "runs", runId, "inputs");
   await mkdir(directory, { recursive: true });
   const paths: string[] = [];
   for (const [index, source] of sources.entries()) {
+    if (signal?.aborted) throw signal.reason ?? new Error("Arena solve stopped by operator");
     const target = join(directory, `${String(index + 1).padStart(2, "0")}-${safeAnnexName(basename(source), index)}`);
     await copyFile(source, target);
     await chmod(target, 0o444);
@@ -194,23 +230,73 @@ function baseEvaluation(
   };
 }
 
+function skippedRunState(attempt: ArenaAttempt, reason: string): RunState {
+  const now = new Date().toISOString();
+  const task = arenaAttemptToTask(attempt);
+  return {
+    id: `arena-skip-${randomUUID()}`,
+    status: "blocked",
+    phase: "done",
+    task: {
+      task: task.task,
+      attachments: [],
+      metadata: task.metadata ?? {},
+    },
+    createdAt: now,
+    updatedAt: now,
+    finishedAt: now,
+    findings: [],
+    lessons: [],
+    hypotheses: [],
+    strategyRevisions: [],
+    strategyRevisionRequired: false,
+    sandboxNamespace: "category-filter",
+    scratchRoot: "",
+    workspaceMode: "attachments-only",
+    appliedExperienceIds: [],
+    stopReason: reason,
+    turns: 0,
+    toolCalls: 0,
+    imageObservations: 0,
+    httpRequests: 0,
+    tcpSessions: 0,
+    actionsSinceCheckpoint: 0,
+    repeatedActions: {},
+  };
+}
+
 export async function solveArenaOnce(
   config: AppConfig,
   client: ArenaClient,
   options: SolveArenaOptions,
 ): Promise<ArenaSolveResult> {
-  const data = await waitForContainerMetadata(client, await client.next());
-  const attempt = requireAttempt(data);
-  if (options.seenAttemptIds?.has(attempt.id)) {
-    throw new Error(`Arena attempt ${attempt.id} was reused after it had already been settled`);
+  const initialData = options.attemptData ?? (await client.next(options.signal));
+  const initialAttempt = requireAttempt(initialData);
+  if (options.seenAttemptIds?.has(initialAttempt.id)) {
+    throw new Error(`Arena attempt ${initialAttempt.id} was reused after it had already been settled`);
   }
+  const initialCategory = String(initialAttempt.problem?.type_label ?? initialAttempt.problem?.type ?? "unknown");
+  if (!arenaCategoryAllowed(config.arena, initialCategory)) {
+    const reason = `Category ${initialCategory} is outside the configured Arena allowlist; the active attempt was left open to avoid an early-abandon cooldown`;
+    const state = skippedRunState(initialAttempt, reason);
+    const evaluation = baseEvaluation(initialData, state, 0, 0);
+    evaluation.outcome = "skipped";
+    evaluation.settled = false;
+    evaluation.runCount = 0;
+    evaluation.reason = reason;
+    const platform = platformSummary(initialAttempt);
+    if (platform) evaluation.platform = platform;
+    return { attemptId: initialAttempt.id, state, evaluation };
+  }
+  const data = await waitForContainerMetadata(client, initialData, options.signal);
+  const attempt = requireAttempt(data);
 
   const previousRejectedCandidates = options.previousRejectedCandidates ?? [];
   const maxSubmissionAttempts = options.maxSubmissionAttempts ?? 3;
   const runId = randomUUID();
   const attachments = options.preparedAttachments
-    ? await copyArenaAttachments(config, options.preparedAttachments, runId)
-    : await downloadArenaAttachments(config, client, attempt, runId);
+    ? await copyArenaAttachments(config, options.preparedAttachments, runId, options.signal)
+    : await downloadArenaAttachments(config, client, attempt, runId, options.signal);
   const taskRequest = arenaAttemptToTask(attempt);
   if (previousRejectedCandidates.length > 0) {
     taskRequest.task += [
@@ -226,7 +312,11 @@ export async function solveArenaOnce(
   const challengeScope = scopeForArenaAttempt(config, attempt);
   if (challengeScope) taskRequest.scope = challengeScope;
   const runtime = new XuanShuRuntime(config, options.onEvent ? { onEvent: options.onEvent } : {});
-  const state = await runtime.run(taskRequest, { id: runId });
+  const state = await runtime.run(taskRequest, {
+    id: runId,
+    workspaceMode: "attachments-only",
+    ...(options.signal ? { signal: options.signal } : {}),
+  });
   const evaluation = baseEvaluation(data, state, attachments.length, previousRejectedCandidates.length);
   const flag = extractFlagCandidate(state);
 
@@ -239,14 +329,16 @@ export async function solveArenaOnce(
   if (state.status === "failed") {
     const rateLimited = /(?:\b429\b|too\s*many\s*requests|rate\s*limit)/i.test(state.stopReason ?? "");
     const modelRetryCount = options.modelRetryCount ?? 0;
-    if (rateLimited && modelRetryCount < 2) {
+    const retryableConnection = isRetryableModelFailure(state.stopReason);
+    if ((rateLimited || retryableConnection) && modelRetryCount < 2) {
       const { seenAttemptIds: _seenAttemptIds, ...retryOptions } = options;
-      const waitMs = 60000 * (modelRetryCount + 1);
-      await new Promise<void>((resolveWait) => setTimeout(resolveWait, waitMs));
+      const waitMs = rateLimited ? 60000 * (modelRetryCount + 1) : 5000 * (modelRetryCount + 1);
+      await abortableDelay(waitMs, options.signal);
       return await solveArenaOnce(config, client, {
         ...retryOptions,
         modelRetryCount: modelRetryCount + 1,
         preparedAttachments: attachments,
+        attemptData: data,
       });
     }
     evaluation.reason = state.stopReason ?? "The runtime failed before producing an evaluable answer";
@@ -264,19 +356,18 @@ export async function solveArenaOnce(
   }
 
   if (state.status !== "completed" || !flag) {
-    const abandoned = await client.abandon(attempt.id);
-    evaluation.outcome = "abandoned";
-    evaluation.settled = true;
-    evaluation.correct = false;
-    const platform = platformSummary(abandoned.attempt);
+    evaluation.outcome = "blocked";
+    evaluation.settled = false;
+    delete evaluation.correct;
+    const platform = platformSummary(attempt);
     if (platform) evaluation.platform = platform;
     evaluation.reason = !flag
-      ? "No explicit FLAG line was produced; the attempt was automatically abandoned"
-      : `Run status ${state.status} is not completed; the attempt was automatically abandoned`;
+      ? "No explicit FLAG line was produced; the active attempt was left open for retry"
+      : `Run status ${state.status} is not completed; the active attempt was left open for retry`;
     return { attemptId: attempt.id, state, evaluation };
   }
 
-  const submitted = await client.submit(attempt.id, flag);
+  const submitted = await client.submit(attempt.id, flag, options.signal);
   const correct = arenaSubmissionCorrect(submitted);
   if (correct === true) {
     evaluation.outcome = "solved";
@@ -300,23 +391,22 @@ export async function solveArenaOnce(
     });
   }
 
-  const abandoned = await client.abandon(attempt.id);
   evaluation.outcome = "wrong";
-  evaluation.settled = true;
+  evaluation.settled = false;
   evaluation.correct = false;
   evaluation.submissionAttempts = previousRejectedCandidates.length + 1;
-  const platform = platformSummary(abandoned.attempt ?? submitted.attempt);
+  const platform = platformSummary(submitted.attempt);
   if (platform) evaluation.platform = platform;
   evaluation.reason =
     correct === false
-      ? "The submitted flag was rejected; the attempt was automatically abandoned so evaluation can continue"
-      : "The platform did not return a solved verdict; the attempt was automatically abandoned";
+      ? "The submitted flag was rejected; the active attempt was left open for operator review"
+      : "The platform did not return a solved verdict; the active attempt was left open for operator review";
   return { attemptId: attempt.id, state, evaluation };
 }
 
 export function buildArenaEvaluationReport(input: {
   startedAt: string;
-  targetAttempts: number;
+  targetAttempts: number | null;
   config: AppConfig;
   attempts: ArenaAttemptEvaluation[];
   startAgent?: ArenaAgent;
@@ -341,7 +431,7 @@ export function buildArenaEvaluationReport(input: {
     incorrect,
     accuracy,
     accuracyPercent: accuracy === null ? null : Number((accuracy * 100).toFixed(2)),
-    completed: settled.length >= input.targetAttempts,
+    completed: input.targetAttempts !== null && settled.length >= input.targetAttempts,
     ...(input.startAgent === undefined ? {} : { startAgent: input.startAgent }),
     ...(input.endAgent === undefined ? {} : { endAgent: input.endAgent }),
     ...(input.infrastructureError === undefined ? {} : { infrastructureError: input.infrastructureError }),

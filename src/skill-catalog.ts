@@ -75,6 +75,7 @@ const SKILLS: Record<CtfSkillCategory, CuratedCtfSkill> = {
       "elliptic-curve and signature nonce analysis",
       "PRNG state and seed recovery",
       "lattice, LWE, and hidden-number methods",
+      "finite-field, CRC, and constraint-system analysis",
       "oracle, side-channel, and protocol verification",
     ],
     pivotSignals: [
@@ -146,10 +147,10 @@ const SKILLS: Record<CtfSkillCategory, CuratedCtfSkill> = {
     description: "Cross-category puzzles whose main invariant is encoding, constraints, a jail, a game, or an unusual medium.",
     techniqueFamilies: [
       "encoding and reversible transform chains",
-      "Python and shell language constraints",
+      "pickle, Python, and shell language constraints",
       "symbolic and constraint solving",
       "game, VM, and state-machine modeling",
-      "radio, SDR, audio, and QR workflows",
+      "radio, SDR, audio, OCR, barcode, and image workflows",
       "Unicode and esoteric language behavior",
       "hybrid evidence-driven category pivots",
     ],

@@ -1,17 +1,20 @@
 import { createServer, type RequestListener, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ArenaClient,
   arenaAttemptToTask,
   arenaSubmissionCorrect,
   extractArenaAnnexes,
   extractFlagCandidate,
+  arenaCategoryAllowed,
+  normalizeArenaCategory,
   scopeForArenaAttempt,
   type ArenaAttempt,
 } from "../src/arena.js";
 import type { RunState } from "../src/types.js";
-import { buildArenaEvaluationReport } from "../src/arena-evaluation.js";
+import { buildArenaEvaluationReport, isRetryableModelFailure } from "../src/arena-evaluation.js";
+import { solveArenaOnce } from "../src/arena-evaluation.js";
 import { testConfig } from "./helpers.js";
 
 const servers: Server[] = [];
@@ -38,6 +41,29 @@ async function listen(handler: RequestListener): Promise<string> {
 }
 
 describe("NSSCTF Arena integration", () => {
+  it("normalizes operator category aliases and keeps an empty allowlist unrestricted", () => {
+    expect(normalizeArenaCategory("密码学")).toBe("crypto");
+    expect(normalizeArenaCategory("Miscellaneous")).toBe("misc");
+    expect(arenaCategoryAllowed(undefined, "Web")).toBe(true);
+    expect(arenaCategoryAllowed({ enabled: true, baseUrl: "https://arena.invalid", tokenEnv: "TOKEN", timeoutMs: 1, maxResponseBytes: 1, allowedCategories: ["crypto", "misc"] }, "Crypto")).toBe(true);
+    expect(arenaCategoryAllowed({ enabled: true, baseUrl: "https://arena.invalid", tokenEnv: "TOKEN", timeoutMs: 1, maxResponseBytes: 1, allowedCategories: ["crypto", "misc"] }, "Web")).toBe(false);
+  });
+
+  it("leaves an out-of-scope Arena category active instead of triggering an early-abandon cooldown", async () => {
+    const config = testConfig("/tmp/xuan-arena");
+    config.arena!.allowedCategories = ["crypto", "misc"];
+    const client = {
+      next: vi.fn(async () => ({ attempt: { id: 21, problem: { type_label: "Web", annex: { url: "https://arena.invalid/file" } } } })),
+      abandon: vi.fn(async () => ({ attempt: { id: 21, state_label: "abandoned" } })),
+    } as unknown as ArenaClient;
+
+    const result = await solveArenaOnce(config, client, { autoSubmit: true });
+    expect(result.evaluation).toMatchObject({ outcome: "skipped", settled: false, category: "Web", runCount: 0 });
+    expect(result.state.status).toBe("blocked");
+    expect(result.evaluation.reason).toContain("left open");
+    expect(client.abandon).not.toHaveBeenCalled();
+  });
+
   it("uses the configured token env and Arena API policy prefix", async () => {
     process.env.XUANSHU_TEST_ARENA_TOKEN = "nss_agent_test";
     const baseUrl = await listen((request, response) => {
@@ -54,6 +80,40 @@ describe("NSSCTF Arena integration", () => {
     await expect(
       new ArenaClient({ ...config.arena!, baseUrl }).request("GET", "/api/not-arena/"),
     ).rejects.toThrow("allowed API prefix");
+  });
+
+  it("bounds Arena responses that never finish streaming", async () => {
+    process.env.XUANSHU_TEST_ARENA_TOKEN = "nss_agent_test";
+    const baseUrl = await listen((_request, response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.write('{"code":200,"data":{"attempt":');
+    });
+    const config = testConfig("/tmp/xuan-arena");
+    config.arena!.baseUrl = baseUrl;
+    config.arena!.timeoutMs = 20;
+    const jobController = new AbortController();
+
+    await expect(new ArenaClient(config.arena).next(jobController.signal)).rejects.toThrow(/timed out/i);
+    expect(jobController.signal.aborted).toBe(false);
+  });
+
+  it("surfaces a platform cooldown instead of sleeping until its retry time", async () => {
+    process.env.XUANSHU_TEST_ARENA_TOKEN = "nss_agent_test";
+    const retryAt = Date.now() + 7 * 24 * 60 * 60 * 1000;
+    const baseUrl = await listen((_request, response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({
+        code: 429,
+        message: "arena cooldown",
+        data: { reason: "early_abandon", retry_after_seconds: 604800, retry_at: retryAt },
+      }));
+    });
+    const config = testConfig("/tmp/xuan-arena");
+    config.arena!.baseUrl = baseUrl;
+
+    await expect(new ArenaClient(config.arena).next()).rejects.toThrow(
+      `Arena API rate limited: arena cooldown; retry at ${new Date(retryAt).toISOString()}`,
+    );
   });
 
   it("builds a task without leaking tokens and extracts only explicit FLAG lines", () => {
@@ -197,5 +257,20 @@ describe("NSSCTF Arena integration", () => {
       accuracyPercent: 50,
       completed: true,
     });
+
+    const continuous = buildArenaEvaluationReport({
+      startedAt: "2026-08-04T00:00:00.000Z",
+      targetAttempts: null,
+      config,
+      attempts: [report.attempts[0]!],
+    });
+    expect(continuous).toMatchObject({ targetAttempts: null, evaluatedAttempts: 1, completed: false });
+  });
+
+  it("classifies transient model gateway failures for bounded Arena retry", () => {
+    expect(isRetryableModelFailure("Connection error.")).toBe(true);
+    expect(isRetryableModelFailure("fetch failed: ECONNRESET")).toBe(true);
+    expect(isRetryableModelFailure("Missing model credential")).toBe(false);
+    expect(isRetryableModelFailure("Tool-call budget exhausted")).toBe(false);
   });
 });

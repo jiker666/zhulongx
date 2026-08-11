@@ -8,9 +8,14 @@ allowedHosts:
   - lab.example.invalid
   - "*.sandbox.invalid:*"
 allowedPrograms:
+  - ecm
   - file
+  - gp
   - jq
+  - pickora
   - python3
   - rg
+  - sox
   - strings
   - xxd
+  - z3

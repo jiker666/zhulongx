@@ -16,10 +16,17 @@ runtime:
   maxTurns: 30
   maxToolCalls: 80
   maxRuntimeMs: 900000
+  # Effective budget leaves 20% headroom under a 60 RPM / 600K TPM provider quota.
+  modelMinIntervalMs: 7500
+  modelRequestsPerMinute: 48
+  modelTokensPerMinute: 480000
   maxActionsWithoutCheckpoint: 4
   maxRepeatedAction: 2
   maxOutputBytes: 65536
+  maxImageBytes: 5242880
+  maxImageObservations: 8
   maxScratchFileBytes: 1048576
+  finalizationReserveMs: 90000
   commandTimeoutMs: 30000
   httpTimeoutMs: 15000
   maxHttpRequests: 40
@@ -36,28 +43,48 @@ scope:
   allowedPrograms:
     - 7z
     - apktool
+    - base32
     - base64
+    - bc
     - binwalk
     - bzip2
     - checksec
+    - convert
+    - dcfldd
+    - ecm
     - exiftool
+    - factor
     - ffmpeg
+    - ffprobe
     - file
     - find
     - fls
     - flask-unsign
     - foremost
+    - fsstat
+    - g++
+    - gcc
     - gdb
+    - gifsicle
+    - gp
     - gzip
     - hashcat
     - icat
+    - identify
     - java
     - john
     - jq
+    - make
+    - minimodem
     - mmls
+    - multimon-ng
     - nm
     - objdump
     - one_gadget
+    - outguess
+    - openssl
+    - pickora
+    - pngcheck
     - python3
     - qemu-aarch64
     - qemu-arm
@@ -68,18 +95,35 @@ scope:
     - rg
     - ropper
     - ROPgadget
+    - RsaCtfTool
+    - r2
+    - sage
     - seccomp-tools
+    - sox
+    - soxi
     - sqlite3
+    - steghide
+    - stegseek
+    - stegsnow
     - strings
     - strace
     - tar
+    - tesseract
     - testdisk
     - tshark
+    - tsk_recover
     - unzip
+    - vol
+    - xfs_db
+    - xfs_repair
     - xxd
     - xz
+    - z3
     - zbarimg
+    - zip
     - zsteg
+    - cado-nfs
+    - flatter
     - zstd
 
 server:
@@ -93,3 +137,16 @@ arena:
   tokenEnv: NSSCTF_AGENT_TOKEN
   timeoutMs: 15000
   maxResponseBytes: 262144
+  allowedCategories:
+    - crypto
+    - misc
+  maxCategorySkips: 10
+
+questionBank:
+  enabled: true
+  # Set XUANSHU_QUESTION_BANK_ROOT to the local CyBench checkout.
+  rootEnv: XUANSHU_QUESTION_BANK_ROOT
+  listFiles:
+    - task_list_crypto.txt
+    - task_list_misc.txt
+  maxQuestions: 20

@@ -16,6 +16,9 @@ const PLAYBOOKS: Record<CtfSkillCategory, string[]> = {
   crypto: [
     "Transcribe all givens with exact encodings, integer widths, endianness, modulus domains, and known/unknown relationships before selecting an attack.",
     "Classify the weakness by invariant (reuse, smallness, closeness, biased randomness, algebraic relation, oracle, or implementation leak), not by challenge title.",
+    "For RSA, run low-cost triage first: GCD across moduli and ciphertext relations, low-exponent and exact-root checks, Wiener's attack, common-modulus or related-message checks, Fermat for close primes, and Pollard p-1 for smooth factors.",
+    "When RSA still requires general integer factorization, use the allowlisted ecm program with explicit bounded curve stages. A Python or symbolic factorization timeout alone is not evidence that the instance is unsolvable.",
+    "For lattice, finite-field, CRC, or constraint work, verify the negotiated capability once, then prefer fpylll, GP, Z3, or OR-Tools over an untested handwritten solver. Keep dimensions, bounds, and coefficient ordering explicit.",
     "Build a minimal solver with assertions. Re-encrypt, re-hash, or substitute recovered values back into every original equation before accepting plaintext.",
     "Distinguish an encoded display value from the underlying secret and infer any wrapper only from direct evidence; never submit a re-encoding merely because it looks flag-like.",
   ],
@@ -40,7 +43,8 @@ const PLAYBOOKS: Record<CtfSkillCategory, string[]> = {
   misc: [
     "Inventory alphabets, delimiters, entropy, lengths, checksums, file signatures, and constraints before chaining decoders.",
     "Represent each transform as a reversible step and assert the output shape at every stage; pivot when a layer violates expected invariants.",
-    "For jails and constraint problems, model the allowed grammar/state precisely and search for the smallest rule-level escape rather than spraying payloads.",
+    "For pickle and language jails, disassemble or model the accepted grammar and opcode/state transition first; use pickora only to assemble an evidence-supported minimal payload rather than spraying variants.",
+    "For media and steganography, record format metadata first, then use the available image, OCR, audio, modem, barcode, or stego tool to create one bounded derivative in scratch and inspect that derivative directly.",
     "Verify the final value against the original prompt, wrapper semantics, and an independent round trip.",
   ],
   osint: [

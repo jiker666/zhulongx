@@ -28,6 +28,7 @@
     "sandbox": "tsx src/cli.ts sandbox",
     "sandbox-health": "tsx src/cli.ts sandbox-health",
     "serve": "tsx src/cli.ts serve",
+    "nss": "tsx src/cli.ts serve --config config/nss-wanqing.yaml",
     "start": "node dist/cli.js",
     "test": "vitest run",
     "test:watch": "vitest",

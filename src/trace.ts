@@ -8,6 +8,8 @@ import type { AuditRecord, RunReview, RunState } from "./types.js";
 const SAFE_RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export type TraceKind =
+  | "turn"
+  | "decision"
   | "plan"
   | "action"
   | "observation"
@@ -60,9 +62,48 @@ function scrubReviewText(value: string, maxLength: number): string {
     .trim();
 }
 
+function publicDecisionNote(value: unknown): string | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const content = (value as { content?: unknown }).content;
+  if (!Array.isArray(content)) return undefined;
+  const text = content
+    .flatMap((block) => {
+      if (!block || typeof block !== "object") return [];
+      const item = block as { type?: unknown; text?: unknown };
+      return item.type === "text" && typeof item.text === "string" ? [item.text] : [];
+    })
+    .join("\n")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text ? scrubReviewText(text, 1200) : undefined;
+}
+
 function traceEvent(record: AuditRecord): DecisionTraceEvent | undefined {
   const data = truncate(record.data);
   const raw = record.data && typeof record.data === "object" ? (record.data as Record<string, unknown>) : {};
+  if (record.type === "turn.started") {
+    const turn = Number(raw.turn);
+    return {
+      sequence: record.sequence,
+      timestamp: record.timestamp,
+      kind: "turn",
+      title: Number.isInteger(turn) && turn > 0 ? `第 ${turn} 轮 LLM` : "LLM 新一轮",
+      summary: "开始评估现有证据并选择下一步动作",
+      data: { turn: Number.isInteger(turn) && turn > 0 ? turn : undefined },
+    };
+  }
+  if (record.type === "assistant.message") {
+    const note = publicDecisionNote(record.data);
+    if (!note) return undefined;
+    return {
+      sequence: record.sequence,
+      timestamp: record.timestamp,
+      kind: "decision",
+      title: "本轮判断",
+      summary: note.slice(0, 360),
+      data: { text: note },
+    };
+  }
   if (record.type === "plan.submitted") {
     return { sequence: record.sequence, timestamp: record.timestamp, kind: "plan", title: "执行计划", summary: summaryOf(raw, "已提交执行计划"), data };
   }
@@ -194,7 +235,9 @@ export async function loadDecisionTrace(artifactRoot: string, runId: string): Pr
     strategyRevisionRequired: loadedState.strategyRevisionRequired ?? false,
     sandboxNamespace: loadedState.sandboxNamespace ?? loadedState.id,
     scratchRoot: loadedState.scratchRoot ?? "legacy shared scratch",
+    workspaceMode: loadedState.workspaceMode ?? "configured",
     appliedExperienceIds: loadedState.appliedExperienceIds ?? [],
+    imageObservations: loadedState.imageObservations ?? 0,
   };
   return { state, integrity, timeline: records.map(traceEvent).filter((item): item is DecisionTraceEvent => Boolean(item)), reviews };
 }

@@ -3,9 +3,14 @@ pycryptodome==3.23.0
 z3-solver==4.15.4.0
 sympy==1.14.0
 gmpy2==2.2.1
+cysignals==1.12.5
 fpylll==0.6.4
 py_ecc==8.0.0
 hashpumpy==1.2
+mmh3==5.2.1
+ortools==9.15.6755
+pickora==1.0.1
+tqdm==4.70.0
 pwntools==4.15.0
 ROPGadget==7.7
 ropper==1.13.13

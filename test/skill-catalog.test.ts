@@ -32,6 +32,11 @@ describe("curated CTF skill catalog", () => {
     expect(resolveCtfSkillCategory("AI / Machine Learning")).toBe("ai/ml");
     expect(resolveCtfSkillCategory("unknown")).toBeUndefined();
 
+    expect(listCuratedCtfSkills().find((skill) => skill.category === "crypto")?.techniqueFamilies)
+      .toContain("finite-field, CRC, and constraint-system analysis");
+    expect(listCuratedCtfSkills().find((skill) => skill.category === "misc")?.techniqueFamilies)
+      .toContain("pickle, Python, and shell language constraints");
+
     for (const skill of listCuratedCtfSkills()) {
       const rendered = renderCuratedCtfSkill(skill.category);
       expect(rendered.length).toBeLessThan(2400);

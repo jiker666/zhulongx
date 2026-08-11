@@ -17,6 +17,11 @@ describe("model configuration", () => {
     });
     expect(config.model).not.toHaveProperty("apiKey");
     expect(JSON.stringify(config.model)).not.toContain("Bearer ");
+    expect(config.runtime).toMatchObject({
+      modelMinIntervalMs: 7_500,
+      modelRequestsPerMinute: 48,
+      modelTokensPerMinute: 480_000,
+    });
   });
 
   it("loads the dedicated Arena configuration without embedding credentials", async () => {
@@ -32,9 +37,77 @@ describe("model configuration", () => {
       apiKeyEnv: "OPENAI_API_KEY",
     });
     expect(config.scope.mode).toBe("controlled");
+    expect(config.arena).toMatchObject({ allowedCategories: ["crypto", "misc"], maxCategorySkips: 10 });
+    expect(config.questionBank).toMatchObject({
+      enabled: true,
+      rootEnv: "XUANSHU_QUESTION_BANK_ROOT",
+      listFiles: ["task_list_crypto.txt", "task_list_misc.txt"],
+      maxQuestions: 20,
+    });
     expect(config.model).not.toHaveProperty("apiKey");
     expect(source).not.toMatch(/^\s*apiKey\s*:/m);
     expect(source).not.toMatch(/sk-[A-Za-z0-9_-]{16,}/);
+  });
+
+  it("loads the Wanqing NSS configuration with environment-only credentials", async () => {
+    const configPath = "config/nss-wanqing.yaml";
+    const [config, source] = await Promise.all([loadConfig(configPath), readFile(configPath, "utf8")]);
+
+    expect(config.model).toMatchObject({
+      provider: "wanqing-corp",
+      id: "ep-spmlx5-1786072758181058776",
+      api: "openai-completions",
+      baseUrl: "https://wanqing-api.corp.kuaishou.com/api/gateway/v1/endpoints",
+      apiKeyEnv: "WQ_API_KEY",
+    });
+    expect(config.scope).toMatchObject({ mode: "controlled" });
+    expect(config.arena).toMatchObject({
+      enabled: true,
+      tokenEnv: "NSSCTF_AGENT_TOKEN",
+      allowedCategories: ["crypto", "misc"],
+      maxCategorySkips: 10,
+    });
+    expect(config.questionBank).toMatchObject({ enabled: true, rootEnv: "XUANSHU_QUESTION_BANK_ROOT", raceAgents: 3 });
+    expect(config.runtime).toMatchObject({
+      modelMinIntervalMs: 7_500,
+      modelRequestsPerMinute: 48,
+      modelTokensPerMinute: 480_000,
+    });
+    expect(source).not.toMatch(/^\s*apiKey\s*:/m);
+    expect(source).not.toMatch(/Bearer\s+[A-Za-z0-9._~-]+/i);
+  });
+
+  it("operator-owned CTF profiles explicitly allow the offline Crypto/Misc toolset", async () => {
+    const [configs, manifestSource] = await Promise.all([
+      Promise.all([
+      loadConfig("config/default.yaml"),
+      loadConfig("config/container.yaml"),
+      loadConfig("config/arena.yaml"),
+      loadConfig("config/nss-wanqing.yaml"),
+      ]),
+      readFile("tools/ctf/capabilities.json", "utf8"),
+    ]);
+    const manifest = JSON.parse(manifestSource) as {
+      profiles: {
+        core: { commands: { crypto: string[]; misc: string[] } };
+        heavy: { commands: string[] };
+      };
+    };
+    const requiredPrograms = [
+      ...manifest.profiles.core.commands.crypto,
+      ...manifest.profiles.core.commands.misc,
+      ...manifest.profiles.heavy.commands,
+    ];
+
+    for (const config of configs) {
+      expect(config.scope.allowedPrograms).toEqual(expect.arrayContaining(requiredPrograms));
+      expect(config.arena).toMatchObject({ allowedCategories: ["crypto", "misc"], maxCategorySkips: 10 });
+    }
+    expect(configs[3]?.questionBank?.instanceRunner).toMatchObject({
+      enabled: true,
+      networkName: "shared_net",
+      startupTimeoutMs: 300000,
+    });
   });
 });
 

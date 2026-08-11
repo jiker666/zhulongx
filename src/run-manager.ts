@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { XuanShuRuntime } from "./runtime.js";
+import type { RunOptions, XuanShuRuntime } from "./runtime.js";
 import type { RunEvent, RunState, RunStatus, TaskRequest } from "./types.js";
 
 export interface RunSnapshot {
@@ -11,6 +11,7 @@ export interface RunSnapshot {
 }
 
 interface RunHandle extends RunSnapshot {
+  controller: AbortController;
   promise: Promise<RunState>;
 }
 
@@ -19,17 +20,21 @@ export class RunManager {
 
   constructor(private readonly runtime: XuanShuRuntime) {}
 
-  start(request: TaskRequest): string {
+  start(request: TaskRequest, options: Pick<RunOptions, "workspaceMode" | "sharedEvidence"> = {}): string {
     const id = randomUUID();
     const handle: RunHandle = {
       id,
       status: "queued",
       events: [],
+      controller: new AbortController(),
       promise: Promise.resolve(undefined as never),
     };
     handle.promise = this.runtime
       .run(request, {
         id,
+        ...(options.workspaceMode ? { workspaceMode: options.workspaceMode } : {}),
+        ...(options.sharedEvidence ? { sharedEvidence: options.sharedEvidence } : {}),
+        signal: handle.controller.signal,
         onEvent: (event) => {
           handle.events.push(event);
           if (handle.events.length > 1000) handle.events.shift();
@@ -61,6 +66,13 @@ export class RunManager {
       ...(handle.error ? { error: handle.error } : {}),
       events: [...handle.events],
     };
+  }
+
+  stop(id: string): boolean {
+    const handle = this.runs.get(id);
+    if (!handle || ["completed", "blocked", "failed", "aborted"].includes(handle.status)) return false;
+    handle.controller.abort(new Error("Run stopped by operator"));
+    return true;
   }
 
   list(): RunSnapshot[] {

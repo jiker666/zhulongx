@@ -9,12 +9,13 @@ export interface ModelConfig {
   provider: string;
   id: string;
   name: string;
-  api: "openai-completions" | "openai-responses";
+  api: "anthropic-messages" | "openai-completions" | "openai-responses";
   baseUrl: string;
   apiKeyEnv: string;
   reasoning: boolean;
   contextWindow: number;
   maxTokens: number;
+  headersFromEnv?: Record<string, string>;
 }
 
 export interface RuntimeConfig {
@@ -25,11 +26,16 @@ export interface RuntimeConfig {
   maxToolCalls: number;
   maxRuntimeMs: number;
   modelMinIntervalMs: number;
+  modelRequestsPerMinute: number;
+  modelTokensPerMinute: number;
   modelMaxRetryDelayMs: number;
   maxActionsWithoutCheckpoint: number;
   maxRepeatedAction: number;
   maxOutputBytes: number;
+  maxImageBytes: number;
+  maxImageObservations: number;
   maxScratchFileBytes: number;
+  finalizationReserveMs: number;
   commandTimeoutMs: number;
   httpTimeoutMs: number;
   maxHttpRequests: number;
@@ -62,6 +68,24 @@ export interface ArenaConfig {
   tokenEnv: string;
   timeoutMs: number;
   maxResponseBytes: number;
+  allowedCategories?: string[];
+  maxCategorySkips?: number;
+}
+
+export interface QuestionBankConfig {
+  enabled: boolean;
+  root?: string;
+  rootEnv?: string;
+  listFiles: string[];
+  maxQuestions: number;
+  raceAgents?: number;
+  instanceRunner?: {
+    enabled: boolean;
+    networkName: string;
+    startupTimeoutMs: number;
+    commandTimeoutMs: number;
+    maxOutputBytes: number;
+  };
 }
 
 export interface AppConfig {
@@ -70,6 +94,7 @@ export interface AppConfig {
   scope: ScopeConfig;
   server: ServerConfig;
   arena?: ArenaConfig;
+  questionBank?: QuestionBankConfig;
 }
 
 export interface TaskRequest {
@@ -81,12 +106,13 @@ export interface TaskRequest {
 
 export interface NormalizedAttachment {
   source: string;
-  kind: "text" | "structured" | "archive" | "binary" | "directory";
+  kind: "text" | "structured" | "archive" | "image" | "binary" | "directory";
   size: number;
   sha256?: string;
   summary: string;
   content?: string;
   entries?: string[];
+  toolPath?: { source: "workspace" | "scratch"; path: string };
   truncated: boolean;
 }
 
@@ -185,12 +211,16 @@ export interface RunState {
   lastFailure?: RunFailure;
   sandboxNamespace: string;
   scratchRoot: string;
+  workspaceMode: "configured" | "attachments-only";
   appliedExperienceIds: string[];
   submission?: string;
+  verification?: string[];
+  independentlyVerified?: boolean;
   summary?: string;
   stopReason?: string;
   turns: number;
   toolCalls: number;
+  imageObservations: number;
   httpRequests: number;
   tcpSessions: number;
   actionsSinceCheckpoint: number;

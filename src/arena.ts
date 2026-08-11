@@ -65,14 +65,98 @@ export interface ArenaEnvelope<T> {
   error?: unknown;
 }
 
-async function boundedResponseText(response: Response, maxBytes: number): Promise<{ text: string; truncated: boolean }> {
+const CATEGORY_ALIASES: Record<string, string> = {
+  crypto: "crypto",
+  cryptography: "crypto",
+  "密码": "crypto",
+  "密码学": "crypto",
+  misc: "misc",
+  miscellaneous: "misc",
+  "杂项": "misc",
+  "其他": "misc",
+};
+
+export function normalizeArenaCategory(value: unknown): string {
+  const normalized = String(value ?? "unknown").trim().toLowerCase();
+  return CATEGORY_ALIASES[normalized] ?? normalized;
+}
+
+export function arenaCategoryAllowed(config: ArenaConfig | undefined, value: unknown): boolean {
+  const allowed = config?.allowedCategories?.map(normalizeArenaCategory).filter(Boolean) ?? [];
+  return allowed.length === 0 || allowed.includes(normalizeArenaCategory(value));
+}
+
+async function readResponseChunk(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  signal?: AbortSignal,
+): Promise<ReadableStreamReadResult<Uint8Array>> {
+  if (!signal) return await reader.read();
+  if (signal.aborted) throw signal.reason ?? new Error("Arena response read aborted");
+  return await new Promise<ReadableStreamReadResult<Uint8Array>>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      callback();
+    };
+    const onAbort = () => {
+      const reason = signal.reason ?? new Error("Arena response read aborted");
+      finish(() => reject(reason));
+      void Promise.resolve().then(() => reader.cancel()).catch(() => undefined);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    reader.read().then(
+      (result) => finish(() => resolve(result)),
+      (error: unknown) => finish(() => reject(error)),
+    );
+  });
+}
+
+function boundedAbortScope(
+  parent: AbortSignal | undefined,
+  timeoutMs: number,
+  timeoutMessage: string,
+): { signal: AbortSignal; timeout: Promise<never>; dispose: () => void } {
+  const controller = new AbortController();
+  let rejectTimeout!: (reason: unknown) => void;
+  const timeoutPromise = new Promise<never>((_resolve, reject) => {
+    rejectTimeout = reject;
+  });
+  const abort = (reason: unknown) => {
+    if (!controller.signal.aborted) controller.abort(reason);
+    rejectTimeout(reason);
+  };
+  const onParentAbort = () => abort(parent?.reason ?? new Error("Arena request aborted"));
+  if (parent?.aborted) onParentAbort();
+  else parent?.addEventListener("abort", onParentAbort, { once: true });
+  const timeout = setTimeout(() => abort(new Error(timeoutMessage)), timeoutMs);
+  return {
+    signal: controller.signal,
+    timeout: timeoutPromise,
+    dispose: () => {
+      clearTimeout(timeout);
+      parent?.removeEventListener("abort", onParentAbort);
+    },
+  };
+}
+
+async function yieldToEventLoop(): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+}
+
+async function boundedResponseText(
+  response: Response,
+  maxBytes: number,
+  signal?: AbortSignal,
+): Promise<{ text: string; truncated: boolean }> {
   if (!response.body) return { text: "", truncated: false };
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
   let truncated = false;
   while (true) {
-    const { value, done } = await reader.read();
+    const { value, done } = await readResponseChunk(reader, signal);
     if (done) break;
     if (!value) continue;
     const remaining = maxBytes - total;
@@ -88,6 +172,7 @@ async function boundedResponseText(response: Response, maxBytes: number): Promis
       await reader.cancel();
       break;
     }
+    await yieldToEventLoop();
   }
   const bytes = new Uint8Array(total);
   let offset = 0;
@@ -163,54 +248,81 @@ export class ArenaClient {
     const url = this.url(path);
     const decision = PolicyEngine.evaluateArenaRequest(this.config, method, url);
     if (!decision.allowed) throw new Error(decision.reason);
+    const deadline = Date.now() + this.config.timeoutMs;
     for (let retry = 0; ; retry += 1) {
-      const timeoutSignal = AbortSignal.timeout(this.config.timeoutMs);
-      const combined = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
-      const response = await fetch(url, {
-        method,
-        redirect: "manual",
-        signal: combined,
-        headers: {
-          accept: "application/json",
-          authorization: `Bearer ${this.token()}`,
-          ...(method === "POST" ? { "content-type": "application/json" } : {}),
-        },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      });
-      const { text, truncated } = await boundedResponseText(response, this.config.maxResponseBytes);
-      if (truncated) throw new Error(`Arena API response exceeded ${this.config.maxResponseBytes} bytes`);
-      let parsed: unknown;
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) throw new Error(`Arena API request timed out after ${this.config.timeoutMs} ms`);
+      const abortScope = boundedAbortScope(
+        signal,
+        remainingMs,
+        `Arena API request timed out after ${this.config.timeoutMs} ms`,
+      );
       try {
-        parsed = text ? JSON.parse(text) : {};
-      } catch {
-        throw new Error(`Arena API returned non-JSON response with HTTP ${response.status}`);
-      }
-      const envelope = parsed && typeof parsed === "object" && "code" in parsed ? (parsed as ArenaEnvelope<T>) : undefined;
-      const rateLimited = response.status === 429 || envelope?.code === 429;
-      if (rateLimited && retry < 5) {
-        const retryAfter = Number(response.headers.get("retry-after"));
-        const data = envelope?.data && typeof envelope.data === "object" ? (envelope.data as Record<string, unknown>) : {};
-        const bodyRetryAfter = Number(data.retry_after_seconds ?? data.retryAfterSeconds);
-        const waitMs = Number.isFinite(retryAfter) && retryAfter > 0
-          ? retryAfter * 1000
-          : Number.isFinite(bodyRetryAfter) && bodyRetryAfter > 0
-            ? bodyRetryAfter * 1000 + 1000
-            : Math.min(10000 * 2 ** retry, 60000);
-        await retryDelay(waitMs, signal);
-        continue;
-      }
-      if (!response.ok) {
-        const message = envelopeMessage(parsed);
-        throw new Error(`Arena API HTTP ${response.status}${message ? `: ${message}` : ""}`);
-      }
-      if (envelope) {
-        if (envelope.code !== undefined && envelope.code !== 200) {
-          const message = envelopeMessage(envelope);
-          throw new Error(`Arena API code ${envelope.code}${message ? `: ${message}` : ""}`);
+        const response = await Promise.race([
+          fetch(url, {
+            method,
+            redirect: "manual",
+            signal: abortScope.signal,
+            headers: {
+              accept: "application/json",
+              authorization: `Bearer ${this.token()}`,
+              ...(method === "POST" ? { "content-type": "application/json" } : {}),
+            },
+            ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+          }),
+          abortScope.timeout,
+        ]);
+        const { text, truncated } = await Promise.race([
+          boundedResponseText(response, this.config.maxResponseBytes, abortScope.signal),
+          abortScope.timeout,
+        ]);
+        if (truncated) throw new Error(`Arena API response exceeded ${this.config.maxResponseBytes} bytes`);
+        let parsed: unknown;
+        try {
+          parsed = text ? JSON.parse(text) : {};
+        } catch {
+          throw new Error(`Arena API returned non-JSON response with HTTP ${response.status}`);
         }
-        return envelope.data as T;
+        const envelope = parsed && typeof parsed === "object" && "code" in parsed ? (parsed as ArenaEnvelope<T>) : undefined;
+        const rateLimited = response.status === 429 || envelope?.code === 429;
+        if (rateLimited) {
+          const retryAfter = Number(response.headers.get("retry-after"));
+          const data = envelope?.data && typeof envelope.data === "object" ? (envelope.data as Record<string, unknown>) : {};
+          const bodyRetryAfter = Number(data.retry_after_seconds ?? data.retryAfterSeconds);
+          const retryAt = Number(data.retry_at ?? data.retryAt);
+          const waitMs = Number.isFinite(retryAfter) && retryAfter > 0
+            ? retryAfter * 1000
+            : Number.isFinite(bodyRetryAfter) && bodyRetryAfter > 0
+              ? bodyRetryAfter * 1000 + 1000
+              : Math.min(10000 * 2 ** retry, 60000);
+          const message = envelopeMessage(parsed) || "rate limit exceeded";
+          const retryDetail = Number.isFinite(retryAt) && retryAt > 0
+            ? `; retry at ${new Date(retryAt).toISOString()}`
+            : Number.isFinite(bodyRetryAfter) && bodyRetryAfter > 0
+              ? `; retry after ${bodyRetryAfter} seconds`
+              : "";
+          const waitBudget = deadline - Date.now();
+          if (/cooldown/i.test(message) || retry >= 5 || waitMs >= waitBudget) {
+            throw new Error(`Arena API rate limited: ${message}${retryDetail}`);
+          }
+          await retryDelay(waitMs, signal);
+          continue;
+        }
+        if (!response.ok) {
+          const message = envelopeMessage(parsed);
+          throw new Error(`Arena API HTTP ${response.status}${message ? `: ${message}` : ""}`);
+        }
+        if (envelope) {
+          if (envelope.code !== undefined && envelope.code !== 200) {
+            const message = envelopeMessage(envelope);
+            throw new Error(`Arena API code ${envelope.code}${message ? `: ${message}` : ""}`);
+          }
+          return envelope.data as T;
+        }
+        return parsed as T;
+      } finally {
+        abortScope.dispose();
       }
-      return parsed as T;
     }
   }
 
@@ -250,32 +362,49 @@ export class ArenaClient {
       target.protocol === base.protocol &&
       target.host === base.host &&
       target.pathname.startsWith("/api/skill/agent/arena/");
-    const timeoutSignal = AbortSignal.timeout(this.config.timeoutMs);
-    const combined = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
-    const response = await fetch(target, {
-      method: "GET",
-      redirect: "manual",
-      signal: combined,
-      headers: {
-        accept: "application/octet-stream, application/zip, */*",
-        ...(arenaControlPlane ? { authorization: `Bearer ${this.token()}` } : {}),
-      },
-    });
-    if (!response.ok) throw new Error(`Arena annex download returned HTTP ${response.status}`);
-    const { bytes, truncated } = await boundedResponseBytes(response, maxBytes);
-    if (truncated) throw new Error(`Arena annex exceeded ${maxBytes} bytes`);
-    return bytes;
+    const abortScope = boundedAbortScope(
+      signal,
+      this.config.timeoutMs,
+      `Arena annex request timed out after ${this.config.timeoutMs} ms`,
+    );
+    try {
+      const response = await Promise.race([
+        fetch(target, {
+          method: "GET",
+          redirect: "manual",
+          signal: abortScope.signal,
+          headers: {
+            accept: "application/octet-stream, application/zip, */*",
+            ...(arenaControlPlane ? { authorization: `Bearer ${this.token()}` } : {}),
+          },
+        }),
+        abortScope.timeout,
+      ]);
+      if (!response.ok) throw new Error(`Arena annex download returned HTTP ${response.status}`);
+      const { bytes, truncated } = await Promise.race([
+        boundedResponseBytes(response, maxBytes, abortScope.signal),
+        abortScope.timeout,
+      ]);
+      if (truncated) throw new Error(`Arena annex exceeded ${maxBytes} bytes`);
+      return bytes;
+    } finally {
+      abortScope.dispose();
+    }
   }
 }
 
-async function boundedResponseBytes(response: Response, maxBytes: number): Promise<{ bytes: Uint8Array; truncated: boolean }> {
+async function boundedResponseBytes(
+  response: Response,
+  maxBytes: number,
+  signal?: AbortSignal,
+): Promise<{ bytes: Uint8Array; truncated: boolean }> {
   if (!response.body) return { bytes: new Uint8Array(), truncated: false };
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
   let truncated = false;
   while (true) {
-    const { value, done } = await reader.read();
+    const { value, done } = await readResponseChunk(reader, signal);
     if (done) break;
     if (!value) continue;
     const remaining = maxBytes - total;
@@ -291,6 +420,7 @@ async function boundedResponseBytes(response: Response, maxBytes: number): Promi
       await reader.cancel();
       break;
     }
+    await yieldToEventLoop();
   }
   const bytes = new Uint8Array(total);
   let offset = 0;

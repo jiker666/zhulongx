@@ -94,7 +94,7 @@ describe("CTF sandbox", () => {
   });
 
   it("bounds output and terminates timed-out commands", async () => {
-    const { client } = await sandbox(16, 100);
+    const { client } = await sandbox(16, 1000);
 
     const output = await client.execute({
       program: "node",
@@ -103,11 +103,37 @@ describe("CTF sandbox", () => {
     expect(output.stdout).toHaveLength(16);
     expect(output.truncated).toBe(true);
 
-    const timeout = await client.execute({
+    const { client: timeoutClient } = await sandbox(16, 100);
+    const timeout = await timeoutClient.execute({
       program: "node",
       args: ["-e", "setTimeout(() => {}, 2000)"],
     });
     expect(timeout.timedOut).toBe(true);
+  });
+
+  it("terminates a sandbox process when the client aborts", async () => {
+    const { client } = await sandbox(256, 1000);
+    const controller = new AbortController();
+    const running = client.execute(
+      {
+        program: "node",
+        args: [
+          "-e",
+          "const fs=require('fs');setTimeout(()=>fs.writeFileSync('late.txt','x'),300);setInterval(()=>{},1000)",
+        ],
+      },
+      controller.signal,
+    );
+    setTimeout(() => controller.abort(), 30);
+
+    await expect(running).rejects.toThrow("aborted");
+    await new Promise((resolveWait) => setTimeout(resolveWait, 400));
+
+    const evidence = await client.execute({
+      program: "node",
+      args: ["-e", "process.stdout.write(String(require('fs').existsSync('late.txt')))"],
+    });
+    expect(evidence.stdout).toBe("false");
   });
 
   it("isolates scratch working directories and HOME for every run namespace", async () => {

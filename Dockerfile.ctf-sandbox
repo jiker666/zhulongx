@@ -12,10 +12,15 @@ FROM node:22-bookworm AS ctf-sandbox
 WORKDIR /app
 COPY tools/ctf/install-apt-core.sh ./tools/ctf/install-apt-core.sh
 RUN bash /app/tools/ctf/install-apt-core.sh
-COPY tools/ctf ./tools/ctf
-RUN bash /app/tools/ctf/install-python-core.sh
+COPY tools/ctf/install-python-core.sh tools/ctf/requirements-core.txt tools/ctf/verify-core-tools.sh ./tools/ctf/
+RUN bash /app/tools/ctf/install-python-core.sh \
+    && bash /app/tools/ctf/verify-core-tools.sh
+COPY tools/ctf/install-heavy.sh tools/ctf/requirements-heavy.txt tools/ctf/verify-heavy-tools.sh tools/ctf/capabilities.json ./tools/ctf/
 ARG INSTALL_HEAVY=false
-RUN if [ "$INSTALL_HEAVY" = "true" ]; then bash /app/tools/ctf/install-heavy.sh; fi
+RUN if [ "$INSTALL_HEAVY" = "true" ]; then \
+      bash /app/tools/ctf/install-heavy.sh \
+      && bash /app/tools/ctf/verify-heavy-tools.sh; \
+    fi
 
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --legacy-peer-deps --ignore-scripts \

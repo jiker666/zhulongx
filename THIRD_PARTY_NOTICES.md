@@ -37,6 +37,34 @@ packages listed in `tools/ctf/capabilities.json`, `tools/ctf/requirements-core.t
 sandbox Docker build or by an operator running the install scripts. Operators are responsible for reviewing and
 complying with each upstream package license before redistribution or competition deployment.
 
+The opt-in heavy profile fetches the following source tools at the commits recorded in
+`tools/ctf/capabilities.json`:
+
+- RsaCtfTool (`7c98848f1945de3e67a420871e8672f5ad9aa5d5`), MIT.
+- stegseek (`58969789a5724701048d5d5510af84098cc1f1ea`), GPL-2.0.
+- flatter (`d2b8026f29b4a69e987b15d4b240f8a5053275d3`), LGPL-3.0.
+- radare2 (`77618b4c7feaa294782c12040a634d5863ea71c1`), LGPL-3.0-or-later with mixed-license plugins.
+- CADO-NFS (`9bb8fc0799bbaaf0b47a1edf573ecf5e0cf8e46a`), LGPL-2.1.
+
+The RsaCtfTool and CADO-NFS source trees remain in the generated image. The build copies the upstream stegseek,
+flatter, and radare2 license files to `/usr/share/doc/xuanshu-heavy/` before deleting their build trees.
+Redistributors must preserve these notices and independently satisfy source-distribution, relinking, or other
+copyleft obligations for the image they distribute; a pinned upstream URL alone is not a substitute for those
+obligations.
+
+## Agent Architecture References
+
+The following repositories were reviewed at fixed commits as architectural and capability references:
+
+- `FishCodeTech/muteki` at `a585a2943a15efc4de78b00a385335fc9b1f23f1` (AGPL-3.0).
+- `verialabs/ctf-agent` at `3366d569557c4fda3fd153040632de65e255396d` (MIT).
+- `Yeti-791/Tsec-Hackathon` at `7b264c7f20cf11e790855194692a494aedbdb21c` (competition materials; no repository-wide LICENSE file was present at review time).
+
+No source from Muteki or target-specific Tsec competition skills/MCP packages is included. General concepts such
+as evidence blackboards, heterogeneous races, trace-based review, provenance gates, worker cancellation, and
+tool-profile coverage were independently implemented under this project's policy and audit model. See
+`docs/reference-agent-study.md` for the evidence and benchmark caveats.
+
 ## Curated CTF Skill Index
 
 The category names, technique-family classification, and routing cues in `src/skill-catalog.ts` are adapted from

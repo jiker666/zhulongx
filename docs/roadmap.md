@@ -11,10 +11,10 @@
 - Unix socket `ctf-sandbox` sidecar，API/model 进程不直接执行 CTF 命令。
 - 只读 challenge input、可写 scratchRoot、结构化命令、输出/超时/scratch/TCP 预算。
 - Core CTF profile：web、pwn、crypto、reverse、forensics、malware、misc、OSINT、轻量 AI/ML 常用工具。
-- 可选 heavy profile：angr、qiling、frida、torch、transformers；Sage/Ghidra/RsaCtfTool 保持人工确认安装。
+- 可选 heavy profile：固定版本的 angr、qiling、frida、torch、transformers、SageMath、RsaCtfTool、CADO-NFS、flatter、radare2、stegseek；Ghidra 和 GPU hashcat 调优保持人工确认。
 - 受 scope 管控的扩展 HTTP 方法和 stateful TCP 会话，支持 remote pwn/custom protocol。
 - v0.2.1：逐运行 scratch/HOME 命名空间、决策审计台、人工逐步纠错、平台验真经验库与按类别检索注入。
-- v0.2.2：运行前 sandbox 能力协商、结构化 artifact 初筛、持久化假设台账、失败分类与强制策略修订轨迹。
+- v0.2.2：运行前 sandbox 能力协商、结构化 artifact 初筛、持久化假设台账、失败分类与强制策略修订轨迹，以及同题竞速的有界共享证据板。
 
 ## v0.3 受控网站接入
 

@@ -26,4 +26,22 @@ describe("AuditChain", () => {
     expect(tampered.valid).toBe(false);
     expect(tampered.error).toContain("hash mismatch");
   });
+
+  it("redacts secrets at the audit persistence boundary", async () => {
+    const root = await mkdtemp(join(tmpdir(), "xuan-audit-redaction-"));
+    roots.push(root);
+    const path = join(root, "audit.jsonl");
+    const audit = new AuditChain(path, "run-redacted");
+    await audit.append("decision.checkpoint", {
+      observation: "Authorization: Bearer audit-sensitive-value\nraw sk-abcdefghijklmnopqrstuvwx",
+      nested: { cookie: "session=audit-sensitive-cookie" },
+    });
+
+    const content = await readFile(path, "utf8");
+    expect(content).not.toContain("audit-sensitive-value");
+    expect(content).not.toContain("audit-sensitive-cookie");
+    expect(content).not.toContain("abcdefghijklmnopqrstuvwx");
+    expect(content).toContain("[redacted]");
+    expect(await verifyAuditChain(path)).toEqual({ valid: true, records: 1 });
+  });
 });

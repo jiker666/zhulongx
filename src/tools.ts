@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, lstat, open, opendir, realpath, writeFile } from "node:fs/promises";
+import { mkdir, lstat, open, opendir, readFile, realpath, writeFile } from "node:fs/promises";
 import { createConnection, type Socket } from "node:net";
 import { basename, dirname, relative, resolve } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
@@ -7,6 +7,7 @@ import { Type } from "@earendil-works/pi-ai";
 import type { AuditChain } from "./audit.js";
 import { isPathInside, resolveWorkspacePath } from "./policy.js";
 import { SandboxClient } from "./sandbox.js";
+import type { PublishSharedEvidenceInput, SharedEvidenceBoard, SharedEvidenceKind } from "./shared-evidence.js";
 import type {
   ExperienceLesson,
   FailureClassification,
@@ -48,6 +49,11 @@ interface InspectArtifactInput {
   source?: "workspace" | "scratch";
   path: string;
   maxStrings?: number;
+}
+
+interface ObserveImageInput {
+  source?: "workspace" | "scratch";
+  path: string;
 }
 
 interface RunCommandInput {
@@ -99,6 +105,13 @@ interface TcpCloseInput {
   sessionId: string;
 }
 
+interface ReadSharedEvidenceInput {
+  limit?: number;
+  kinds?: SharedEvidenceKind[];
+}
+
+interface PublishSharedEvidenceToolInput extends PublishSharedEvidenceInput {}
+
 type FindingInput = Omit<Finding, "id">;
 type ExperienceLessonInput = Omit<ExperienceLesson, "id">;
 
@@ -120,6 +133,7 @@ interface ToolContext {
   runtime: RuntimeConfig;
   audit: AuditChain;
   sandboxNamespace?: string;
+  sharedEvidence?: SharedEvidenceBoard;
 }
 
 export interface ToolSet {
@@ -320,6 +334,52 @@ async function inspectArtifactFile(
   };
 }
 
+function supportedImageMimeType(bytes: Buffer): "image/jpeg" | "image/png" | "image/gif" | "image/webp" | undefined {
+  if (bytes.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]))) return "image/jpeg";
+  if (bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    return "image/png";
+  }
+  if (bytes.subarray(0, 6).toString("ascii") === "GIF87a" || bytes.subarray(0, 6).toString("ascii") === "GIF89a") {
+    return "image/gif";
+  }
+  if (bytes.subarray(0, 4).toString("ascii") === "RIFF" && bytes.subarray(8, 12).toString("ascii") === "WEBP") {
+    return "image/webp";
+  }
+  return undefined;
+}
+
+async function observeImageFile(
+  root: string,
+  inputPath: string,
+  source: "workspace" | "scratch",
+  maxImageBytes: number,
+  signal?: AbortSignal,
+): Promise<{ content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }>; details: Record<string, unknown> }> {
+  signal?.throwIfAborted();
+  const path = await resolveExistingWorkspacePath(root, inputPath);
+  const stats = await lstat(path);
+  if (!stats.isFile() || stats.isSymbolicLink()) throw new Error("Image path is not a regular file");
+  if (stats.size > maxImageBytes) throw new Error(`Image exceeds the ${maxImageBytes}-byte observation limit`);
+  const bytes = Buffer.from(await readFile(path, { signal }));
+  signal?.throwIfAborted();
+  const mimeType = supportedImageMimeType(bytes);
+  if (!mimeType) throw new Error("Unsupported image format; expected JPEG, PNG, GIF, or WebP");
+  const details = {
+    source,
+    path: relative(root, path),
+    size: bytes.length,
+    mimeType,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+  };
+  return {
+    content: [
+      { type: "text", text: `Observed bounded image ${source}:${details.path} (${mimeType}, ${bytes.length} bytes, sha256=${details.sha256})` },
+      { type: "image", data: bytes.toString("base64"), mimeType },
+    ],
+    details,
+  };
+}
+
 async function boundedResponseBytes(response: Response, maxBytes: number): Promise<{ bytes: Uint8Array; truncated: boolean }> {
   if (!response.body) return { bytes: new Uint8Array(), truncated: false };
   const reader = response.body.getReader();
@@ -438,7 +498,7 @@ async function receiveTcp(session: TcpSession, length: number, timeoutMs: number
 }
 
 export function createToolSet(context: ToolContext): ToolSet {
-  const { state, scope, runtime, audit, sandboxNamespace } = context;
+  const { state, scope, runtime, audit, sandboxNamespace, sharedEvidence } = context;
   const sandbox = new SandboxClient(runtime.sandbox.socketPath, runtime.sandbox.connectTimeoutMs);
   const tcpSessions = new Map<string, TcpSession>();
 
@@ -572,6 +632,23 @@ export function createToolSet(context: ToolContext): ToolSet {
             ledger: state.hypotheses,
           });
         }
+        if (sharedEvidence) {
+          for (const update of input.hypotheses ?? []) {
+            if (update.evidence.length === 0 || update.status === "open") continue;
+            const published = sharedEvidence.publish(state.id, {
+              kind: update.status === "contradicted" ? "dead-end" : update.status === "confirmed" ? "fact" : "candidate",
+              claim: update.hypothesis,
+              evidence: update.evidence,
+              confidence: update.status === "confirmed" ? 0.9 : update.status === "supported" ? 0.7 : 0.8,
+            });
+            await audit.append("collaboration.evidence_published", {
+              entry: published.entry,
+              deduplicated: published.deduplicated,
+              evicted: published.evicted,
+              source: "checkpoint",
+            });
+          }
+        }
         if (strategyRevision) {
           await audit.append("strategy.revised", {
             revision: strategyRevision,
@@ -581,6 +658,67 @@ export function createToolSet(context: ToolContext): ToolSet {
         return textResult("Checkpoint recorded; action counter reset and the hypothesis ledger was updated.", checkpoint);
       },
     },
+    ...(sharedEvidence ? [
+      {
+        name: "read_shared_evidence",
+        label: "Read shared evidence",
+        description:
+          "Read a bounded same-task race board of teammate facts, candidates, and dead ends. Shared entries are hints and must be independently verified.",
+        parameters: Type.Object({
+          limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 64, default: 24 })),
+          kinds: Type.Optional(Type.Array(Type.Union([
+            Type.Literal("fact"),
+            Type.Literal("candidate"),
+            Type.Literal("dead-end"),
+          ]), { minItems: 1, maxItems: 3 })),
+        }),
+        executionMode: "parallel" as const,
+        async execute(_id: string, params: unknown, signal?: AbortSignal) {
+          signal?.throwIfAborted();
+          const input = params as ReadSharedEvidenceInput;
+          const snapshot = sharedEvidence.snapshot(input.limit ?? 24, runtime.maxOutputBytes);
+          const kinds = new Set(input.kinds ?? ["fact", "candidate", "dead-end"]);
+          const result = {
+            ...snapshot,
+            entries: snapshot.entries.filter((entry) => kinds.has(entry.kind)),
+          };
+          await audit.append("collaboration.evidence_read", {
+            returnedEntries: result.entries.length,
+            totalEntries: result.totalEntries,
+            truncated: result.truncated,
+            kinds: [...kinds],
+          });
+          return textResult(JSON.stringify(result, null, 2), result);
+        },
+      },
+      {
+        name: "publish_shared_evidence",
+        label: "Publish shared evidence",
+        description:
+          "Publish one concise direct observation, candidate, or evidenced dead end to the bounded same-task race board. Do not publish secrets or hidden reasoning.",
+        parameters: Type.Object({
+          kind: Type.Union([Type.Literal("fact"), Type.Literal("candidate"), Type.Literal("dead-end")]),
+          claim: Type.String({ minLength: 1, maxLength: 600 }),
+          evidence: Type.Array(Type.String({ minLength: 1, maxLength: 600 }), { minItems: 1, maxItems: 8 }),
+          confidence: Type.Number({ minimum: 0, maximum: 1 }),
+        }),
+        executionMode: "sequential" as const,
+        async execute(_id: string, params: unknown, signal?: AbortSignal) {
+          signal?.throwIfAborted();
+          const published = sharedEvidence.publish(state.id, params as PublishSharedEvidenceToolInput);
+          await audit.append("collaboration.evidence_published", {
+            entry: published.entry,
+            deduplicated: published.deduplicated,
+            evicted: published.evicted,
+            source: "tool",
+          });
+          return textResult(
+            `${published.deduplicated ? "Merged" : "Published"} shared ${published.entry.kind}: ${published.entry.id}`,
+            published,
+          );
+        },
+      },
+    ] satisfies AgentTool<any, any>[] : []),
     {
       name: "list_files",
       label: "List workspace files",
@@ -647,6 +785,31 @@ export function createToolSet(context: ToolContext): ToolSet {
           signal,
         );
         return textResult(JSON.stringify(result, null, 2), result);
+      },
+    },
+    {
+      name: "observe_image",
+      label: "Observe image",
+      description:
+        "Return one bounded JPEG, PNG, GIF, or WebP workspace/scratch image to the model for visual inspection. Read-only; image bytes are omitted from persisted audit and transcript artifacts.",
+      parameters: Type.Object({
+        source: Type.Optional(Type.Union([Type.Literal("workspace"), Type.Literal("scratch")])),
+        path: Type.String({ minLength: 1 }),
+      }),
+      executionMode: "parallel",
+      async execute(_id, params, signal) {
+        const input = params as ObserveImageInput;
+        const source = input.source ?? "workspace";
+        if (source === "scratch") await mkdir(runtime.scratchRoot, { recursive: true });
+        const result = await observeImageFile(
+          source === "scratch" ? runtime.scratchRoot : scope.workspaceRoot,
+          input.path,
+          source,
+          runtime.maxImageBytes,
+          signal,
+        );
+        await audit.append("image.observed", result.details);
+        return result;
       },
     },
     {
@@ -1009,6 +1172,20 @@ export function createToolSet(context: ToolContext): ToolSet {
         state.findings.push(finding);
         state.phase = "verification";
         await audit.append("finding.recorded", finding);
+        if (sharedEvidence) {
+          const published = sharedEvidence.publish(state.id, {
+            kind: finding.confidence >= 0.8 ? "fact" : "candidate",
+            claim: `${finding.title}: ${finding.description}`,
+            evidence: finding.evidence,
+            confidence: finding.confidence,
+          });
+          await audit.append("collaboration.evidence_published", {
+            entry: published.entry,
+            deduplicated: published.deduplicated,
+            evicted: published.evicted,
+            source: "finding",
+          });
+        }
         return textResult(`Finding recorded: ${finding.id}`, finding);
       },
     },
@@ -1053,6 +1230,8 @@ export function createToolSet(context: ToolContext): ToolSet {
         const input = params as FinishTaskInput;
         state.status = input.status;
         state.summary = input.summary;
+        state.verification = [...input.verification];
+        state.independentlyVerified = input.independentlyVerified;
         if (input.submission) {
           state.submission = input.submission.trim();
           if (!/FLAG\s*[:：=]/i.test(state.summary)) state.summary = `${state.summary}\nFLAG: ${state.submission}`;

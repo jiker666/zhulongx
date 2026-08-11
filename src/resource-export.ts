@@ -69,9 +69,11 @@ function createRunState(runtime: RuntimeConfig): RunState {
     strategyRevisionRequired: false,
     sandboxNamespace: "resource-export",
     scratchRoot: runtime.scratchRoot,
+    workspaceMode: "configured",
     appliedExperienceIds: [],
     turns: 0,
     toolCalls: 0,
+    imageObservations: 0,
     httpRequests: 0,
     tcpSessions: 0,
     actionsSinceCheckpoint: 0,
@@ -177,23 +179,24 @@ function abortError(signal?: AbortSignal): Error {
 
 async function waitForInterval(lastStartedAt: number | undefined, minIntervalMs: number, signal?: AbortSignal): Promise<void> {
   if (lastStartedAt === undefined) return;
-  const remaining = minIntervalMs - (Date.now() - lastStartedAt);
-  if (remaining <= 0) return;
-  await new Promise<void>((resolveWait, rejectWait) => {
-    let timer: ReturnType<typeof setTimeout>;
-    const abort = () => {
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", abort);
-      rejectWait(abortError(signal));
-    };
-    const finish = () => {
-      signal?.removeEventListener("abort", abort);
-      resolveWait();
-    };
-    timer = setTimeout(finish, remaining + 5);
-    signal?.addEventListener("abort", abort, { once: true });
-    if (signal?.aborted) abort();
-  });
+  while (Date.now() - lastStartedAt < minIntervalMs) {
+    const remaining = minIntervalMs - (Date.now() - lastStartedAt);
+    await new Promise<void>((resolveWait, rejectWait) => {
+      let timer: ReturnType<typeof setTimeout>;
+      const abort = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", abort);
+        rejectWait(abortError(signal));
+      };
+      const finish = () => {
+        signal?.removeEventListener("abort", abort);
+        resolveWait();
+      };
+      timer = setTimeout(finish, remaining + 5);
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) abort();
+    });
+  }
 }
 
 async function checkpoint(policy: PolicyEngine, state: RunState, audit: AuditChain): Promise<void> {

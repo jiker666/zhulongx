@@ -19,9 +19,11 @@ function state(): RunState {
     strategyRevisionRequired: false,
     sandboxNamespace: "test",
     scratchRoot: "/tmp/xuan-policy/scratch/runs/test",
+    workspaceMode: "configured",
     appliedExperienceIds: [],
     turns: 0,
     toolCalls: 0,
+    imageObservations: 0,
     httpRequests: 0,
     tcpSessions: 0,
     actionsSinceCheckpoint: 0,
@@ -46,6 +48,49 @@ describe("PolicyEngine", () => {
     expect(policy.evaluate("http_request", { method: "GET", url: "https://example.com" }, run).allowed).toBe(false);
   });
 
+  it("allows operator-owned offline Crypto/Misc programs while preserving the global tool budget", () => {
+    const config = testConfig("/tmp/xuan-policy");
+    const offlinePrograms = [
+      "base32",
+      "bc",
+      "convert",
+      "ecm",
+      "factor",
+      "ffprobe",
+      "gifsicle",
+      "gp",
+      "identify",
+      "minimodem",
+      "multimon-ng",
+      "outguess",
+      "pickora",
+      "pngcheck",
+      "sox",
+      "soxi",
+      "steghide",
+      "stegsnow",
+      "tesseract",
+      "z3",
+    ];
+    config.scope.allowedPrograms = offlinePrograms;
+    const policy = new PolicyEngine(config.scope, config.runtime);
+    const run = state();
+    run.plan = { goal: "perform offline analysis", assumptions: [], hypotheses: [], steps: [{ id: "1", objective: "run bounded Crypto/Misc tools", successCriteria: ["evidence produced or budget exhausted"], tools: ["run_command"] }] };
+
+    for (const program of offlinePrograms) {
+      expect(policy.evaluate("run_command", { program, args: [] }, run).allowed).toBe(true);
+    }
+
+    const decision = policy.evaluate("run_command", { program: "ecm", args: ["50000", "1000000"] }, run);
+    expect(decision.allowed).toBe(true);
+    policy.recordAllowed("run_command", decision, run);
+    expect(run.toolCalls).toBe(1);
+
+    run.toolCalls = config.runtime.maxToolCalls;
+    expect(policy.evaluate("run_command", { program: "ecm", args: ["250000"] }, run).reason).toContain("budget");
+    expect(policy.evaluate("run_command", { program: "openssl", args: ["s_client"] }, { ...run, toolCalls: 0 }).reason).toContain("allowlist");
+  });
+
   it("enforces authorized hosts and checkpoint cadence", () => {
     const config = testConfig("/tmp/xuan-policy");
     config.scope.mode = "controlled";
@@ -64,6 +109,36 @@ describe("PolicyEngine", () => {
     expect(policy.evaluate("checkpoint", { observations: ["x"] }, run).allowed).toBe(true);
   });
 
+  it("budgets shared evidence tools as policy-controlled actions", () => {
+    const config = testConfig("/tmp/xuan-policy");
+    const policy = new PolicyEngine(config.scope, config.runtime);
+    const run = state();
+    const args = { kinds: ["fact"], limit: 10 };
+
+    expect(policy.evaluate("read_shared_evidence", args, run).reason).toContain("plan");
+    run.plan = {
+      goal: "coordinate bounded evidence",
+      assumptions: [],
+      hypotheses: [],
+      steps: [{ id: "1", objective: "read the race board", successCriteria: [], tools: ["read_shared_evidence"] }],
+    };
+    const decision = policy.evaluate("read_shared_evidence", args, run);
+    expect(decision.allowed).toBe(true);
+    policy.recordAllowed("read_shared_evidence", decision, run);
+    policy.recordAllowed("read_shared_evidence", decision, run);
+    expect(run).toMatchObject({ toolCalls: 2, actionsSinceCheckpoint: 2 });
+
+    run.actionsSinceCheckpoint = 0;
+    expect(policy.evaluate("read_shared_evidence", args, run).reason).toContain("Repeated-action");
+    run.toolCalls = config.runtime.maxToolCalls;
+    expect(policy.evaluate("publish_shared_evidence", {
+      kind: "fact",
+      claim: "bounded claim",
+      evidence: ["bounded evidence"],
+      confidence: 0.9,
+    }, run).reason).toContain("budget");
+  });
+
   it("supports operator-owned wildcard port narrowing for dynamic challenge containers", () => {
     expect(hostMatches("abc.sandbox.invalid:31001", "*.sandbox.invalid:*")).toBe(true);
     expect(hostMatches("abc.sandbox.invalid:31001", "*.sandbox.invalid:31001")).toBe(true);
@@ -79,6 +154,29 @@ describe("PolicyEngine", () => {
 
     expect(policy.evaluate("http_request", { method: "GET", url: "http://case.sandbox.invalid:31001/" }, run).allowed).toBe(true);
     expect(policy.evaluate("http_request", { method: "GET", url: "http://sandbox.invalid:31001/" }, run).allowed).toBe(false);
+    expect(PolicyEngine.evaluateScopedTcpTarget(config.scope, "case.sandbox.invalid", 31001).allowed).toBe(true);
+    expect(PolicyEngine.evaluateScopedTcpTarget(config.scope, "outside.invalid", 31001).allowed).toBe(false);
+  });
+
+  it("gates image observations, isolated workspace commands, and the finalization reserve", () => {
+    const config = testConfig("/tmp/xuan-policy");
+    const policy = new PolicyEngine(config.scope, config.runtime);
+    const run = state();
+    run.plan = { goal: "inspect", assumptions: [], hypotheses: [], steps: [{ id: "1", objective: "observe", successCriteria: [], tools: ["observe_image"] }] };
+
+    expect(policy.evaluate("observe_image", { source: "workspace", path: "clue.jpg" }, run).allowed).toBe(true);
+    expect(policy.evaluate("observe_image", { source: "workspace", path: "../clue.jpg" }, run).allowed).toBe(false);
+    policy.recordAllowed("observe_image", policy.evaluate("observe_image", { source: "workspace", path: "clue.jpg" }, run), run);
+    run.imageObservations = config.runtime.maxImageObservations;
+    expect(policy.evaluate("observe_image", { source: "workspace", path: "other.jpg" }, run).reason).toContain("budget");
+
+    run.workspaceMode = "attachments-only";
+    expect(policy.evaluate("run_command", { program: "rg", args: [], cwd: "workspace" }, run).reason).toContain("attachments-only");
+
+    run.workspaceMode = "configured";
+    run.startedAt = new Date(Date.now() - config.runtime.maxRuntimeMs + config.runtime.finalizationReserveMs).toISOString();
+    expect(policy.evaluate("read_file", { path: "notes.txt" }, run).reason).toContain("Finalization reserve");
+    expect(policy.evaluate("finish_task", { status: "blocked" }, run).allowed).toBe(true);
   });
 
   it("keeps Arena control-plane requests on the configured API prefix", () => {
@@ -125,12 +223,34 @@ describe("PolicyEngine", () => {
       summary: "done",
       submission: "dynamic-answer",
       confidence: 0.9,
-      verification: ["independent check"],
+      verification: ["dynamic-answer observed in artifact", "dynamic-answer reproduced independently"],
       independentlyVerified: true,
+      remainingRisks: [],
     };
     expect(policy.evaluate("finish_task", { ...finish, independentlyVerified: false }, run).reason).toContain(
       "independent verification",
     );
+    expect(
+      policy.evaluate("finish_task", {
+        ...finish,
+        verification: ["dynamic-answer repeated", "dynamic-answer repeated"],
+      }, run).reason,
+    ).toContain("two verification records");
+    run.hypotheses.push({
+      id: "H1",
+      statement: "dynamic-answer is the confirmed candidate",
+      status: "confirmed",
+      evidence: ["dynamic-answer observed"],
+      updatedAt: new Date().toISOString(),
+    });
+    run.findings.push({
+      id: "finding",
+      title: "Candidate dynamic-answer verified",
+      severity: "high",
+      confidence: 0.95,
+      description: "dynamic-answer is supported by two observations",
+      evidence: ["dynamic-answer reproduced independently"],
+    });
     expect(policy.evaluate("finish_task", finish, run).reason).toContain(
       "record_lesson",
     );
@@ -143,6 +263,9 @@ describe("PolicyEngine", () => {
       pitfalls: [],
       tools: [],
     });
+    expect(policy.evaluate("finish_task", { ...finish, remainingRisks: ["candidate wrapper is unresolved"] }, run).reason).toContain(
+      "remainingRisks",
+    );
     expect(policy.evaluate("finish_task", finish, run).allowed).toBe(true);
   });
 

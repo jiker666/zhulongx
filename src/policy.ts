@@ -13,6 +13,7 @@ const ACTION_TOOLS = new Set([
   "list_files",
   "read_file",
   "inspect_artifact",
+  "observe_image",
   "list_scratch_files",
   "read_scratch_file",
   "write_scratch_file",
@@ -22,6 +23,8 @@ const ACTION_TOOLS = new Set([
   "tcp_send",
   "tcp_receive",
   "tcp_close",
+  "read_shared_evidence",
+  "publish_shared_evidence",
 ]);
 
 function signature(toolName: string, args: unknown): string {
@@ -151,13 +154,70 @@ export class PolicyEngine {
           signature: actionSignature,
         };
       }
+      const candidate = finish.submission.trim();
+      const candidateVerification = new Set(
+        finish.verification
+          .filter((item): item is string => typeof item === "string" && item.includes(candidate))
+          .map((item) => item.trim()),
+      );
+      if (candidateVerification.size < 2) {
+        return {
+          allowed: false,
+          reason: "Arena completion requires the exact candidate in at least two verification records",
+          signature: actionSignature,
+        };
+      }
+      const candidateHypothesis = state.hypotheses.some(
+        (hypothesis) =>
+          hypothesis.status === "confirmed" &&
+          (hypothesis.statement.includes(candidate) || hypothesis.evidence.some((item) => item.includes(candidate))),
+      );
+      if (!candidateHypothesis) {
+        return {
+          allowed: false,
+          reason: "Arena completion requires a confirmed hypothesis tied to the submitted candidate",
+          signature: actionSignature,
+        };
+      }
+      const candidateFinding = state.findings.some((finding) => {
+        const text = [finding.title, finding.description, ...finding.evidence].join("\n");
+        return finding.confidence >= 0.8 && text.includes(candidate);
+      });
+      if (!candidateFinding) {
+        return {
+          allowed: false,
+          reason: "Arena completion requires a high-confidence finding tied to the submitted candidate",
+          signature: actionSignature,
+        };
+      }
+      const remainingRisks = (finish as { remainingRisks?: unknown }).remainingRisks;
+      if (Array.isArray(remainingRisks) && remainingRisks.length > 0) {
+        return {
+          allowed: false,
+          reason: "Arena completion cannot leave unresolved remainingRisks",
+          signature: actionSignature,
+        };
+      }
       if (state.lessons.length === 0) {
+        return {
+          allowed: false,
+          reason: "Capture one generic record_lesson candidate before completing an Arena task",
+          signature: actionSignature,
+        };
+      }
+    }
+    const reserveStartsAt = this.runtime.maxRuntimeMs - this.runtime.finalizationReserveMs;
+    const startedAt = Date.parse(state.startedAt ?? state.createdAt);
+    if (
+      ACTION_TOOLS.has(toolName) &&
+      Number.isFinite(startedAt) &&
+      Date.now() - startedAt >= reserveStartsAt
+    ) {
       return {
         allowed: false,
-        reason: "Capture one generic record_lesson candidate before completing an Arena task",
+        reason: "Finalization reserve is active; investigative actions are closed",
         signature: actionSignature,
       };
-      }
     }
     if (ACTION_TOOLS.has(toolName) && state.actionsSinceCheckpoint >= this.runtime.maxActionsWithoutCheckpoint) {
       return { allowed: false, reason: "Checkpoint required before more actions", signature: actionSignature };
@@ -200,6 +260,35 @@ export class PolicyEngine {
           signature: actionSignature,
         };
       }
+    }
+    if (toolName === "observe_image") {
+      const path = String((args as { path?: unknown })?.path ?? "");
+      const source = String((args as { source?: unknown })?.source ?? "workspace");
+      if ((source !== "workspace" && source !== "scratch") || !isRelativeSafePath(path)) {
+        return {
+          allowed: false,
+          reason: "Image observation requires a safe relative workspace or scratch path",
+          signature: actionSignature,
+        };
+      }
+      if ((state.imageObservations ?? 0) >= this.runtime.maxImageObservations) {
+        return {
+          allowed: false,
+          reason: "Image observation budget exhausted",
+          signature: actionSignature,
+        };
+      }
+    }
+    if (
+      state.workspaceMode === "attachments-only" &&
+      toolName === "run_command" &&
+      (args as { cwd?: unknown })?.cwd === "workspace"
+    ) {
+      return {
+        allowed: false,
+        reason: "attachments-only runs do not permit command access to the workspace",
+        signature: actionSignature,
+      };
     }
     if (toolName === "http_request") {
       if (this.scope.mode !== "controlled") {
@@ -246,6 +335,7 @@ export class PolicyEngine {
     }
     if (toolName === "http_request") state.httpRequests += 1;
     if (toolName === "tcp_open") state.tcpSessions += 1;
+    if (toolName === "observe_image") state.imageObservations = (state.imageObservations ?? 0) + 1;
     if (toolName === "checkpoint") state.actionsSinceCheckpoint = 0;
   }
 
@@ -268,6 +358,21 @@ export class PolicyEngine {
     } catch (error) {
       return { allowed: false, reason: `Invalid Arena URL: ${String(error)}`, signature: actionSignature };
     }
+  }
+
+  static evaluateScopedTcpTarget(scope: ScopeConfig, host: string, port: number): PolicyDecision {
+    const actionSignature = signature("scoped_tcp_target", { host, port });
+    if (scope.mode !== "controlled") {
+      return { allowed: false, reason: "TCP actions require scope.mode=controlled", signature: actionSignature };
+    }
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      return { allowed: false, reason: `Invalid TCP port: ${port}`, signature: actionSignature };
+    }
+    const authority = tcpAuthority(host, port);
+    if (!scope.allowedHosts.some((allowed) => hostMatches(authority, allowed))) {
+      return { allowed: false, reason: `TCP host is outside the authorized scope: ${authority}`, signature: actionSignature };
+    }
+    return { allowed: true, reason: "Allowed by configured scope", signature: actionSignature };
   }
 
   static evaluateArenaAnnexRequest(

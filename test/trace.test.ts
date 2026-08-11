@@ -20,6 +20,17 @@ describe("decision trace", () => {
     const runRoot = join(root, runId);
     await mkdir(runRoot, { recursive: true });
     const audit = new AuditChain(join(runRoot, "audit.jsonl"), runId);
+    await audit.append("turn.started", { turn: 1 });
+    await audit.append("assistant.message", {
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "hidden chain must never be projected" },
+        {
+          type: "text",
+          text: `I will inspect the bounded artifact. Authorization: Bearer private-value. ${"x".repeat(1400)}`,
+        },
+      ],
+    });
     await audit.append("plan.submitted", { goal: "Inspect evidence", steps: [] });
     const action = await audit.append("policy.decision", { toolName: "file", allowed: true, reason: "Allowed" });
     await audit.append("tool.result", { toolName: "file", isError: false, content: "ELF" });
@@ -48,9 +59,11 @@ describe("decision trace", () => {
       strategyRevisionRequired: false,
       sandboxNamespace: runId,
       scratchRoot: join(root, "scratch", runId),
+      workspaceMode: "configured",
       appliedExperienceIds: [],
       turns: 2,
       toolCalls: 2,
+      imageObservations: 0,
       httpRequests: 0,
       tcpSessions: 0,
       actionsSinceCheckpoint: 0,
@@ -67,6 +80,8 @@ describe("decision trace", () => {
     const trace = await loadDecisionTrace(root, runId);
     expect(trace.integrity.valid).toBe(true);
     expect(trace.timeline.map((event) => event.kind)).toEqual([
+      "turn",
+      "decision",
       "plan",
       "action",
       "observation",
@@ -74,6 +89,12 @@ describe("decision trace", () => {
       "hypothesis",
       "revision",
     ]);
+    const projected = JSON.stringify(trace.timeline);
+    expect(projected).not.toContain("hidden chain");
+    expect(projected).not.toContain("private-value");
+    const decision = trace.timeline.find((event) => event.kind === "decision");
+    expect(decision?.data).toMatchObject({ text: expect.stringContaining("Authorization=[redacted]") });
+    expect((decision?.data as { text: string }).text.length).toBeLessThanOrEqual(1200);
     expect(trace.reviews).toContainEqual(review);
     expect((await listPersistedRuns(root))[0]).toMatchObject({ id: runId, category: "Pwn" });
   });

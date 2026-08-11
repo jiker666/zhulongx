@@ -10,6 +10,7 @@ import {
   writeArenaEvaluationReport,
   type ArenaAttemptEvaluation,
 } from "./arena-evaluation.js";
+import { ArenaWrongQuestionStore } from "./arena-wrong-questions.js";
 import { loadConfig, loadScopeFile, mergeScope } from "./config.js";
 import { loadDotEnv } from "./env.js";
 import { AuditChain } from "./audit.js";
@@ -18,7 +19,15 @@ import { XuanShuRuntime } from "./runtime.js";
 import { SandboxClient, startSandboxServer } from "./sandbox.js";
 import { startApiServer } from "./server.js";
 import { resolveWorkspacePath } from "./policy.js";
+import { QuestionBank, questionToTaskRequest } from "./question-bank.js";
+import { QuestionBankInstanceRunner } from "./question-bank-instances.js";
+import { QuestionBankProgressStore } from "./question-bank-progress.js";
+import { ManualJobManager } from "./manual-jobs.js";
+import { RunManager } from "./run-manager.js";
 import type { AppConfig } from "./types.js";
+
+const MAX_CLI_ATTEMPT_HISTORY = 200;
+const MAX_CLI_SEEN_ATTEMPTS = 1000;
 
 interface ParsedArgs {
   command: string;
@@ -37,6 +46,9 @@ interface ParsedArgs {
   authKey?: string;
   model?: string;
   output?: string;
+  concurrency?: number;
+  raceAgents?: number;
+  writeup?: boolean;
   attachments: string[];
 }
 
@@ -56,9 +68,11 @@ Usage:
   xuan-shu arena-submit --attempt-id id --flag "..." [--config path]
   xuan-shu arena-abandon --attempt-id id [--config path]
   xuan-shu arena-solve-once [--no-auto-submit] [--config path]
-  xuan-shu arena-loop [--no-auto-submit] [--max-attempts n] [--idle-seconds n] [--config path]
+  xuan-shu arena-loop [--max-attempts n] [--idle-seconds n] [--config path]  # continuous unless bounded
   xuan-shu arena-evaluate [--max-attempts 20] [--idle-seconds n] [--config path]
   xuan-shu resource-export --endpoint URL [--ids task_ids.json] [--output report.json] [--config path]
+  xuan-shu question-bank-list [--config path]
+  xuan-shu question-bank-solve [--concurrency n] [--race-agents n] [--no-writeup] [--config path]
 `;
 }
 
@@ -76,8 +90,12 @@ function parseArgs(argv: string[]): ParsedArgs {
       result.autoSubmit = false;
       continue;
     }
+    if (arg === "--no-writeup") {
+      result.writeup = false;
+      continue;
+    }
     if (
-      ["--config", "--task", "--task-file", "--scope", "--attach", "--attempt-id", "--flag", "--max-attempts", "--idle-seconds", "--ids", "--endpoint", "--app-id", "--auth-key", "--model", "--output"].includes(
+      ["--config", "--task", "--task-file", "--scope", "--attach", "--attempt-id", "--flag", "--max-attempts", "--idle-seconds", "--ids", "--endpoint", "--app-id", "--auth-key", "--model", "--output", "--concurrency", "--race-agents"].includes(
         arg,
       )
     ) {
@@ -109,6 +127,16 @@ function parseArgs(argv: string[]): ParsedArgs {
       if (arg === "--auth-key") result.authKey = value;
       if (arg === "--model") result.model = value;
       if (arg === "--output") result.output = value;
+      if (arg === "--concurrency") {
+        const concurrency = Number(value);
+        if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 8) throw new Error("--concurrency must be an integer between 1 and 8");
+        result.concurrency = concurrency;
+      }
+      if (arg === "--race-agents") {
+        const raceAgents = Number(value);
+        if (!Number.isInteger(raceAgents) || raceAgents < 1 || raceAgents > 8) throw new Error("--race-agents must be an integer between 1 and 8");
+        result.raceAgents = raceAgents;
+      }
       index += 1;
       continue;
     }
@@ -215,25 +243,39 @@ function isRetryableInfrastructureError(message: string): boolean {
 
 async function runArenaEvaluation(
   config: AppConfig,
-  targetAttempts: number,
+  targetAttempts: number | null,
   autoSubmit: boolean,
   idleSeconds: number,
 ): Promise<number> {
   requireArenaCredentials(config);
-  if (targetAttempts <= 0) throw new Error("targetAttempts must be positive");
+  if (targetAttempts !== null && (!Number.isInteger(targetAttempts) || targetAttempts <= 0)) {
+    throw new Error("targetAttempts must be a positive integer or null for continuous mode");
+  }
   const sandbox = await ensureSandbox(config);
   const client = new ArenaClient(config.arena);
   const startedAt = new Date().toISOString();
   const attempts: ArenaAttemptEvaluation[] = [];
   const seen = new Set<number>();
+  const seenOrder: number[] = [];
+  const wrongQuestions = new ArenaWrongQuestionStore(config);
+  let settledAttempts = 0;
   let startAgent;
   let endAgent;
   let infrastructureError: string | undefined;
   let infrastructureRetries = 0;
+  let categorySkips = 0;
   try {
     const current = await client.current();
     startAgent = current.agent;
-    while (attempts.filter((attempt) => attempt.settled).length < targetAttempts) {
+    const rememberAttempt = (attemptId: number) => {
+      seen.add(attemptId);
+      seenOrder.push(attemptId);
+      if (seenOrder.length > MAX_CLI_SEEN_ATTEMPTS) {
+        const expired = seenOrder.shift();
+        if (expired !== undefined) seen.delete(expired);
+      }
+    };
+    while (targetAttempts === null || settledAttempts < targetAttempts) {
       let solved;
       try {
         solved = await solveArenaOnce(config, client, {
@@ -256,7 +298,19 @@ async function runArenaEvaluation(
         break;
       }
       attempts.push(solved.evaluation);
+      if (attempts.length > MAX_CLI_ATTEMPT_HISTORY) attempts.shift();
       printJson(compactAttemptResult(solved.evaluation));
+      if (solved.evaluation.outcome === "skipped") {
+        categorySkips += 1;
+        rememberAttempt(solved.attemptId);
+        if (categorySkips >= (config.arena?.maxCategorySkips ?? 10) && targetAttempts !== null) {
+          infrastructureError = "Arena category-skip budget exhausted before an allowed category was available";
+          break;
+        }
+        if (categorySkips >= (config.arena?.maxCategorySkips ?? 10)) categorySkips = 0;
+        await delay(idleSeconds);
+        continue;
+      }
       if (!solved.evaluation.settled) {
         infrastructureError = solved.evaluation.reason ?? "Attempt was not settled";
         if (isRetryableInfrastructureError(infrastructureError)) {
@@ -270,9 +324,18 @@ async function runArenaEvaluation(
         }
         break;
       }
-      seen.add(solved.attemptId);
+      rememberAttempt(solved.attemptId);
+      settledAttempts += 1;
       infrastructureRetries = 0;
+      categorySkips = 0;
       infrastructureError = undefined;
+      if (["wrong", "blocked", "abandoned"].includes(solved.evaluation.outcome)) {
+        try {
+          await wrongQuestions.record(solved.state, solved.evaluation);
+        } catch (error) {
+          console.error(`[arena-evaluate] unable to archive wrong question ${solved.attemptId}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
       await delay(idleSeconds);
     }
     try {
@@ -354,6 +417,64 @@ async function runResourceExport(config: AppConfig, args: ParsedArgs): Promise<n
   return report.successRate >= 0.8 ? 0 : 2;
 }
 
+async function runQuestionBankSolve(config: AppConfig, args: ParsedArgs): Promise<number> {
+  const bank = new QuestionBank(config.questionBank);
+  const questions = await bank.load();
+  if (questions.length === 0) throw new Error("Question bank is empty");
+  const progress = new QuestionBankProgressStore(config);
+  await progress.syncCompletedRunArtifacts(questions);
+  const pending = await progress.pending(questions);
+  if (pending.length === 0) {
+    printJson({ status: "already-solved", total: questions.length, pending: 0 });
+    return 0;
+  }
+  const runtime = new XuanShuRuntime(config, { onEvent: (event) => {
+    if (["tool.started", "policy.decision", "run.settled"].includes(event.type)) {
+      console.error(`[${event.type}] ${JSON.stringify(event.data)}`);
+    }
+  }});
+  const manager = new RunManager(runtime);
+  const jobs = new ManualJobManager({ runManager: manager });
+  const instances = new QuestionBankInstanceRunner(config);
+  const started = jobs.start({
+    tasks: pending.map((question) => questionToTaskRequest(question)),
+    concurrency: instances.enabled() ? 1 : args.concurrency ?? 1,
+    raceAgents: args.raceAgents ?? config.questionBank?.raceAgents ?? 1,
+    writeup: args.writeup ?? true,
+    skipBlocked: true,
+    transientRetryLimit: 2,
+  }, {
+    prepareTask: async (request, signal) => {
+      const questionId = request.metadata?.questionId;
+      const question = questionId ? pending.find((candidate) => candidate.id === questionId) : undefined;
+      if (!question) throw new Error("Question-bank task no longer matches the configured bank");
+      return await instances.prepare(question, signal);
+    },
+    onTaskSettled: async ({ request, state }) => {
+      const questionId = request.metadata?.questionId;
+      const question = questionId ? pending.find((candidate) => candidate.id === questionId) : undefined;
+      if (question) await progress.recordCompleted(question, state);
+    },
+  });
+  const stop = () => jobs.stop(started.id);
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+  try {
+    while (true) {
+      const current = jobs.get(started.id);
+      if (!current || ["completed", "aborted"].includes(current.status)) {
+        printJson({ job: current ?? started });
+        return current?.status === "completed" ? 0 : 2;
+      }
+      await delay(0.25);
+    }
+  } finally {
+    process.off("SIGINT", stop);
+    process.off("SIGTERM", stop);
+    await jobs.close();
+  }
+}
+
 async function main(): Promise<void> {
   await loadDotEnv();
   const args = parseArgs(process.argv.slice(2));
@@ -366,6 +487,41 @@ async function main(): Promise<void> {
     return;
   }
   const config = await loadConfig(args.config);
+  if (args.command === "question-bank-list") {
+    const bank = new QuestionBank(config.questionBank);
+    const snapshot = await bank.snapshot();
+    if (!snapshot.configured) {
+      printJson(snapshot);
+      return;
+    }
+    const questions = await bank.load();
+    const progress = new QuestionBankProgressStore(config);
+    await progress.syncCompletedRunArtifacts(questions);
+    const solved = await progress.progressFor(questions);
+    printJson({
+      ...snapshot,
+      count: questions.length,
+      solvedCount: solved.size,
+      pendingCount: questions.length - solved.size,
+      questions: questions.map(({ id, title, category, attachments, instance }) => {
+        const record = solved.get(id);
+        return {
+          id,
+          title,
+          category,
+          attachmentCount: attachments.length,
+          instanceAvailable: Boolean(instance),
+          status: record ? "solved" : "pending",
+          ...(record ? { solvedAt: record.solvedAt } : {}),
+        };
+      }),
+    });
+    return;
+  }
+  if (args.command === "question-bank-solve") {
+    process.exitCode = await runQuestionBankSolve(config, args);
+    return;
+  }
   if (args.command === "arena-current") {
     const data = await new ArenaClient(config.arena).current();
     printJson(data);
@@ -400,7 +556,7 @@ async function main(): Promise<void> {
     return;
   }
   if (args.command === "arena-loop") {
-    const maxAttempts = args.maxAttempts ?? Number.POSITIVE_INFINITY;
+    const maxAttempts = args.maxAttempts ?? null;
     const idleSeconds = args.idleSeconds ?? 10;
     process.exitCode = await runArenaEvaluation(config, maxAttempts, args.autoSubmit ?? true, idleSeconds);
     return;
