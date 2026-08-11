@@ -1,18 +1,46 @@
-import { useEffect } from "react";
+import { useEffect, useState, type FormEvent } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { BookOpenCheck, Gauge, History, KeyRound, Library, ShieldCheck, Swords, X } from "lucide-react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
+import { getServerToken, setServerToken } from "../api/client";
+import { IconButton } from "./ui";
+
+const navigation = [
+  { to: "/overview", label: "系统总览", detail: "就绪与进度", icon: Gauge },
+  { to: "/arena", label: "擂台指挥", detail: "自动实战", icon: Swords },
+  { to: "/workbench", label: "任务工作台", detail: "批量与题库", icon: BookOpenCheck },
+  { to: "/runs", label: "运行审计", detail: "决策与证据", icon: History },
+  { to: "/experiences", label: "经验库", detail: "验真策略", icon: Library },
+];
 
 export function AppShell() {
   const { pathname } = useLocation();
+  const queryClient = useQueryClient();
+  const [tokenOpen, setTokenOpen] = useState(false);
+  const [token, setToken] = useState(() => getServerToken());
 
   useEffect(() => {
     window.scrollTo(0, 0);
   }, [pathname]);
 
+  useEffect(() => {
+    const showToken = () => setTokenOpen(true);
+    window.addEventListener("xuanshu:unauthorized", showToken);
+    return () => window.removeEventListener("xuanshu:unauthorized", showToken);
+  }, []);
+
+  const submitToken = (event: FormEvent) => {
+    event.preventDefault();
+    setServerToken(token);
+    setTokenOpen(false);
+    void queryClient.invalidateQueries();
+  };
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
         <div className="sidebar-header">
-          <NavLink to="/runs" className="brand" aria-label="玄枢任务大厅">
+          <NavLink to="/overview" className="brand" aria-label="玄枢系统总览">
             <span className="brand-mark" aria-hidden="true">玄</span>
             <span className="brand-copy">
               <strong>玄枢</strong>
@@ -22,30 +50,46 @@ export function AppShell() {
         </div>
 
         <nav className="sidebar-nav" aria-label="主导航">
-          <div className="nav-caption">工作区</div>
-          <NavLink to="/runs" className="nav-link">
-            <span>任务大厅</span>
-            <small>运行与审计</small>
-          </NavLink>
-          <NavLink to="/experiences" className="nav-link">
-            <span>经验库</span>
-            <small>已验证策略</small>
-          </NavLink>
+          <div className="nav-caption">控制面</div>
+          {navigation.map(({ to, label, detail, icon: Icon }) => (
+            <NavLink key={to} to={to} className="nav-link">
+              <Icon className="nav-icon" size={17} strokeWidth={1.8} aria-hidden="true" />
+              <span className="nav-copy"><span>{label}</span><small>{detail}</small></span>
+            </NavLink>
+          ))}
         </nav>
 
         <div className="sidebar-note">
-          <span className="sidebar-note-title"><span className="status-dot" />策略引擎在线</span>
-          <small>所有动作均受授权范围约束</small>
+          <span className="sidebar-note-title"><ShieldCheck size={15} aria-hidden="true" />策略护栏已启用</span>
+          <small>主动能力由 operator scope 与预算共同约束</small>
         </div>
       </aside>
 
       <div className="workspace">
         <header className="topbar">
-          <span className="product-label">Autonomous Security Reasoning Runtime</span>
-          <span className="topbar-status"><span className="status-dot" />Policy Engine</span>
+          <span className="product-label">Autonomous Cybersecurity Agent</span>
+          <div className="topbar-actions">
+            <span className="topbar-status"><span className="status-dot" />Policy governed</span>
+            <IconButton className="topbar-icon-button" label="设置服务令牌" onClick={() => setTokenOpen(true)}><KeyRound size={16} aria-hidden="true" /></IconButton>
+          </div>
         </header>
         <main className="content"><Outlet /></main>
       </div>
+
+      {tokenOpen && (
+        <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setTokenOpen(false); }}>
+          <form className="token-dialog" role="dialog" aria-modal="true" aria-labelledby="token-dialog-title" onSubmit={submitToken}>
+            <div className="dialog-header">
+              <div><div className="eyebrow">ACCESS CONTROL</div><h2 id="token-dialog-title">服务令牌</h2></div>
+              <IconButton className="icon-button" type="button" label="关闭" onClick={() => setTokenOpen(false)}><X size={17} aria-hidden="true" /></IconButton>
+            </div>
+            <label className="field-label" htmlFor="server-token">XUANSHU_SERVER_TOKEN</label>
+            <input id="server-token" type="password" autoComplete="current-password" value={token} onChange={(event) => setToken(event.target.value)} placeholder="输入本次会话使用的服务令牌" />
+            <p>令牌仅保存在当前浏览器会话中，不会写入运行材料。</p>
+            <button className="button" type="submit">连接控制面</button>
+          </form>
+        </div>
+      )}
     </div>
   );
 }

@@ -10,21 +10,35 @@ function captureBrowserErrors(page: Page) {
 
 const mojibake = /鐑|鍐|浠诲姟|鏌ョ湅|鈥|锟斤拷|閻憒|閿熸枻鎷?/;
 
-test("home redirects to runs and runs supports refresh", async ({ page }) => {
+test("home redirects to overview and overview refreshes live state", async ({ page }) => {
   const errors = captureBrowserErrors(page);
   const apiRequests: string[] = [];
   page.on("request", (request) => { if (request.url().includes("/v1/")) apiRequests.push(request.url()); });
   await page.goto("/");
-  await expect(page).toHaveURL(/\/runs$/);
+  await expect(page).toHaveURL(/\/overview$/);
   await expect(page.locator("h1").first()).toBeVisible();
   await expect(page.locator("body")).not.toContainText(mojibake);
-  const refresh = page.locator("button").filter({ hasText: /^刷新$/ });
+  const refresh = page.getByRole("button", { name: "刷新系统状态" });
   await expect(refresh).toBeEnabled();
   await expect.poll(() => apiRequests.some((url) => url.endsWith("/v1/runs"))).toBe(true);
-  const response = page.waitForResponse((item) => item.url().endsWith("/v1/runs") && item.request().method() === "GET");
+  const response = page.waitForResponse((item) => item.url().endsWith("/v1/arena/status") && item.request().method() === "GET");
   await refresh.click();
   await response;
   await expect(refresh).toBeEnabled();
+  expect(errors.pageErrors).toEqual([]);
+  expect(errors.consoleErrors).toEqual([]);
+});
+
+test("competition workspaces expose arena and batch controls", async ({ page }) => {
+  const errors = captureBrowserErrors(page);
+  await page.goto("/arena");
+  await expect(page.getByRole("heading", { name: "擂台指挥" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "开始作业" })).toBeVisible();
+  await expect(page.getByText("作用域", { exact: true })).toBeVisible();
+  await page.goto("/workbench");
+  await expect(page.getByRole("heading", { name: "任务工作台" })).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "任务内容" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "提交解题" })).toBeVisible();
   expect(errors.pageErrors).toEqual([]);
   expect(errors.consoleErrors).toEqual([]);
 });
@@ -47,6 +61,7 @@ test("runs page supports direct refresh and real detail navigation when data exi
   await expect(page.locator("h1").first()).toBeVisible();
   await page.reload();
   await expect(page).toHaveURL(/\/runs$/);
+  await page.getByRole("textbox", { name: "搜索运行" }).fill("33333333-3333-4333-8333-333333333333");
   const detailLinks = page.locator('a[href="/runs/33333333-3333-4333-8333-333333333333"]');
   await expect(detailLinks).toBeVisible();
   await detailLinks.click();

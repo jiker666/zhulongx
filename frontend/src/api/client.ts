@@ -1,17 +1,38 @@
 export class ApiError extends Error { constructor(public readonly status: number, message: string) { super(message); this.name = "ApiError"; } }
 
 const baseURL = import.meta.env.VITE_API_BASE_URL ?? "";
+const serverTokenKey = "xuanshu-server-token";
+
+export function getServerToken(): string {
+  return window.sessionStorage.getItem(serverTokenKey) ?? "";
+}
+
+export function setServerToken(value: string): void {
+  const token = value.trim();
+  if (token) window.sessionStorage.setItem(serverTokenKey, token);
+  else window.sessionStorage.removeItem(serverTokenKey);
+}
+
+export function authorizedHeaders(): Record<string, string> {
+  const token = getServerToken();
+  return token ? { authorization: `Bearer ${token}` } : {};
+}
+
+export function apiURL(path: string): string {
+  return `${baseURL}${path}`;
+}
 
 export async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), 15_000);
   const signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
   try {
-    const response = await fetch(`${baseURL}${path}`, { ...options, signal, headers: { accept: "application/json", ...options.headers } });
+    const response = await fetch(apiURL(path), { ...options, signal, headers: { accept: "application/json", ...authorizedHeaders(), ...options.headers } });
     const text = await response.text();
     let body: unknown = undefined;
     try { body = text ? JSON.parse(text) : undefined; } catch { throw new ApiError(response.status, "服务返回了无法解析的数据"); }
     if (!response.ok) {
+      if (response.status === 401) window.dispatchEvent(new Event("xuanshu:unauthorized"));
       const message = body && typeof body === "object" && "error" in body ? String(body.error) : `请求失败（HTTP ${response.status}）`;
       throw new ApiError(response.status, message);
     }

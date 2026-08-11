@@ -1,7 +1,31 @@
+import { lazy, Suspense } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { AppShell } from "./components/AppShell";
-import { ExperiencesPage } from "./pages/ExperiencesPage";
-import { NotFoundPage } from "./pages/NotFoundPage";
-import { RunDetailPage } from "./pages/RunDetailPage";
-import { RunsPage } from "./pages/RunsPage";
-export function App() { return <Routes><Route element={<AppShell />}><Route index element={<Navigate to="/runs" replace />} /><Route path="runs" element={<RunsPage />} /><Route path="runs/:runId" element={<RunDetailPage />} /><Route path="experiences" element={<ExperiencesPage />} /><Route path="*" element={<NotFoundPage />} /></Route></Routes> }
+import { LoadingState } from "./components/ui";
+
+const ArenaPage = lazy(() => import("./pages/ArenaPage").then((module) => ({ default: module.ArenaPage })));
+const ExperiencesPage = lazy(() => import("./pages/ExperiencesPage").then((module) => ({ default: module.ExperiencesPage })));
+const NotFoundPage = lazy(() => import("./pages/NotFoundPage").then((module) => ({ default: module.NotFoundPage })));
+const OverviewPage = lazy(() => import("./pages/OverviewPage").then((module) => ({ default: module.OverviewPage })));
+const RunDetailPage = lazy(() => import("./pages/RunDetailPage").then((module) => ({ default: module.RunDetailPage })));
+const RunsPage = lazy(() => import("./pages/RunsPage").then((module) => ({ default: module.RunsPage })));
+const WorkbenchPage = lazy(() => import("./pages/WorkbenchPage").then((module) => ({ default: module.WorkbenchPage })));
+
+export function App() {
+  return (
+    <Suspense fallback={<LoadingState label="正在打开工作区…" />}>
+      <Routes>
+        <Route element={<AppShell />}>
+          <Route index element={<Navigate to="/overview" replace />} />
+          <Route path="overview" element={<OverviewPage />} />
+          <Route path="arena" element={<ArenaPage />} />
+          <Route path="workbench" element={<WorkbenchPage />} />
+          <Route path="runs" element={<RunsPage />} />
+          <Route path="runs/:runId" element={<RunDetailPage />} />
+          <Route path="experiences" element={<ExperiencesPage />} />
+          <Route path="*" element={<NotFoundPage />} />
+        </Route>
+      </Routes>
+    </Suspense>
+  );
+}

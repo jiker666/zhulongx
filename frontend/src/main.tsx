@@ -7,5 +7,6 @@ import "./styles.css";
 import "./styles/mission.css";
 import "./styles/graph.css";
 import "./styles/realtime.css";
+import "./styles/operations.css";
 const queryClient = new QueryClient({ defaultOptions: { queries: { staleTime: 10_000, retry: 1, refetchOnWindowFocus: false } } });
 createRoot(document.getElementById("root")!).render(<StrictMode><QueryClientProvider client={queryClient}><BrowserRouter><App /></BrowserRouter></QueryClientProvider></StrictMode>);
