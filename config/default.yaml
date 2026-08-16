@@ -65,6 +65,7 @@ scope:
     - foremost
     - fsstat
     - g++
+    - gap
     - gcc
     - gdb
     - gifsicle
@@ -86,6 +87,7 @@ scope:
     - one_gadget
     - outguess
     - openssl
+    - patchelf
     - pickora
     - pngcheck
     - python3
@@ -102,6 +104,7 @@ scope:
     - r2
     - sage
     - seccomp-tools
+    - scalpel
     - sox
     - soxi
     - sqlite3
@@ -128,6 +131,63 @@ scope:
     - cado-nfs
     - flatter
     - zstd
+    - addr2line
+    - c++filt
+    - gdb-multiarch
+    - jadx
+    - ltrace
+    - objcopy
+    - pwn
+    - rabin2
+    - rafind2
+    - ragg2
+    - rax2
+
+profile:
+  id: general-ctf
+  preferredExecutor: sandbox
+  approvalPolicy: never
+  requiredCapabilities:
+    - workspace-read
+    - scratch-read
+    - scratch-write
+    - abort
+  toolAllowlist:
+    - submit_plan
+    - checkpoint
+    - record_finding
+    - record_lesson
+    - finish_task
+    - list_files
+    - read_file
+    - inspect_artifact
+    - extract_archive
+    - search_artifact
+    - observe_image
+    - list_scratch_files
+    - read_scratch_file
+    - write_scratch_file
+    - run_command
+    - web_collect_baseline
+    - web_knowledge_lookup
+    - web_compare_responses
+    - web_timing_stats
+    - http_request
+    - browser
+    - tcp_open
+    - tcp_send
+    - tcp_receive
+    - tcp_close
+    - read_shared_evidence
+    - publish_shared_evidence
+  contextPolicy:
+    compactAtRatio: 0.75
+    keepRecentTokens: 100000
+    maxSummaryChars: 12000
+
+# Reverse connectors are disabled by default. Operator-owned deployments may
+# declare bounded outbound clients here and select one with profile.executorTargetId.
+connectors: []
 
 server:
   host: 127.0.0.1

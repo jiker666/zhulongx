@@ -20,7 +20,7 @@ export class RunManager {
 
   constructor(private readonly runtime: XuanShuRuntime) {}
 
-  start(request: TaskRequest, options: Pick<RunOptions, "workspaceMode" | "sharedEvidence"> = {}): string {
+  start(request: TaskRequest, options: Pick<RunOptions, "workspaceMode" | "sharedEvidence" | "allowedToolEffects" | "lineage"> = {}): string {
     const id = randomUUID();
     const handle: RunHandle = {
       id,
@@ -34,6 +34,8 @@ export class RunManager {
         id,
         ...(options.workspaceMode ? { workspaceMode: options.workspaceMode } : {}),
         ...(options.sharedEvidence ? { sharedEvidence: options.sharedEvidence } : {}),
+        ...(options.allowedToolEffects ? { allowedToolEffects: options.allowedToolEffects } : {}),
+        ...(options.lineage ? { lineage: options.lineage } : {}),
         signal: handle.controller.signal,
         onEvent: (event) => {
           handle.events.push(event);

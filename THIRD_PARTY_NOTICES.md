@@ -37,6 +37,11 @@ packages listed in `tools/ctf/capabilities.json`, `tools/ctf/requirements-core.t
 sandbox Docker build or by an operator running the install scripts. Operators are responsible for reviewing and
 complying with each upstream package license before redistribution or competition deployment.
 
+The core image fetches hash-verified release archives for Radare2 6.2.0 (LGPL-3.0-or-later with mixed-license
+plugins) and JADX 1.5.5 (Apache-2.0). It also installs Pwntools 4.15.0 (MIT) from the pinned Python requirements.
+These remain third-party image contents, not vendored source. Redistributors must retain and comply with the
+licenses supplied by those upstream releases and packages.
+
 The opt-in heavy profile fetches the following source tools at the commits recorded in
 `tools/ctf/capabilities.json`:
 
@@ -52,6 +57,14 @@ Redistributors must preserve these notices and independently satisfy source-dist
 copyleft obligations for the image they distribute; a pinned upstream URL alone is not a substitute for those
 obligations.
 
+The manifest also records operator-managed references that are not installed or advertised as default runtime
+capabilities. `jvdsn/crypto-attacks` is recorded at `d42a3df980bf029f682f218fa2893ed2d6af98d8`
+under MIT, and `maple3142/gf2bv` at `4357db5cae0dc1213526b93180b9a26f14a91070` under
+GPL-2.0. `lll_cvp`, `lattice-based-cryptanalysis`, and the intended `cuso` upstream remain disabled until an
+operator verifies their repository-wide license and reproducible installation/smoke-test contract. Ghidra and
+UPX are operator-installed extensions. Merely appearing in this review list does not add a
+program to the sandbox image or the runtime allowlist.
+
 ## Agent Architecture References
 
 The following repositories were reviewed at fixed commits as architectural and capability references:
@@ -59,11 +72,17 @@ The following repositories were reviewed at fixed commits as architectural and c
 - `FishCodeTech/muteki` at `a585a2943a15efc4de78b00a385335fc9b1f23f1` (AGPL-3.0).
 - `verialabs/ctf-agent` at `3366d569557c4fda3fd153040632de65e255396d` (MIT).
 - `Yeti-791/Tsec-Hackathon` at `7b264c7f20cf11e790855194692a494aedbdb21c` (competition materials; no repository-wide LICENSE file was present at review time).
+- `deepseek-ai/deepseek-harness` at `47f943859bef60e4160492346772ded9b24f765a` (MIT).
 
 No source from Muteki or target-specific Tsec competition skills/MCP packages is included. General concepts such
 as evidence blackboards, heterogeneous races, trace-based review, provenance gates, worker cancellation, and
 tool-profile coverage were independently implemented under this project's policy and audit model. See
 `docs/reference-agent-study.md` for the evidence and benchmark caveats.
+
+DeepSeek Harness was used as a design reference for append-only session events, source-oriented trajectory views,
+request-context snapshots, event-sequence forks, and replay-derived UI. No DeepSeek Harness source code or package
+dependency is included; the corresponding behavior was independently implemented on top of this project's existing
+SHA-256 audit chain, secret sanitization, bounded artifacts, and `PolicyEngine` boundary.
 
 ## Curated CTF Skill Index
 

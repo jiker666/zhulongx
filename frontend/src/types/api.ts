@@ -1,7 +1,8 @@
 export type RunStatus = "queued" | "running" | "completed" | "blocked" | "failed" | "aborted";
 export type RunPhase = "intake" | "planning" | "exploration" | "analysis" | "verification" | "reporting" | "done";
 
-export interface RunSummary { id: string; status: RunStatus; phase: RunPhase; task: string; category?: string; createdAt: string; finishedAt?: string; turns: number; toolCalls: number; lessons: number; }
+export interface RunLineage { parentRunId: string; boundarySequence: number; mode: "fork" | "resume"; inheritedEventCount: number }
+export interface RunSummary { id: string; status: RunStatus; phase: RunPhase; task: string; category?: string; createdAt: string; finishedAt?: string; turns: number; toolCalls: number; lessons: number; lineage?: RunLineage; }
 export interface EvidenceRecord { id: string; summary: string; source: string; lifecycle: string; toolCallId?: string; observationIds?: string[]; hypothesisIds?: string[]; actionIds?: string[]; candidateIds?: string[]; verificationIds?: string[]; createdAt?: string; updatedAt?: string }
 export interface HypothesisRecord { id: string; statement: string; status: string; evidence: string[]; updatedAt?: string }
 export interface FindingRecord { id: string; title: string; severity: string; confidence: number; description?: string; evidence: string[] }
@@ -10,11 +11,13 @@ export interface WebHypothesisRecord { id: string; title: string; statement: str
 export interface WebGraphNodeRecord { id: string; type: string; key: string; label: string; attributes: Record<string, unknown>; evidenceIds: string[]; observationIds: string[]; confidence: number; firstSeenAt: string; lastSeenAt: string; status: string }
 export interface WebGraphEdgeRecord { id: string; type: string; fromNodeId: string; toNodeId: string; attributes: Record<string, unknown>; evidenceIds: string[]; confidence: number; firstSeenAt: string; lastSeenAt: string; status: string }
 export interface RunState { id: string; status: RunStatus; phase: RunPhase; task: { task: string; metadata: Record<string, string>; attachments: unknown[] }; createdAt: string; updatedAt: string; startedAt?: string; finishedAt?: string; findings: FindingRecord[]; lessons: Array<Record<string, unknown>>; hypotheses: HypothesisRecord[]; strategyRevisions: Array<Record<string, unknown>>; evidence?: EvidenceRecord[]; turns: number; toolCalls: number; httpRequests: number; tcpSessions: number; summary?: string; stopReason?: string; webReasoning?: { observations: Array<Record<string, unknown>>; hypotheses: WebHypothesisRecord[]; actions: WebActionRecord[]; knowledgeGraph?: { nodes: WebGraphNodeRecord[]; edges: WebGraphEdgeRecord[] } }
+  lineage?: RunLineage;
 }
 export interface RunSnapshot { id: string; status: RunStatus; state?: RunState; error?: string; events: Array<{ type: string; timestamp: string; data: unknown }> }
-export interface TraceEvent { sequence: number; timestamp: string; kind: string; title: string; summary: string; data: unknown; status?: string; sourceEventType?: string }
+export type TrajectorySource = "operator" | "orchestrator" | "model" | "context" | "policy" | "tool" | "agent" | "system";
+export interface TraceEvent { sequence: number; timestamp: string; kind: string; title: string; summary: string; data: unknown; status?: string; sourceEventType?: string; source?: TrajectorySource; actor?: string; correlationId?: string; parentSequence?: number }
 export interface RunReview { id?: string; sequence: number; verdict: "correct" | "incorrect" | "uncertain"; note: string; correction?: string; createdAt?: string }
-export interface RunTrace { state: RunState; integrity: { valid: boolean }; timeline: TraceEvent[]; rawEvents?: Array<{ sequence: number; timestamp: string; type: string; data: unknown }>; reviews: RunReview[] }
+export interface RunTrace { state: RunState; integrity: { valid: boolean; records: number; error?: string }; timeline: TraceEvent[]; rawEvents?: Array<{ sequence: number; timestamp: string; type: string; source?: TrajectorySource; actor?: string; correlationId?: string; parentSequence?: number; data: unknown }>; reviews: RunReview[] }
 export interface Experience { id: string; title: string; category?: string; strategy: string[]; status: "active" | "disabled"; promotedAt?: string }
 
 export type ArenaJobStatus = "queued" | "running" | "stopping" | "completed" | "failed" | "aborted";

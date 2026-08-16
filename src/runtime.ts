@@ -9,17 +9,22 @@ import { streamSimple as streamOpenAICompletions } from "@earendil-works/pi-ai/a
 import { streamSimple as streamOpenAIResponses } from "@earendil-works/pi-ai/api/openai-responses";
 import { AuditChain } from "./audit.js";
 import { mergeScope } from "./config.js";
+import { projectModelMessages } from "./context-projection.js";
+import { SandboxExecutor } from "./executor.js";
 import { ExperienceStore, renderExperienceContext } from "./experience.js";
 import { normalizeTask, renderTaskContext } from "./input.js";
 import { estimateModelRequestTokens, ModelRequestGate } from "./model-rate-limit.js";
 import { PolicyEngine } from "./policy.js";
+import { classifyProviderError } from "./provider-errors.js";
+import { filterProfileTools, resolveAgentProfile, validateProfileCapabilities } from "./profiles.js";
 import { renderCapabilityPlaybook } from "./playbooks.js";
 import { sanitizeSecrets } from "./sanitize.js";
-import { SandboxClient } from "./sandbox.js";
+import { boundedContextSection, modelContextSnapshot } from "./session-trajectory.js";
 import type { SharedEvidenceBoard } from "./shared-evidence.js";
 import { buildSystemPrompt } from "./system-prompt.js";
 import { createToolSet } from "./tools.js";
-import type { AppConfig, NormalizedTask, RunEvent, RunState, RuntimeOverrides, TaskRequest } from "./types.js";
+import { toolDescriptorMap, type ToolEffect } from "./tool-catalog.js";
+import type { AppConfig, NormalizedTask, RunEvent, RunLineage, RunState, RuntimeOverrides, TaskRequest } from "./types.js";
 import { createWebReasoningController } from "./web-reasoning/controller.js";
 import { detectWebTask } from "./web-reasoning/task-detector.js";
 
@@ -175,6 +180,8 @@ export interface RunOptions {
   signal?: AbortSignal;
   workspaceMode?: "configured" | "attachments-only";
   sharedEvidence?: SharedEvidenceBoard;
+  allowedToolEffects?: ToolEffect[];
+  lineage?: RunLineage & { context: string };
 }
 
 export class XuanShuRuntime {
@@ -194,6 +201,12 @@ export class XuanShuRuntime {
     const id = options.id ?? randomUUID();
     const configuredScope = mergeScope(this.config.scope, request.scope);
     const task = await normalizeTask(request);
+    const memoryContext = this.overrides.memoryStore
+      ? await this.overrides.memoryStore.context({
+          ...(task.metadata.userId ? { userId: task.metadata.userId } : {}),
+          ...(task.metadata.projectId ? { projectId: task.metadata.projectId } : {}),
+        })
+      : "";
     const runDirectory = join(this.config.runtime.artifactRoot, id);
     const runScratchRoot = join(this.config.runtime.scratchRoot, "runs", id);
     const runtimeConfig = { ...this.config.runtime, scratchRoot: runScratchRoot };
@@ -203,15 +216,30 @@ export class XuanShuRuntime {
     if (workspaceMode === "attachments-only") {
       await stageAttachmentsOnly(task, isolatedInputRoot, options.signal);
     }
+    const executor = this.overrides.executorFactory
+      ? await this.overrides.executorFactory({
+          runId: id,
+          workspaceRoot: workspaceMode === "attachments-only" ? isolatedInputRoot : configuredScope.workspaceRoot,
+          scratchRoot: runScratchRoot,
+          ...(options.signal ? { signal: options.signal } : {}),
+        })
+      : new SandboxExecutor({
+          id: `sandbox:${id}`,
+          socketPath: runtimeConfig.sandbox.socketPath,
+          connectTimeoutMs: runtimeConfig.sandbox.connectTimeoutMs,
+          workspaceRoot: workspaceMode === "attachments-only" ? isolatedInputRoot : configuredScope.workspaceRoot,
+          scratchRoot: runScratchRoot,
+        });
+    const externalTools = this.overrides.externalTools ?? [];
+    const profile = resolveAgentProfile(this.config, externalTools.map((item) => item.descriptor.name));
     let sandboxReachable = false;
     let sandboxNetwork = "unknown";
     let availablePrograms: string[] = [];
+    const executorHealth = await executor.health(options.signal);
     try {
-      const health = await new SandboxClient(
-        runtimeConfig.sandbox.socketPath,
-        runtimeConfig.sandbox.connectTimeoutMs,
-      ).health();
-      sandboxReachable = true;
+      validateProfileCapabilities(profile, executorHealth);
+      const health = executorHealth;
+      sandboxReachable = health.status === "online";
       sandboxNetwork = health.network;
       const reported = new Set(health.allowedPrograms);
       availablePrograms = configuredScope.allowedPrograms.filter((program) => reported.has(program));
@@ -230,6 +258,13 @@ export class XuanShuRuntime {
       task.metadata.category ?? (webClassification.isWeb ? "Web" : undefined),
     );
     const now = new Date().toISOString();
+    const profileState = {
+      id: profile.id,
+      executorId: executor.id,
+      executorKind: executor.kind,
+      capabilities: [...executorHealth.capabilities],
+      tools: [] as string[],
+    };
     const state: RunState = {
       id,
       status: "running",
@@ -254,6 +289,15 @@ export class XuanShuRuntime {
       tcpSessions: 0,
       actionsSinceCheckpoint: 0,
       repeatedActions: {},
+      profile: profileState,
+      ...(options.lineage ? {
+        lineage: {
+          parentRunId: options.lineage.parentRunId,
+          boundarySequence: options.lineage.boundarySequence,
+          mode: options.lineage.mode,
+          inheritedEventCount: options.lineage.inheritedEventCount,
+        },
+      } : {}),
     };
     const emit = async (type: string, data: unknown) => {
       const event: RunEvent = { type, runId: id, timestamp: new Date().toISOString(), data };
@@ -279,26 +323,61 @@ export class XuanShuRuntime {
       },
       budgets: runtimeConfig,
       appliedExperience: experience.map((record) => ({ id: record.id, title: record.title, category: record.category })),
+      ...(state.lineage ? { lineage: state.lineage } : {}),
     });
+    if (state.lineage) {
+      await audit.append(`session.${state.lineage.mode === "fork" ? "forked" : "resumed"}`, state.lineage, {
+        source: "orchestrator",
+        actor: "run-manager",
+        correlationId: state.lineage.parentRunId,
+      });
+    }
     await writeJson(join(runDirectory, "state.json"), state);
     await emit("run.started", { status: state.status, phase: state.phase });
     const webReasoning = createWebReasoningController(state, audit, this.config.webReasoning);
     await webReasoning.initialize();
     if (webReasoning.enabled && this.config.webReasoning?.persistState !== false) await writeJson(join(runDirectory, "state.json"), state);
 
-    const policy = new PolicyEngine(scope, runtimeConfig);
+    const descriptors = new Map([
+      ...toolDescriptorMap().entries(),
+      ...externalTools.map((item) => [item.descriptor.name, item.descriptor] as const),
+    ]);
+    const policy = new PolicyEngine(scope, runtimeConfig, externalTools.map((item) => item.descriptor));
     const toolSet = createToolSet({
       state,
       scope,
       runtime: runtimeConfig,
       audit,
+      executor,
+      externalTools,
       sandboxNamespace: id,
       ...(options.sharedEvidence ? { sharedEvidence: options.sharedEvidence } : {}),
       ...(this.config.browser ? { browser: this.config.browser } : {}),
     });
+    toolSet.tools = filterProfileTools(profile, toolSet.tools);
+    if (options.allowedToolEffects) {
+      const allowedEffects = new Set(options.allowedToolEffects);
+      toolSet.tools = toolSet.tools.filter((tool) => {
+        const descriptor = descriptors.get(tool.name);
+        return descriptor?.kind === "control" || (descriptor ? allowedEffects.has(descriptor.effect) : false);
+      });
+    }
+    profileState.tools = toolSet.tools.map((tool) => tool.name);
     const model = this.overrides.model ?? createModel(this.config.model);
     const providerStreamFn = this.overrides.streamFn ?? defaultStreamFn();
+    let modelRequestNumber = 0;
+    let activeModelRequestId: string | undefined;
+    const toolRequestSequences = new Map<string, number>();
     const streamFn: StreamFn = (turnModel, context, streamOptions) => lazyStream(turnModel, async () => {
+      const requestId = `${id}:request:${++modelRequestNumber}`;
+      activeModelRequestId = requestId;
+      const contextRecord = await audit.append("model.context", {
+        requestId,
+        turn: state.turns,
+        model: { provider: turnModel.provider, id: turnModel.id, api: turnModel.api },
+        thinkingLevel: runtimeConfig.thinkingLevel,
+        ...modelContextSnapshot(context),
+      }, { source: "context", actor: "primary-agent", correlationId: requestId });
       const reservation = await this.modelRequestGate.wait({
         minimumIntervalMs: runtimeConfig.modelMinIntervalMs,
         requestsPerMinute: runtimeConfig.modelRequestsPerMinute,
@@ -306,11 +385,12 @@ export class XuanShuRuntime {
         estimatedTokens: estimateModelRequestTokens(turnModel, context, streamOptions),
       }, streamOptions?.signal);
       await audit.append("model.request_reserved", {
+        requestId,
         estimatedTokens: reservation.estimatedTokens,
         waitedMs: reservation.waitedMs,
         requestsPerMinute: runtimeConfig.modelRequestsPerMinute,
         tokensPerMinute: runtimeConfig.modelTokensPerMinute,
-      });
+      }, { source: "orchestrator", actor: "model-request-gate", correlationId: requestId, parentSequence: contextRecord.sequence });
       if (reservation.waitedMs > 0) {
         await emit("model.request_throttled", {
           estimatedTokens: reservation.estimatedTokens,
@@ -322,10 +402,38 @@ export class XuanShuRuntime {
     const apiKey = process.env[this.config.model.apiKeyEnv];
     const recoveryThinkingLevel = lengthRecoveryThinkingLevel(runtimeConfig.thinkingLevel);
     let lengthRecoveryAttempts = 0;
+    let lastContextCutId: string | undefined;
     const agent = new Agent({
       streamFn,
       sessionId: id,
       toolExecution: "sequential",
+      transformContext: async (messages) => {
+        try {
+          const projection = projectModelMessages(messages, {
+            contextWindow: this.config.model.contextWindow,
+            compactAtRatio: 0.75,
+            keepRecentTokens: Math.max(2_000, Math.floor(this.config.model.contextWindow * 0.25)),
+            maxSummaryChars: 12_000,
+          });
+          if (projection.cut && projection.cut.id !== lastContextCutId) {
+            const cut = projection.cut;
+            const record = await audit.append("context.compacted", ({ previousSequence }: { previousSequence: number }) => ({
+              id: cut.id,
+              throughSeq: previousSequence,
+              throughMessageCount: cut.throughMessageCount,
+              sourceEventCount: cut.sourceEventCount,
+              summary: cut.summary,
+            }));
+            state.contextCuts ??= [];
+            state.contextCuts.push({ ...cut, throughSeq: record.sequence - 1, createdAt: record.timestamp });
+            state.contextCuts = state.contextCuts.slice(-20);
+            lastContextCutId = cut.id;
+          }
+          return projection.messages;
+        } catch {
+          return messages;
+        }
+      },
       getApiKey: () => apiKey,
       maxRetryDelayMs: runtimeConfig.modelMaxRetryDelayMs,
       prepareNextTurnWithContext: ({ message }) =>
@@ -336,21 +444,28 @@ export class XuanShuRuntime {
           network: sandboxNetwork,
           configuredPrograms: [...configuredScope.allowedPrograms],
           unavailablePrograms,
-        }, { sharedEvidence: Boolean(options.sharedEvidence) }),
+        }, { sharedEvidence: Boolean(options.sharedEvidence) }, { id: profile.id, instructions: profile.systemPrompt }),
         model,
         thinkingLevel: runtimeConfig.thinkingLevel,
         tools: toolSet.tools,
       },
       beforeToolCall: async ({ toolCall, args }) => {
+        const requested = await audit.append("tool.requested", {
+          toolCallId: toolCall.id,
+          toolName: toolCall.name,
+          args: sanitizeSecrets(args),
+          description: descriptors.get(toolCall.name)?.sideEffects.join("; ") || "Agent requested a bounded tool action",
+        }, { source: "model", actor: "primary-agent", correlationId: toolCall.id });
+        toolRequestSequences.set(toolCall.id, requested.sequence);
         const guard = webReasoning.guardToolCall(toolCall.name, args, toolSet.tools.map((tool) => tool.name));
         if (!guard.allowed) {
-          await audit.append("WEB_ACTION_GUARD_REJECTED", { toolCallId: toolCall.id, toolName: toolCall.name, decision: guard.decision, reason: guard.reason });
+          await audit.append("WEB_ACTION_GUARD_REJECTED", { toolCallId: toolCall.id, toolName: toolCall.name, decision: guard.decision, reason: guard.reason }, { source: "policy", actor: "web-action-guard", correlationId: toolCall.id, parentSequence: requested.sequence });
           await emit("WEB_ACTION_GUARD_REJECTED", { toolName: toolCall.name, decision: guard.decision, reason: guard.reason });
           return { block: true, reason: guard.reason };
         }
         const webAction = webReasoning.prepareToolCall(toolCall.name, args, toolCall.id);
         if (webAction.duplicate) {
-          await audit.append("WEB_ACTION_SKIPPED_DUPLICATE", { actionId: webAction.actionId, toolName: toolCall.name });
+          await audit.append("WEB_ACTION_SKIPPED_DUPLICATE", { actionId: webAction.actionId, toolName: toolCall.name }, { source: "policy", actor: "web-action-deduplicator", correlationId: toolCall.id, parentSequence: requested.sequence });
           return { block: true, reason: "Duplicate Web action skipped; use new evidence or change strategy." };
         }
         const decision = policy.evaluate(toolCall.name, args, state);
@@ -361,7 +476,7 @@ export class XuanShuRuntime {
           allowed: decision.allowed,
           reason: decision.reason,
           signature: decision.signature,
-        });
+        }, { source: "policy", actor: "policy-engine", correlationId: toolCall.id, parentSequence: requested.sequence });
         await emit("policy.decision", { toolName: toolCall.name, allowed: decision.allowed, reason: decision.reason });
         if (!decision.allowed) {
           webReasoning.markPolicyRejected(toolCall.id, decision.reason);
@@ -377,6 +492,25 @@ export class XuanShuRuntime {
           }
           return { block: true, reason: decision.reason };
         }
+        const descriptor = descriptors.get(toolCall.name);
+        const risk = descriptor?.riskEvaluator(args);
+        if (risk && this.overrides.permissionGate) {
+          await audit.append("permission.request", {
+            toolCallId: toolCall.id,
+            toolName: toolCall.name,
+            risk,
+            args: sanitizeSecrets(args),
+          }, { source: "policy", actor: "permission-broker", correlationId: toolCall.id, parentSequence: requested.sequence });
+          const resolution = await this.overrides.permissionGate.authorize({ sessionId: id, toolCallId: toolCall.id, toolName: toolCall.name, args: sanitizeSecrets(args), risk }, options.signal);
+          await audit.append("permission.resolved", {
+            requestId: resolution.request.id,
+            toolCallId: toolCall.id,
+            toolName: toolCall.name,
+            decision: resolution.decision,
+            source: resolution.source,
+          }, { source: "operator", actor: resolution.source, correlationId: toolCall.id, parentSequence: requested.sequence });
+          if (resolution.decision === "deny") return { block: true, reason: `Tool permission denied (${resolution.source})` };
+        }
         policy.recordAllowed(toolCall.name, decision, state);
         state.updatedAt = new Date().toISOString();
         return undefined;
@@ -389,6 +523,11 @@ export class XuanShuRuntime {
           isError,
           content: sanitizeSecrets(publicContent(result.content)),
           details: sanitizeSecrets(result.details),
+        }, {
+          source: "tool",
+          actor: toolCall.name,
+          correlationId: toolCall.id,
+          ...(toolRequestSequences.get(toolCall.id) !== undefined ? { parentSequence: toolRequestSequences.get(toolCall.id)! } : {}),
         });
         if (isError && !["submit_plan", "checkpoint", "record_finding", "record_lesson", "finish_task"].includes(toolCall.name)) {
           state.actionsSinceCheckpoint = runtimeConfig.maxActionsWithoutCheckpoint;
@@ -427,7 +566,7 @@ export class XuanShuRuntime {
           await webReasoning.beforeFinalization(runtimeConfig.maxTurns - state.turns);
         }
       } else if (event.type === "message_end" && event.message.role === "assistant") {
-        await audit.append("assistant.message", publicMessage(event.message));
+        await audit.append("assistant.message", publicMessage(event.message), { source: "model", actor: "primary-agent", ...(activeModelRequestId ? { correlationId: activeModelRequestId } : {}) });
         if (
           state.status === "running" &&
           hitOutputLimitWithoutToolCall(event.message) &&
@@ -472,12 +611,19 @@ export class XuanShuRuntime {
       const reasoningContext = webReasoning.enabled
         ? await webReasoning.beforeTurn(runtimeConfig.maxTurns - state.turns, runtimeConfig.maxToolCalls - state.toolCalls, toolSet.tools.map((tool) => tool.name))
         : "";
-      await agent.prompt([
-        renderCapabilityPlaybook(task.metadata.category ?? (webReasoning.enabled ? "Web" : undefined)),
-        reasoningContext,
-        renderExperienceContext(experience),
-        renderTaskContext(task),
-      ].filter(Boolean).join("\n\n"));
+      const promptSections = [
+        { name: "capability-playbook", content: renderCapabilityPlaybook(task.metadata.category ?? (webReasoning.enabled ? "Web" : undefined)) },
+        { name: "reasoning-state", content: reasoningContext },
+        { name: "verified-experience", content: renderExperienceContext(experience) },
+        { name: "memory", content: memoryContext },
+        ...(options.lineage?.context ? [{ name: "inherited-trajectory", content: options.lineage.context }] : []),
+        { name: "task", content: renderTaskContext(task) },
+      ].filter((section) => Boolean(section.content));
+      await audit.append("context.injected", {
+        target: "primary-agent",
+        sections: promptSections.map((section) => boundedContextSection(section.name, section.content)),
+      }, { source: "context", actor: "context-assembler" });
+      await agent.prompt(promptSections.map((section) => section.content).join("\n\n"));
       if (state.status === "running") {
         const last = agent.state.messages.at(-1);
         if (last?.role === "assistant" && last.stopReason === "aborted") {
@@ -499,10 +645,12 @@ export class XuanShuRuntime {
     } catch (error) {
       state.status = "failed";
       state.stopReason = error instanceof Error ? error.message : String(error);
-      await audit.append("run.error", { message: state.stopReason });
+      state.providerError = classifyProviderError(error);
+      await audit.append("run.error", { message: state.stopReason, providerError: state.providerError });
     } finally {
       clearTimeout(timer);
       options.signal?.removeEventListener("abort", abortRun);
+      this.overrides.permissionGate?.cancelSession?.(id);
       await toolSet.cleanup();
       state.phase = "done";
       if (webReasoning.enabled && state.status !== "completed") {

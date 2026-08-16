@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import { loadConfig, mergeScope } from "../src/config.js";
 import { testConfig } from "./helpers.js";
@@ -77,6 +77,43 @@ describe("model configuration", () => {
     expect(source).not.toMatch(/Bearer\s+[A-Za-z0-9._~-]+/i);
   });
 
+  it("loads Baidu TSec local and hosted configurations without embedded credentials", async () => {
+    const [local, hosted, localSource, hostedSource] = await Promise.all([
+      loadConfig("config/tsec-baidu-local.yaml"),
+      loadConfig("config/tsec-hosted.yaml"),
+      readFile("config/tsec-baidu-local.yaml", "utf8"),
+      readFile("config/tsec-hosted.yaml", "utf8"),
+    ]);
+
+    expect(local.model).toMatchObject({
+      provider: "baidu-agent-awd",
+      id: "glm-5.2-agent-chanllenge",
+      api: "openai-completions",
+      baseUrl: "https://agent-awd.baidu.com/v1",
+      apiKeyEnv: "BAIDU_API_KEY",
+    });
+    expect(hosted.model).toMatchObject({
+      provider: "baidu-agent-awd-tsecbench",
+      id: "glm-5.2-agent-chanllenge",
+      api: "openai-completions",
+      baseUrl: "http://agent-awd.baidu.com.tsecbench.gw/v1",
+      apiKeyEnv: "BAIDU_API_KEY",
+    });
+    expect(hosted.scope).toMatchObject({ mode: "controlled", allowedHosts: ["10.0.*.*", "10.0.*.*:*"] });
+    for (const source of [localSource, hostedSource]) {
+      expect(source).not.toMatch(/^\s*apiKey\s*:/m);
+      expect(source).not.toMatch(/Bearer\s+[A-Za-z0-9._~-]+/i);
+    }
+  });
+
+  it("rejects executor kinds without a built-in or operator-provided adapter", async () => {
+    const source = await readFile("config/default.yaml", "utf8");
+    const path = `/tmp/xuan-config-${process.pid}-${Date.now()}.yaml`;
+    await writeFile(path, source.replace("preferredExecutor: sandbox", "preferredExecutor: ssh"));
+    try { await expect(loadConfig(path)).rejects.toThrow("operator-provided executor adapter"); }
+    finally { await rm(path, { force: true }); }
+  });
+
   it("operator-owned CTF profiles explicitly allow the offline Crypto/Misc toolset", async () => {
     const [configs, manifestSource] = await Promise.all([
       Promise.all([
@@ -96,6 +133,8 @@ describe("model configuration", () => {
     const requiredPrograms = [
       ...manifest.profiles.core.commands.crypto,
       ...manifest.profiles.core.commands.misc,
+      "patchelf",
+      "scalpel",
       ...manifest.profiles.heavy.commands,
     ];
 

@@ -22,7 +22,9 @@ apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
   ffuf \
   file \
   foremost \
+  gap \
   gdb \
+  gdb-multiarch \
   gifsicle \
   gmp-ecm \
   git \
@@ -39,12 +41,14 @@ apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
   libmpfr-dev \
   libsox-fmt-all \
   libyara-dev \
+  ltrace \
   minimodem \
   multimon-ng \
   nmap \
   outguess \
   p7zip-full \
   pari-gp \
+  patchelf \
   pngcheck \
   pkg-config \
   python3 \
@@ -56,6 +60,7 @@ apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
   ripgrep \
   ruby \
   ruby-dev \
+  scalpel \
   sleuthkit \
   sox \
   sqlite3 \

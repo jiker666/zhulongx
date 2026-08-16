@@ -6,16 +6,29 @@ import type { AppConfig, TaskRequest } from "./types.js";
 import { dashboardHtml } from "./dashboard.js";
 import { ExperienceStore, type ExperienceUpdate } from "./experience.js";
 import { RunManager } from "./run-manager.js";
+import { recoverInterruptedRuns } from "./run-recovery.js";
 import { XuanShuRuntime } from "./runtime.js";
-import { appendRunReview, listPersistedRuns, loadDecisionTrace, loadPersistedRun, readAuditRecords, truncateTraceData } from "./trace.js";
+import { inferTrajectorySource } from "./session-trajectory.js";
+import { appendRunReview, listPersistedRuns, loadDecisionTrace, loadPersistedRun, prepareRunContinuation, readAuditRecords, truncateTraceData } from "./trace.js";
 import { ArenaJobManager } from "./arena-jobs.js";
 import { ManualJobManager, validateManualJobInput } from "./manual-jobs.js";
 import { ManualUploadError, ManualUploadStore } from "./manual-uploads.js";
+import { PermissionBroker, type PermissionDecision } from "./permissions.js";
 import { QuestionBank, questionToTaskRequest } from "./question-bank.js";
 import { QuestionBankInstanceRunner } from "./question-bank-instances.js";
+import { DurableAgentStore, type AgentPurpose, type AgentTaskBudget } from "./agent-store.js";
+import { BoundedAgentWorker, runManagerAgentTaskRunner } from "./agent-worker.js";
+import { MemoryStore, type MemoryConfidence, type MemoryKind, type MemoryScope, type MemoryStatus } from "./memory.js";
+import { DurableWorkflowStore, type WorkflowBudget, type WorkflowNodeSpec } from "./workflow.js";
+import { BoundedWorkflowWorker, runManagerWorkflowNodeRunner } from "./workflow-worker.js";
+import { ConnectorBroker, ConnectorExecutor } from "./connector.js";
+import { EvaluationLedger, type EvaluationAttempt } from "./evaluation-ledger.js";
+import { KnowledgeStore, type KnowledgeTrust } from "./knowledge-store.js";
 import { QuestionBankProgressStore } from "./question-bank-progress.js";
 
 const MAX_BODY_BYTES = 1024 * 1024;
+
+class RequestInputError extends Error {}
 
 function json(response: ServerResponse, status: number, value: unknown): void {
   response.writeHead(status, { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
@@ -56,10 +69,11 @@ async function bodyJson(request: IncomingMessage): Promise<unknown> {
   for await (const chunk of request) {
     const bytes = Buffer.from(chunk as Uint8Array);
     size += bytes.length;
-    if (size > MAX_BODY_BYTES) throw new Error("Request body exceeds 1 MiB");
+    if (size > MAX_BODY_BYTES) throw new RequestInputError("Request body exceeds 1 MiB");
     chunks.push(bytes);
   }
-  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  try { return JSON.parse(Buffer.concat(chunks).toString("utf8")); }
+  catch { throw new RequestInputError("Request body must be valid JSON"); }
 }
 
 function authorized(request: IncomingMessage, config: AppConfig): boolean {
@@ -121,6 +135,90 @@ export interface ApiServerDependencies {
   questionBankProgress?: QuestionBankProgressStore;
   questionBankInstances?: QuestionBankInstanceRunner;
   frontendRoot?: string;
+  permissionBroker?: PermissionBroker;
+  agentStore?: DurableAgentStore;
+  agentWorker?: BoundedAgentWorker;
+  memoryStore?: MemoryStore;
+  workflowStore?: DurableWorkflowStore;
+  workflowWorker?: BoundedWorkflowWorker;
+  connectorBroker?: ConnectorBroker;
+  evaluationLedger?: EvaluationLedger;
+  knowledgeStore?: KnowledgeStore;
+}
+
+function inputRecord(value: unknown, label = "request body"): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new RequestInputError(`${label} must be an object`);
+  return value as Record<string, unknown>;
+}
+
+function boundedLimit(value: string | null, fallback: number, maximum: number): number {
+  if (value === null) return fallback;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) throw new Error("limit must be a positive integer");
+  return Math.min(parsed, maximum);
+}
+
+async function clientRequest<T>(response: ServerResponse, operation: () => Promise<T>, status = 200): Promise<void> {
+  try { json(response, status, await operation()); }
+  catch (error) { json(response, 400, { error: error instanceof Error ? error.message : String(error) }); }
+}
+
+function agentTaskBudget(value: unknown, config: AppConfig): AgentTaskBudget {
+  const input = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const integer = (key: string, fallback: number): number => {
+    const candidate = input[key] === undefined ? fallback : Number(input[key]);
+    if (!Number.isSafeInteger(candidate) || candidate <= 0) throw new Error(`budget.${key} must be a positive integer`);
+    return candidate;
+  };
+  return {
+    maxRuntimeMs: Math.min(integer("maxRuntimeMs", config.runtime.maxRuntimeMs), config.runtime.maxRuntimeMs),
+    maxTokens: Math.min(integer("maxTokens", config.model.maxTokens * config.runtime.maxTurns), config.model.maxTokens * config.runtime.maxTurns),
+    maxCostMicros: integer("maxCostMicros", 10_000_000),
+  };
+}
+
+function workflowBudget(value: unknown, config: AppConfig): WorkflowBudget {
+  const input = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const integer = (key: string, fallback: number, maximum: number): number => {
+    const candidate = input[key] === undefined ? fallback : Number(input[key]);
+    if (!Number.isSafeInteger(candidate) || candidate < 0 || (candidate === 0 && !["maxNetworkNodes", "maxNetworkRequests", "maxControllerExpansions"].includes(key))) throw new Error(`budget.${key} is invalid`);
+    return Math.min(candidate, maximum);
+  };
+  return {
+    maxNodes: integer("maxNodes", 32, 128),
+    maxRuntimeMs: integer("maxRuntimeMs", config.runtime.maxRuntimeMs, config.runtime.maxRuntimeMs),
+    maxNetworkNodes: integer("maxNetworkNodes", config.runtime.maxHttpRequests, config.runtime.maxHttpRequests),
+    maxNetworkRequests: integer("maxNetworkRequests", config.runtime.maxHttpRequests, config.runtime.maxHttpRequests),
+    maxTokens: integer("maxTokens", config.model.maxTokens * config.runtime.maxTurns, config.model.maxTokens * config.runtime.maxTurns),
+    maxCostMicros: integer("maxCostMicros", 10_000_000, 1_000_000_000),
+    maxControllerExpansions: integer("maxControllerExpansions", 2, 8),
+  };
+}
+
+function workflowNodes(value: unknown): WorkflowNodeSpec[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 128) throw new Error("nodes must contain between 1 and 128 items");
+  return value.map((item, index) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error(`nodes[${index}] must be an object`);
+    const node = item as Record<string, unknown>;
+    if (typeof node.id !== "string" || typeof node.message !== "string") throw new Error(`nodes[${index}] requires id and message`);
+    if (!Array.isArray(node.dependencies)) throw new Error(`nodes[${index}].dependencies must be an array`);
+    const dependencies = node.dependencies.map((dependency, dependencyIndex) => {
+      if (!dependency || typeof dependency !== "object" || Array.isArray(dependency)) throw new Error(`nodes[${index}].dependencies[${dependencyIndex}] must be an object`);
+      const value = dependency as Record<string, unknown>;
+      if (typeof value.nodeId !== "string" || !["success", "settled"].includes(String(value.condition))) throw new Error(`nodes[${index}] has an invalid dependency`);
+      return { nodeId: value.nodeId, condition: value.condition as "success" | "settled" };
+    });
+    return {
+      id: node.id,
+      kind: node.kind as WorkflowNodeSpec["kind"],
+      message: node.message,
+      dependencies,
+      effect: node.effect as WorkflowNodeSpec["effect"],
+      cachePolicy: node.cachePolicy as WorkflowNodeSpec["cachePolicy"],
+      ...(typeof node.evidenceVersion === "string" ? { evidenceVersion: node.evidenceVersion } : {}),
+      maxAttempts: Number(node.maxAttempts),
+    };
+  });
 }
 
 async function questionBankSnapshot(questionBank: QuestionBank, progress: QuestionBankProgressStore) {
@@ -150,7 +248,24 @@ async function questionBankSnapshot(questionBank: QuestionBank, progress: Questi
 }
 
 export function createApiServer(config: AppConfig, dependencies: ApiServerDependencies = {}) {
-  const manager = new RunManager(new XuanShuRuntime(config));
+  const permissionBroker = dependencies.permissionBroker ?? new PermissionBroker(config.profile?.approvalPolicy ?? "never");
+  const orchestrationRoot = join(config.runtime.artifactRoot, "..", "orchestration");
+  const memoryStore = dependencies.memoryStore ?? new MemoryStore(orchestrationRoot);
+  const connectorBroker = dependencies.connectorBroker ?? new ConnectorBroker(config.connectors ?? []);
+  const targetConnectorId = config.profile?.preferredExecutor === "connector" ? config.profile.executorTargetId : undefined;
+  const manager = new RunManager(new XuanShuRuntime(config, {
+    permissionGate: permissionBroker,
+    memoryStore,
+    ...(targetConnectorId ? { executorFactory: () => new ConnectorExecutor(targetConnectorId, connectorBroker) } : {}),
+  }));
+  const agentStore = dependencies.agentStore ?? new DurableAgentStore(orchestrationRoot);
+  const agentWorker = dependencies.agentWorker ?? new BoundedAgentWorker(agentStore, runManagerAgentTaskRunner(manager));
+  agentWorker.start();
+  const workflowStore = dependencies.workflowStore ?? new DurableWorkflowStore(orchestrationRoot);
+  const workflowWorker = dependencies.workflowWorker ?? new BoundedWorkflowWorker(workflowStore, runManagerWorkflowNodeRunner(manager));
+  workflowWorker.start();
+  const evaluationLedger = dependencies.evaluationLedger ?? new EvaluationLedger(orchestrationRoot);
+  const knowledgeStore = dependencies.knowledgeStore ?? new KnowledgeStore(orchestrationRoot);
   const experience = new ExperienceStore(config.runtime.artifactRoot);
   const arenaJobs = dependencies.arenaJobs ?? new ArenaJobManager(config);
   const manualJobs = dependencies.manualJobs ?? new ManualJobManager({ runManager: manager });
@@ -163,7 +278,19 @@ export function createApiServer(config: AppConfig, dependencies: ApiServerDepend
   const terminalStatuses = new Set(["completed", "blocked", "failed", "aborted"]);
   const sendStreamRecord = (response: ServerResponse, runId: string, record: Awaited<ReturnType<typeof readAuditRecords>>[number]): void => {
     const eventId = `${runId}:${record.sequence}`;
-    const envelope = { streamVersion: 1, runId, eventId, sequence: record.sequence, type: record.type, timestamp: record.timestamp, data: truncateTraceData(record.data) };
+    const envelope = {
+      streamVersion: 1,
+      runId,
+      eventId,
+      sequence: record.sequence,
+      type: record.type,
+      timestamp: record.timestamp,
+      source: record.source ?? inferTrajectorySource(record.type),
+      ...(record.actor ? { actor: record.actor } : {}),
+      ...(record.correlationId ? { correlationId: record.correlationId } : {}),
+      ...(record.parentSequence !== undefined ? { parentSequence: record.parentSequence } : {}),
+      data: truncateTraceData(record.data),
+    };
     response.write(`id: ${eventId}\nevent: run-event\ndata: ${JSON.stringify(envelope)}\n\n`);
   };
   const streamRunEvents = async (request: IncomingMessage, response: ServerResponse, runId: string): Promise<void> => {
@@ -214,6 +341,180 @@ export function createApiServer(config: AppConfig, dependencies: ApiServerDepend
       }
       if (request.method === "GET" && url.pathname === "/v1/question-bank") {
         json(response, 200, { questionBank: await questionBankSnapshot(questionBank, questionBankProgress) });
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/v1/permissions") {
+        json(response, 200, { permissions: permissionBroker.list() });
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/v1/agents") {
+        json(response, 200, await agentStore.snapshot());
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/v1/memory") {
+        json(response, 200, { records: await memoryStore.list({ ...(url.searchParams.get("userId") ? { userId: url.searchParams.get("userId")! } : {}), ...(url.searchParams.get("projectId") ? { projectId: url.searchParams.get("projectId")! } : {}), includeDisabled: url.searchParams.get("includeDisabled") === "true" }) });
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/v1/memory") {
+        const input = inputRecord(await bodyJson(request));
+        if (!input || !["user", "project"].includes(String(input.scope)) || !["note", "synthesized"].includes(String(input.kind)) || typeof input.scopeId !== "string" || typeof input.content !== "string") { json(response, 400, { error: "scope, scopeId, kind, content, and ttlMs are required" }); return; }
+        await clientRequest(response, async () => ({ record: await memoryStore.add({ scope: input.scope as MemoryScope, scopeId: input.scopeId as string, kind: input.kind as MemoryKind, content: input.content as string, ...(Array.isArray(input.sourceSessionIds) && input.sourceSessionIds.every((item) => typeof item === "string") ? { sourceSessionIds: input.sourceSessionIds as string[] } : {}), ...(["low", "medium", "high"].includes(String(input.confidence)) ? { confidence: input.confidence as MemoryConfidence } : {}), ...(typeof input.userConfirmed === "boolean" ? { userConfirmed: input.userConfirmed } : {}), ttlMs: Number(input.ttlMs) }) }), 201); return;
+      }
+      if (request.method === "DELETE" && url.pathname === "/v1/memory") {
+        const scope = url.searchParams.get("scope"); const kind = url.searchParams.get("kind"); const scopeId = url.searchParams.get("scopeId");
+        if (scope !== null && !["user", "project"].includes(scope)) { json(response, 400, { error: "scope is invalid" }); return; }
+        if (kind !== null && !["note", "synthesized"].includes(kind)) { json(response, 400, { error: "kind is invalid" }); return; }
+        if (scope === null && kind === null && scopeId === null) { json(response, 400, { error: "memory clear requires at least one filter" }); return; }
+        json(response, 200, { removed: await memoryStore.clear({ ...(scope ? { scope: scope as MemoryScope } : {}), ...(kind ? { kind: kind as MemoryKind } : {}), ...(scopeId ? { scopeId } : {}) }) }); return;
+      }
+      const memoryMatch = url.pathname.match(/^\/v1\/memory\/([0-9a-f-]+)$/i);
+      if (request.method === "PATCH" && memoryMatch?.[1]) {
+        const input = inputRecord(await bodyJson(request));
+        await clientRequest(response, async () => ({ record: await memoryStore.update(memoryMatch[1]!, { ...(typeof input.content === "string" ? { content: input.content } : {}), ...(["active", "disabled"].includes(String(input.status)) ? { status: input.status as MemoryStatus } : {}), ...(typeof input.userConfirmed === "boolean" ? { userConfirmed: input.userConfirmed } : {}), ...(["low", "medium", "high"].includes(String(input.confidence)) ? { confidence: input.confidence as MemoryConfidence } : {}), ...(input.ttlMs === undefined ? {} : { ttlMs: Number(input.ttlMs) }) }) })); return;
+      }
+      if (request.method === "DELETE" && memoryMatch?.[1]) {
+        if (await memoryStore.remove(memoryMatch[1])) json(response, 200, { removed: true }); else json(response, 404, { error: "memory record not found" });
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/v1/workflows") { json(response, 200, await workflowStore.snapshot()); return; }
+      if (request.method === "POST" && url.pathname === "/v1/workflows") {
+        try {
+          const input = await bodyJson(request) as Record<string, unknown>;
+          if (!input || typeof input.name !== "string") throw new Error("name is required");
+          const workflow = await workflowStore.create({ name: input.name, nodes: workflowNodes(input.nodes), budget: workflowBudget(input.budget, config) });
+          json(response, 202, { workflow, statusUrl: `/v1/workflows/${workflow.id}` });
+        } catch (error) { json(response, 400, { error: error instanceof Error ? error.message : String(error) }); }
+        return;
+      }
+      const workflowMatch = url.pathname.match(/^\/v1\/workflows\/([0-9a-f-]+)$/i);
+      if (request.method === "GET" && workflowMatch?.[1]) { const workflow = await workflowStore.get(workflowMatch[1]); if (workflow) json(response, 200, { workflow }); else json(response, 404, { error: "workflow not found" }); return; }
+      const workflowCancelMatch = url.pathname.match(/^\/v1\/workflows\/([0-9a-f-]+)\/cancel$/i);
+      if (request.method === "POST" && workflowCancelMatch?.[1]) { const workflow = await workflowStore.get(workflowCancelMatch[1]); if (!workflow) json(response, 404, { error: "workflow not found" }); else await clientRequest(response, async () => { await workflowWorker.cancel(workflow.id); return { workflow: await workflowStore.get(workflow.id) }; }, 202); return; }
+      if (request.method === "GET" && url.pathname === "/v1/connectors") { json(response, 200, { connectors: connectorBroker.list() }); return; }
+      const connectorRegisterMatch = url.pathname.match(/^\/v1\/connectors\/([A-Za-z0-9_.-]+)\/register$/);
+      if (request.method === "POST" && connectorRegisterMatch?.[1]) { const input = inputRecord(await bodyJson(request)); if (typeof input.instanceId !== "string") { json(response, 400, { error: "instanceId is required" }); return; } await clientRequest(response, async () => ({ connector: connectorBroker.register(connectorRegisterMatch[1]!, input.instanceId as string) })); return; }
+      const connectorHeartbeatMatch = url.pathname.match(/^\/v1\/connectors\/([A-Za-z0-9_.-]+)\/heartbeat$/);
+      if (request.method === "POST" && connectorHeartbeatMatch?.[1]) { const input = inputRecord(await bodyJson(request)); await clientRequest(response, async () => ({ connector: connectorBroker.heartbeat(connectorHeartbeatMatch[1]!, String(input.instanceId ?? ""), Number(input.generation)) })); return; }
+      const connectorDisconnectMatch = url.pathname.match(/^\/v1\/connectors\/([A-Za-z0-9_.-]+)\/disconnect$/);
+      if (request.method === "POST" && connectorDisconnectMatch?.[1]) { const input = inputRecord(await bodyJson(request)); await clientRequest(response, async () => { connectorBroker.disconnect(connectorDisconnectMatch[1]!, String(input.instanceId ?? ""), Number(input.generation)); return { connector: connectorBroker.get(connectorDisconnectMatch[1]!) }; }); return; }
+      const connectorClaimMatch = url.pathname.match(/^\/v1\/connectors\/([A-Za-z0-9_.-]+)\/claim$/);
+      if (request.method === "POST" && connectorClaimMatch?.[1]) { const input = inputRecord(await bodyJson(request)); await clientRequest(response, async () => ({ task: connectorBroker.claim(connectorClaimMatch[1]!, String(input.instanceId ?? ""), Number(input.generation), Math.min(Number(input.leaseMs) || 30_000, 120_000)) ?? null })); return; }
+      const connectorResultMatch = url.pathname.match(/^\/v1\/connectors\/([A-Za-z0-9_.-]+)\/tasks\/([0-9a-f-]+)$/i);
+      if (request.method === "POST" && connectorResultMatch?.[1] && connectorResultMatch[2]) { const input = inputRecord(await bodyJson(request)); await clientRequest(response, async () => { connectorBroker.resolve(connectorResultMatch[1]!, String(input.instanceId ?? ""), Number(input.generation), connectorResultMatch[2]!, Number(input.leaseGeneration), { ...(input.result === undefined ? {} : { result: input.result }), ...(typeof input.error === "string" ? { error: input.error } : {}) }); return { accepted: true }; }); return; }
+      if (request.method === "GET" && url.pathname === "/v1/knowledge") {
+        try { json(response, 200, { documents: await knowledgeStore.list(boundedLimit(url.searchParams.get("limit"), 100, 1_000)) }); }
+        catch (error) { json(response, 400, { error: error instanceof Error ? error.message : String(error) }); }
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/v1/knowledge") {
+        const input = inputRecord(await bodyJson(request));
+        if (typeof input.sourceUrl !== "string" || typeof input.title !== "string" || typeof input.mediaType !== "string" || typeof input.source !== "string" || typeof input.summary !== "string" || !["operator", "verified", "community", "untrusted"].includes(String(input.trust))) { json(response, 400, { error: "sourceUrl, title, mediaType, trust, source, and summary are required" }); return; }
+        const stringList = (key: string): string[] | undefined => { const value = input[key]; if (value === undefined) return undefined; if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) throw new Error(`${key} must be an array of strings`); return value as string[]; };
+        await clientRequest(response, async () => {
+          const keyParameters = stringList("keyParameters"); const codeSnippets = stringList("codeSnippets"); const citations = stringList("citations");
+          return { document: await knowledgeStore.ingest({ ...(typeof input.docId === "string" ? { docId: input.docId } : {}), sourceUrl: input.sourceUrl as string, title: input.title as string, mediaType: input.mediaType as string, trust: input.trust as KnowledgeTrust, source: input.source as string, ...(typeof input.markdown === "string" ? { markdown: input.markdown } : {}), summary: input.summary as string, ...(keyParameters ? { keyParameters } : {}), ...(codeSnippets ? { codeSnippets } : {}), ...(citations ? { citations } : {}) }) };
+        }, 201); return;
+      }
+      const knowledgeMatch = url.pathname.match(/^\/v1\/knowledge\/([A-Za-z0-9][A-Za-z0-9_.-]{0,127})$/);
+      if (request.method === "GET" && knowledgeMatch?.[1]) { const document = await knowledgeStore.get(knowledgeMatch[1]); if (document) json(response, 200, { document }); else json(response, 404, { error: "knowledge document not found" }); return; }
+      if (request.method === "DELETE" && knowledgeMatch?.[1]) { if (await knowledgeStore.remove(knowledgeMatch[1])) json(response, 200, { removed: true }); else json(response, 404, { error: "knowledge document not found" }); return; }
+      if (request.method === "GET" && url.pathname === "/v1/evaluations") {
+        try { json(response, 200, { manifests: await evaluationLedger.listManifests(boundedLimit(url.searchParams.get("limit"), 64, 64)) }); }
+        catch (error) { json(response, 400, { error: error instanceof Error ? error.message : String(error) }); }
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/v1/evaluations") {
+        const input = inputRecord(await bodyJson(request)); const model = inputRecord(input.model, "model"); const budget = inputRecord(input.budget, "budget");
+        if (typeof input.suite !== "string" || typeof input.datasetVersion !== "string" || !["development", "validation", "hidden"].includes(String(input.split)) || typeof model.provider !== "string" || typeof model.id !== "string" || typeof model.thinkingLevel !== "string") { json(response, 400, { error: "suite, datasetVersion, split, model, and budget are required" }); return; }
+        await clientRequest(response, async () => ({ manifest: await evaluationLedger.createManifest({ suite: input.suite as string, datasetVersion: input.datasetVersion as string, split: input.split as "development" | "validation" | "hidden", model: { provider: model.provider as string, id: model.id as string, thinkingLevel: model.thinkingLevel as string }, budget: { maxAttempts: Number(budget.maxAttempts), maxRuntimeMsPerAttempt: Number(budget.maxRuntimeMsPerAttempt), maxTokensPerAttempt: Number(budget.maxTokensPerAttempt), maxCostMicrosPerAttempt: Number(budget.maxCostMicrosPerAttempt), networkAllowed: budget.networkAllowed === true }, ...(Array.isArray(input.artifactPaths) && input.artifactPaths.every((item) => typeof item === "string") ? { artifactPaths: input.artifactPaths as string[] } : {}), ...(input.containerDigests && typeof input.containerDigests === "object" && !Array.isArray(input.containerDigests) ? { containerDigests: input.containerDigests as Record<string, string> } : {}) }) }), 201); return;
+      }
+      const evaluationMatch = url.pathname.match(/^\/v1\/evaluations\/([0-9a-f-]+)$/i);
+      if (request.method === "GET" && evaluationMatch?.[1]) { await clientRequest(response, async () => ({ report: await evaluationLedger.report(evaluationMatch[1]!), attempts: await evaluationLedger.listAttempts(evaluationMatch[1]!, boundedLimit(url.searchParams.get("limit"), 100, 1_000)) })); return; }
+      const evaluationAttemptMatch = url.pathname.match(/^\/v1\/evaluations\/([0-9a-f-]+)\/attempts$/i);
+      if (request.method === "POST" && evaluationAttemptMatch?.[1]) {
+        const input = inputRecord(await bodyJson(request)); const trace = inputRecord(input.trace, "trace");
+        const attempt = { manifestId: evaluationAttemptMatch[1], taskId: String(input.taskId ?? ""), runId: String(input.runId ?? ""), outcome: input.outcome as EvaluationAttempt["outcome"], durationMs: Number(input.durationMs), tokensUsed: Number(input.tokensUsed), costMicros: Number(input.costMicros), toolCalls: Number(input.toolCalls), ...(input.timeToFirstHypothesisMs === undefined ? {} : { timeToFirstHypothesisMs: Number(input.timeToFirstHypothesisMs) }), ...(typeof input.errorCode === "string" ? { errorCode: input.errorCode as NonNullable<EvaluationAttempt["errorCode"]> } : {}), trace: { ...(typeof trace.auditPath === "string" ? { auditPath: trace.auditPath } : {}), ...(typeof trace.auditSha256 === "string" ? { auditSha256: trace.auditSha256 } : {}), runArtifactId: String(trace.runArtifactId ?? "") } };
+        await clientRequest(response, async () => ({ attempt: await evaluationLedger.record(attempt) }), 201); return;
+      }
+      if (request.method === "POST" && url.pathname === "/v1/agents") {
+        const input = await bodyJson(request) as Record<string, unknown>;
+        if (!input || !["joined", "addressable"].includes(String(input.purpose)) || typeof input.profileId !== "string") {
+          json(response, 400, { error: "purpose and profileId are required" });
+          return;
+        }
+        const agent = await agentStore.createAgent({
+          purpose: input.purpose as AgentPurpose,
+          profileId: input.profileId,
+          ...(typeof input.parentAgentId === "string" ? { parentAgentId: input.parentAgentId } : {}),
+        });
+        json(response, 201, { agent });
+        return;
+      }
+      const agentMatch = url.pathname.match(/^\/v1\/agents\/([0-9a-f-]+)$/i);
+      if (request.method === "GET" && agentMatch?.[1]) {
+        const value = await agentStore.getAgent(agentMatch[1]);
+        if (!value) json(response, 404, { error: "agent not found" }); else json(response, 200, value);
+        return;
+      }
+      const agentTaskMatch = url.pathname.match(/^\/v1\/agents\/([0-9a-f-]+)\/tasks$/i);
+      if (request.method === "POST" && agentTaskMatch?.[1]) {
+        const input = await bodyJson(request) as Record<string, unknown>;
+        if (typeof input.message !== "string") { json(response, 400, { error: "message is required" }); return; }
+        const context = input.context === undefined ? undefined : input.context;
+        if (context !== undefined && (!Array.isArray(context) || context.some((item) => typeof item !== "string"))) { json(response, 400, { error: "context must be an array of strings" }); return; }
+        const task = await agentStore.followupTask(agentTaskMatch[1], input.message, {
+          ...(typeof input.parentTaskId === "string" ? { parentTaskId: input.parentTaskId } : {}),
+          ...(typeof input.ownerTurnId === "string" ? { ownerTurnId: input.ownerTurnId } : {}),
+          ...(input.awaitPolicy === "join" || input.awaitPolicy === "background" ? { awaitPolicy: input.awaitPolicy } : {}),
+          ...(input.cancelPolicy === "linked" || input.cancelPolicy === "detached" ? { cancelPolicy: input.cancelPolicy } : {}),
+          ...(context ? { context: context as string[] } : {}),
+          budget: agentTaskBudget(input.budget, config),
+        });
+        json(response, 202, { task, statusUrl: `/v1/agent-tasks/${task.id}` });
+        return;
+      }
+      const agentMessageMatch = url.pathname.match(/^\/v1\/agents\/([0-9a-f-]+)\/messages$/i);
+      if (request.method === "POST" && agentMessageMatch?.[1]) {
+        const input = await bodyJson(request) as Record<string, unknown>;
+        if (typeof input.text !== "string") { json(response, 400, { error: "text is required" }); return; }
+        json(response, 201, { message: await agentStore.sendMessage(agentMessageMatch[1], input.text, typeof input.senderAgentId === "string" ? input.senderAgentId : undefined) });
+        return;
+      }
+      const agentInterruptMatch = url.pathname.match(/^\/v1\/agents\/([0-9a-f-]+)\/interrupt$/i);
+      if (request.method === "POST" && agentInterruptMatch?.[1]) {
+        await agentWorker.interruptAgent(agentInterruptMatch[1]);
+        json(response, 202, { agent: (await agentStore.getAgent(agentInterruptMatch[1]))?.agent });
+        return;
+      }
+      const agentTaskStatusMatch = url.pathname.match(/^\/v1\/agent-tasks\/([0-9a-f-]+)$/i);
+      if (request.method === "GET" && agentTaskStatusMatch?.[1]) {
+        const waitMs = Math.max(0, Math.min(Number(url.searchParams.get("waitMs") ?? 0) || 0, 30_000));
+        if (waitMs > 0) {
+          const controller = new AbortController();
+          const abort = () => controller.abort(new Error("Agent task wait connection closed"));
+          request.once("aborted", abort);
+          try { await agentStore.waitResult(agentTaskStatusMatch[1], { timeoutMs: waitMs, signal: controller.signal }); }
+          finally { request.off("aborted", abort); }
+        }
+        const value = await agentStore.getTask(agentTaskStatusMatch[1]);
+        if (!value) json(response, 404, { error: "agent task not found" }); else json(response, 200, value);
+        return;
+      }
+      const agentTaskAckMatch = url.pathname.match(/^\/v1\/agent-tasks\/([0-9a-f-]+)\/ack$/i);
+      if (request.method === "POST" && agentTaskAckMatch?.[1]) {
+        json(response, 200, { result: await agentStore.acknowledge(agentTaskAckMatch[1]) });
+        return;
+      }
+      const permissionMatch = url.pathname.match(/^\/v1\/permissions\/([0-9a-f-]+)$/i);
+      if (request.method === "POST" && permissionMatch?.[1]) {
+        const input = await bodyJson(request) as { decision?: unknown };
+        if (!["deny", "approve_once", "approve_session"].includes(String(input.decision))) {
+          json(response, 400, { error: "decision must be deny, approve_once, or approve_session" });
+          return;
+        }
+        const resolution = permissionBroker.resolve(permissionMatch[1], input.decision as PermissionDecision);
+        if (!resolution) json(response, 404, { error: "permission request not found" });
+        else json(response, 200, { resolution });
         return;
       }
       if (request.method === "POST" && url.pathname === "/v1/question-bank/jobs") {
@@ -409,6 +710,36 @@ export function createApiServer(config: AppConfig, dependencies: ApiServerDepend
         json(response, 200, await loadDecisionTrace(config.runtime.artifactRoot, traceMatch[1]));
         return;
       }
+      const continuationMatch = url.pathname.match(/^\/v1\/runs\/([0-9a-f-]+)\/(fork|resume)$/i);
+      if (request.method === "POST" && continuationMatch?.[1] && continuationMatch[2]) {
+        const parentRunId = continuationMatch[1];
+        const mode = continuationMatch[2].toLowerCase() as "fork" | "resume";
+        const parent = manager.get(parentRunId)?.state ?? await loadPersistedRun(config.runtime.artifactRoot, parentRunId);
+        if (!parent) { json(response, 404, { error: "parent run not found" }); return; }
+        const input = inputRecord(await bodyJson(request));
+        if (input.boundarySequence !== undefined && !Number.isSafeInteger(input.boundarySequence)) {
+          json(response, 400, { error: "boundarySequence must be a safe integer" });
+          return;
+        }
+        if (input.instruction !== undefined && typeof input.instruction !== "string") {
+          json(response, 400, { error: "instruction must be a string" });
+          return;
+        }
+        try {
+          const prepared = await prepareRunContinuation(
+            config.runtime.artifactRoot,
+            parentRunId,
+            mode,
+            input.boundarySequence === undefined ? undefined : Number(input.boundarySequence),
+            typeof input.instruction === "string" ? input.instruction : undefined,
+          );
+          const id = manager.start(prepared.request, { workspaceMode: prepared.workspaceMode, lineage: prepared.lineage });
+          json(response, 202, { id, status: "queued", statusUrl: `/v1/runs/${id}`, lineage: prepared.lineage });
+        } catch (error) {
+          json(response, 400, { error: error instanceof Error ? error.message : String(error) });
+        }
+        return;
+      }
       const reviewMatch = url.pathname.match(/^\/v1\/runs\/([0-9a-f-]+)\/reviews$/i);
       if (request.method === "POST" && reviewMatch?.[1]) {
         const input = await bodyJson(request) as Record<string, unknown>;
@@ -455,10 +786,10 @@ export function createApiServer(config: AppConfig, dependencies: ApiServerDepend
       }
       json(response, 404, { error: "not found" });
     } catch (error) {
-      json(response, 500, { error: error instanceof Error ? error.message : String(error) });
+      json(response, error instanceof RequestInputError ? 400 : 500, { error: error instanceof Error ? error.message : String(error) });
     }
   });
-  return { server, manager, arenaJobs, manualJobs, manualUploads, questionBank, closeStreams: () => { for (const client of streamClients) client.end(); streamClients.clear(); } };
+  return { server, manager, arenaJobs, manualJobs, manualUploads, questionBank, permissionBroker, agentStore, agentWorker, memoryStore, workflowStore, workflowWorker, connectorBroker, evaluationLedger, knowledgeStore, closeStreams: () => { for (const client of streamClients) client.end(); streamClients.clear(); } };
 }
 
 export async function startApiServer(
@@ -469,7 +800,8 @@ export async function startApiServer(
   if (!loopbackHosts.has(config.server.host) && !process.env[config.server.tokenEnv]) {
     throw new Error(`Refusing non-loopback API without ${config.server.tokenEnv}`);
   }
-  const { server, arenaJobs, manualJobs, manualUploads, closeStreams } = createApiServer(config, dependencies);
+  await recoverInterruptedRuns(config.runtime.artifactRoot);
+  const { server, arenaJobs, manualJobs, manualUploads, agentWorker, workflowWorker, closeStreams } = createApiServer(config, dependencies);
   await new Promise<void>((resolveListen, reject) => {
     server.once("error", reject);
     server.listen(config.server.port, config.server.host, resolveListen);
@@ -484,6 +816,8 @@ export async function startApiServer(
       await arenaJobs.close();
       await manualJobs.close();
       await manualUploads.close();
+      await agentWorker.close();
+      await workflowWorker.close();
     },
   };
 }

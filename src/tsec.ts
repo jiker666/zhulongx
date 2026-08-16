@@ -82,7 +82,12 @@ async function vpnHealth(): Promise<boolean> {
   } catch { return false; }
 }
 
+export function shouldSkipTSecVpn(environment: NodeJS.ProcessEnv = process.env): boolean {
+  return environment.TSEC_SKIP_VPN === "1";
+}
+
 async function ensureVpn(config: AppConfig): Promise<{ close: () => Promise<void> }> {
+  if (shouldSkipTSecVpn()) return { close: async () => {} };
   if (process.env.TSEC_FORCE_VPN !== "1" && await vpnHealth()) return { close: async () => {} };
   const vpnConfig = process.env.TSEC_VPN_CONFIG?.trim();
   if (!vpnConfig) throw new Error("TSec VPN is unavailable; set TSEC_VPN_CONFIG to the provided .ovpn file");

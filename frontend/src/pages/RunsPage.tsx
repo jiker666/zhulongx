@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ChevronLeft, ChevronRight, RefreshCw, Search } from "lucide-react";
+import { ArrowUpDown, ChevronLeft, ChevronRight, RefreshCw, Search, X } from "lucide-react";
 import { getRuns } from "../api/runs";
 import { Button, EmptyState, ErrorState, IconButton, LoadingState } from "../components/ui";
 import { getTaskType, RunCard } from "../components/RunCard";
 
 type RunFilter = "all" | "running" | "completed" | "attention";
+type RunSort = "newest" | "oldest" | "turns" | "tools";
 
 const filterLabels: Record<RunFilter, string> = {
   all: "全部任务",
@@ -18,10 +19,11 @@ const pageSize = 12;
 export function RunsPage() {
   const [filter, setFilter] = useState<RunFilter>("all");
   const [search, setSearch] = useState("");
+  const [sort, setSort] = useState<RunSort>("newest");
   const [pageNumber, setPageNumber] = useState(1);
-  const query = useQuery({ queryKey: ["runs"], queryFn: ({ signal }) => getRuns(signal) });
+  const query = useQuery({ queryKey: ["runs"], queryFn: ({ signal }) => getRuns(signal), refetchInterval: (state) => state.state.data?.runs.some((run) => run.status === "running" || run.status === "queued") ? 5_000 : false });
   const runs = query.data?.runs ?? [];
-  const running = runs.filter((run) => run.status === "running").length;
+  const running = runs.filter((run) => run.status === "running" || run.status === "queued").length;
   const completed = runs.filter((run) => run.status === "completed").length;
   const attention = runs.filter((run) => ["blocked", "failed", "aborted"].includes(run.status)).length;
   const typeCount = new Set(runs.map(getTaskType)).size;
@@ -33,10 +35,15 @@ export function RunsPage() {
   }).filter((run) => {
     const query = search.trim().toLowerCase();
     return !query || run.task.toLowerCase().includes(query) || run.id.toLowerCase().includes(query) || run.category?.toLowerCase().includes(query);
-  }), [filter, runs, search]);
+  }).sort((left, right) => {
+    if (sort === "oldest") return left.createdAt.localeCompare(right.createdAt);
+    if (sort === "turns") return right.turns - left.turns || right.createdAt.localeCompare(left.createdAt);
+    if (sort === "tools") return right.toolCalls - left.toolCalls || right.createdAt.localeCompare(left.createdAt);
+    return right.createdAt.localeCompare(left.createdAt);
+  }), [filter, runs, search, sort]);
   const totalPages = Math.max(1, Math.ceil(filteredRuns.length / pageSize));
   const visibleRuns = filteredRuns.slice((pageNumber - 1) * pageSize, pageNumber * pageSize);
-  useEffect(() => setPageNumber(1), [filter, search]);
+  useEffect(() => setPageNumber(1), [filter, search, sort]);
   useEffect(() => { if (pageNumber > totalPages) setPageNumber(totalPages); }, [pageNumber, totalPages]);
 
   return (
@@ -72,10 +79,12 @@ export function RunsPage() {
               </button>
             ))}
           </div>
-          <label className="run-search"><Search size={15} aria-hidden="true" /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索任务或 Run ID" aria-label="搜索运行" /></label>
+          <div className="run-toolbar-controls"><label className="run-search"><Search size={15} aria-hidden="true" /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索任务或 Run ID" aria-label="搜索运行" />{search && <button type="button" aria-label="清空运行搜索" title="清空搜索" onClick={() => setSearch("")}><X size={14} aria-hidden="true" /></button>}</label><label className="run-sort"><ArrowUpDown size={14} aria-hidden="true" /><select aria-label="排序运行" value={sort} onChange={(event) => setSort(event.target.value as RunSort)}><option value="newest">最近创建</option><option value="oldest">最早创建</option><option value="turns">回合最多</option><option value="tools">调用最多</option></select></label></div>
         </div>
         <IconButton className="icon-button bordered" label="刷新运行数据" onClick={() => void query.refetch()} disabled={query.isFetching}><RefreshCw size={17} className={query.isFetching ? "spinning" : ""} aria-hidden="true" /></IconButton>
       </div>
+
+      <div className="run-results-summary" aria-live="polite"><span>当前显示 <strong>{visibleRuns.length}</strong> / {filteredRuns.length} 条</span>{query.isFetching && <span className="syncing">正在同步活动运行…</span>}</div>
 
       {query.isPending ? <LoadingState /> : query.isError ? <ErrorState message={query.error.message} onRetry={() => void query.refetch()} /> : visibleRuns.length === 0 ? <EmptyState title="当前视图没有任务" description="切换筛选条件，或等待新的授权运行记录进入任务大厅。" /> : <div className="run-grid">{visibleRuns.map((run) => <RunCard key={run.id} run={run} />)}</div>}
       {filteredRuns.length > pageSize && <div className="pagination"><span>第 {pageNumber} / {totalPages} 页 · {filteredRuns.length} 条</span><div><Button className="icon-button bordered" aria-label="上一页" disabled={pageNumber === 1} onClick={() => setPageNumber((value) => value - 1)}><ChevronLeft size={17} /></Button><Button className="icon-button bordered" aria-label="下一页" disabled={pageNumber === totalPages} onClick={() => setPageNumber((value) => value + 1)}><ChevronRight size={17} /></Button></div></div>}

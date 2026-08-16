@@ -400,7 +400,67 @@ describe("XuanShuRuntime", () => {
     expect(await verifyAuditChain(auditPath)).toMatchObject({
       valid: true,
     });
-    expect(JSON.stringify(await readAuditRecords(auditPath))).toContain("printableRatio");
+    const records = await readAuditRecords(auditPath);
+    expect(JSON.stringify(records)).toContain("printableRatio");
+    expect(records).toContainEqual(expect.objectContaining({ type: "context.injected", source: "context" }));
+    expect(records).toContainEqual(expect.objectContaining({ type: "model.context", source: "context", data: expect.objectContaining({ messageCount: expect.any(Number), digest: expect.stringMatching(/^[a-f0-9]{64}$/) }) }));
+    const requested = records.find((record) => record.type === "tool.requested" && (record.data as { toolCallId?: string }).toolCallId === "inspect-1");
+    const policy = records.find((record) => record.type === "policy.decision" && record.correlationId === "inspect-1");
+    const result = records.find((record) => record.type === "tool.result" && record.correlationId === "inspect-1");
+    expect(requested).toMatchObject({ source: "model", correlationId: "inspect-1" });
+    expect(policy).toMatchObject({ source: "policy", parentSequence: requested?.sequence });
+    expect(result).toMatchObject({ source: "tool", parentSequence: requested?.sequence });
+  });
+
+  it("records bounded binary searches as auditable local observations", async () => {
+    const root = await mkdtemp(join(tmpdir(), "xuan-runtime-artifact-search-"));
+    roots.push(root);
+    const config = testConfig(root);
+    await mkdir(config.scope.workspaceRoot, { recursive: true });
+    await writeFile(join(config.scope.workspaceRoot, "firmware.bin"), Buffer.from([0x00, 0x41, 0x44, 0x4d, 0x49, 0x4e, 0x00]));
+    const faux = registerFauxProvider();
+    registrations.push(faux);
+    faux.setResponses([
+      fauxAssistantMessage(
+        fauxToolCall("submit_plan", {
+          goal: "Search the supplied binary without executing it",
+          assumptions: [],
+          hypotheses: ["The binary contains the requested marker"],
+          steps: [{ id: "search", objective: "Search a bounded byte prefix", successCriteria: ["Offsets returned"], tools: ["search_artifact"] }],
+        }, { id: "search-plan" }),
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage(
+        fauxToolCall("search_artifact", { source: "workspace", path: "firmware.bin", pattern: "ADMIN", encoding: "utf8" }, { id: "search-artifact" }),
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage(
+        fauxToolCall("finish_task", {
+          status: "blocked",
+          summary: "The marker was observed, but no final task answer was requested.",
+          evidence: ["search_artifact reported one ADMIN offset"],
+          remainingRisks: ["No solve objective"],
+          nextSteps: [],
+          confidence: 0.4,
+          verification: ["The bounded byte search returned the requested marker"],
+          independentlyVerified: false,
+        }, { id: "search-finish" }),
+        { stopReason: "toolUse" },
+      ),
+    ]);
+
+    const runtime = new XuanShuRuntime(config, { streamFn: streamSimple, model: faux.getModel() });
+    const state = await runtime.run({ task: "Search the supplied firmware marker" });
+    const records = await readAuditRecords(join(config.runtime.artifactRoot, state.id, "audit.jsonl"));
+
+    expect(state.status).toBe("blocked");
+    expect(state.toolCalls).toBe(3);
+    expect(records).toContainEqual(expect.objectContaining({
+      type: "artifact.searched",
+      source: "tool",
+      data: expect.objectContaining({ path: "firmware.bin", matches: 1, inspectedBytes: 7 }),
+    }));
+    expect(await verifyAuditChain(join(config.runtime.artifactRoot, state.id, "audit.jsonl"))).toMatchObject({ valid: true });
   });
 
   it("audits an allowlisted sandbox program through the generic run_command tool", async () => {

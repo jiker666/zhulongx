@@ -44,4 +44,28 @@ describe("AuditChain", () => {
     expect(content).toContain("[redacted]");
     expect(await verifyAuditChain(path)).toEqual({ valid: true, records: 1 });
   });
+
+  it("continues an existing audit chain without resetting its sequence or hash", async () => {
+    const root = await mkdtemp(join(tmpdir(), "xuan-audit-resume-"));
+    roots.push(root);
+    const path = join(root, "audit.jsonl");
+    const firstWriter = new AuditChain(path, "run-resumed");
+    await firstWriter.append("run.started", { status: "running" });
+    await firstWriter.append("tool.result", { ok: true });
+
+    const resumed = await new AuditChain(path, "run-resumed").append("run.recovered", { status: "aborted" });
+
+    expect(resumed.sequence).toBe(3);
+    expect(await verifyAuditChain(path)).toEqual({ valid: true, records: 3 });
+  });
+
+  it("refuses to append with a different run id", async () => {
+    const root = await mkdtemp(join(tmpdir(), "xuan-audit-run-id-"));
+    roots.push(root);
+    const path = join(root, "audit.jsonl");
+    await new AuditChain(path, "run-original").append("run.started", {});
+
+    await expect(new AuditChain(path, "run-other").append("run.settled", {})).rejects.toThrow("run id mismatch");
+    expect(await verifyAuditChain(path)).toEqual({ valid: true, records: 1 });
+  });
 });

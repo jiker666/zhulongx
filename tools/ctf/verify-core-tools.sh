@@ -4,6 +4,7 @@ set -euo pipefail
 export PATH="/opt/ctf-venv/bin:${PATH}"
 
 required_commands=(
+  addr2line
   base32
   bc
   convert
@@ -12,15 +13,23 @@ required_commands=(
   factor
   ffprobe
   fsstat
+  gap
   gcc
+  gdb-multiarch
   gifsicle
   gp
   identify
+  jadx
+  ltrace
   minimodem
   multimon-ng
+  objcopy
   outguess
+  patchelf
   pickora
+  pwn
   pngcheck
+  scalpel
   sox
   soxi
   steghide
@@ -34,11 +43,29 @@ required_commands=(
   zbarimg
   zip
   zsteg
+  r2
+  rabin2
+  rafind2
+  ragg2
+  rax2
 )
 
 for command_name in "${required_commands[@]}"; do
   command -v "$command_name" >/dev/null
 done
+
+gap -q <<'GAP'
+if Size(SymmetricGroup(3)) <> 6 then
+  QUIT_GAP(1);
+fi;
+QUIT_GAP(0);
+GAP
+patchelf --version >/dev/null
+scalpel -V >/dev/null
+gdb-multiarch --version >/dev/null
+ltrace --version >/dev/null
+r2 -v >/dev/null
+jadx --version >/dev/null
 
 /opt/ctf-venv/bin/python - <<'PY'
 import cysignals

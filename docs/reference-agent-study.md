@@ -1,12 +1,13 @@
 # CTF Agent 参考项目研究
 
-本文记录 2026-08-11 对三个公开仓库的定点审阅。结论只对应下列 commit，不把项目 README 的成绩声明当作玄枢已经复现的结果。
+本文记录 2026-08-11 至 2026-08-14 对四个公开仓库的定点审阅。结论只对应下列 commit，不把项目 README 的成绩声明当作玄枢已经复现的结果。
 
 | 项目 | 审阅 commit | 可验证的关键信息 |
 | --- | --- | --- |
 | [FishCodeTech/muteki](https://github.com/FishCodeTech/muteki) | `a585a2943a15efc4de78b00a385335fc9b1f23f1` | 多引擎 race、共享黑板、dead-end、旁路 review、flag provenance gate 和 winner cancellation。仓库为 AGPL-3.0。 |
 | [verialabs/ctf-agent](https://github.com/verialabs/ctf-agent) | `3366d569557c4fda3fd153040632de65e255396d` | README 报告 BSidesSF 2026 取得 52/52；每题由异构模型 swarm 竞速，coordinator 读取工具 trace 并下发针对性纠偏，每个 solver 使用独立工具容器。仓库为 MIT。 |
 | [Yeti-791/Tsec-Hackathon](https://github.com/Yeti-791/Tsec-Hackathon) | `7b264c7f20cf11e790855194692a494aedbdb21c` | 赛事材料将第一名概括为 Manager/Solver/Observer、三层上下文压缩、受约束终止和七模型竞争；第三名 Bytex/Cairn 使用平等 worker 与黑板，并被材料称为全场唯一 AK，成本约 7692 元。 |
+| [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) | `47f943859bef60e4160492346772ded9b24f765a` | 追加式 SessionEvent、连续序号、surface/log-only 双投影、request header/context、子 Agent 描述、Trajectory 来源视图，以及基于同一日志的 resume/fork/replay。仓库为 MIT。 |
 
 ## 成绩声明的边界
 
@@ -23,6 +24,15 @@
 4. **答案必须过 provenance gate。** race 只应在候选答案绑定到可复查证据后结束，并立即取消、等待其他 worker 收尾，控制后台成本和资源泄漏。
 5. **工具覆盖决定能力上限。** SageMath、RsaCtfTool、CADO-NFS、flatter、radare2、stegseek、Sleuthkit、Volatility、OCR 和音频工具填补的是确定性的执行缺口；它们不能替代策略和验证。
 6. **上下文和停止条件同样重要。** 压缩、dead-end、重复动作检测、checkpoint、finalization reserve 和明确的 blocked 状态共同防止长任务退化。
+7. **让会话日志成为唯一事实源。** 恢复、检索、回放、分叉和 UI 不应各维护一份容易漂移的状态；它们应从同一连续事件序列投影，并显式记录来源、关联和继承边界。
+
+## DeepSeek Harness 轨迹设计迁移
+
+- 玄枢沿用已有 `audit.jsonl` 哈希链，不引入另一套 Session 数据库。事件信封增加 `source`、`actor`、`correlationId` 和可选 `parentSequence`，旧日志仍按事件类型推断来源。
+- 每次模型调用前记录经过脱敏和限长的 `model.context`：系统提示词、公开消息、工具 schema、数量与 digest。隐藏 reasoning、密钥、Authorization、Cookie 和图片像素仍按项目安全约束禁止持久化。
+- `tool.requested -> policy.decision -> tool.result` 使用同一工具调用 ID 和父序号，Trajectory 可以确定地解释动作、策略与结果，而不是按相邻时间猜测。
+- 前端从原始事件流派生小白解释、来源筛选、检索和滑杆回放；原始技术事件与证据图保持独立可查。
+- `fork` 在指定连续事件序号创建新运行，`resume` 只从父运行最后序号继续。继承内容是公开轨迹投影，并标记为“数据而非指令”；父日志不修改，未知副作用不自动重放。
 
 ## Skill 审阅结果
 

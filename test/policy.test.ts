@@ -45,7 +45,27 @@ describe("PolicyEngine", () => {
     expect(policy.evaluate("write_scratch_file", { path: "../escape", content: "x" }, run).allowed).toBe(false);
     expect(policy.evaluate("inspect_artifact", { source: "workspace", path: "notes.txt" }, run).allowed).toBe(true);
     expect(policy.evaluate("inspect_artifact", { source: "scratch", path: "../escape" }, run).allowed).toBe(false);
+    expect(policy.evaluate("search_artifact", { source: "workspace", path: "firmware.bin", pattern: "MZ" }, run).allowed).toBe(true);
+    expect(policy.evaluate("search_artifact", { source: "workspace", path: "../firmware.bin", pattern: "MZ" }, run).allowed).toBe(false);
+    expect(policy.evaluate("extract_archive", { source: "workspace", path: "input.zip", destination: "extracted" }, run).allowed).toBe(true);
+    expect(policy.evaluate("extract_archive", { source: "workspace", path: "input.zip", destination: "../escape" }, run).allowed).toBe(false);
     expect(policy.evaluate("http_request", { method: "GET", url: "https://example.com" }, run).allowed).toBe(false);
+  });
+
+  it("charges artifact actions to the standard tool and checkpoint budgets", () => {
+    const config = testConfig("/tmp/xuan-policy");
+    const policy = new PolicyEngine(config.scope, config.runtime);
+    const run = state();
+    run.plan = { goal: "inspect an archive", assumptions: [], hypotheses: [], steps: [{ id: "1", objective: "extract and search", successCriteria: [], tools: ["extract_archive", "search_artifact"] }] };
+
+    const extraction = policy.evaluate("extract_archive", { source: "workspace", path: "input.zip", destination: "extracted" }, run);
+    expect(extraction.allowed).toBe(true);
+    policy.recordAllowed("extract_archive", extraction, run);
+    expect(run.toolCalls).toBe(1);
+    expect(run.actionsSinceCheckpoint).toBe(1);
+
+    run.actionsSinceCheckpoint = config.runtime.maxActionsWithoutCheckpoint;
+    expect(policy.evaluate("search_artifact", { source: "scratch", path: "extracted/a.bin", pattern: "7f454c46", encoding: "hex" }, run).reason).toContain("Checkpoint");
   });
 
   it("allows operator-owned offline Crypto/Misc programs while preserving the global tool budget", () => {

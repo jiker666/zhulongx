@@ -67,6 +67,7 @@ scope:
     - foremost
     - fsstat
     - g++
+    - gap
     - gcc
     - gdb
     - gifsicle
@@ -89,6 +90,7 @@ scope:
     - one_gadget
     - outguess
     - openssl
+    - patchelf
     - pickora
     - pngcheck
     - python3
@@ -105,6 +107,7 @@ scope:
     - readelf
     - rg
     - seccomp-tools
+    - scalpel
     - sox
     - soxi
     - sqlmap
@@ -133,6 +136,17 @@ scope:
     - cado-nfs
     - flatter
     - zstd
+    - addr2line
+    - c++filt
+    - gdb-multiarch
+    - jadx
+    - ltrace
+    - objcopy
+    - pwn
+    - rabin2
+    - rafind2
+    - ragg2
+    - rax2
 
 server:
   host: 0.0.0.0

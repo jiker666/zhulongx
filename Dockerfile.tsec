@@ -1,0 +1,39 @@
+FROM node:22-bookworm-slim AS build
+
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --legacy-peer-deps --ignore-scripts
+COPY tsconfig.json tsconfig.build.json ./
+COPY src ./src
+RUN npm run build
+
+FROM node:22-bookworm AS runtime
+
+WORKDIR /app
+COPY tools/ctf/install-apt-core.sh ./tools/ctf/install-apt-core.sh
+RUN bash /app/tools/ctf/install-apt-core.sh
+COPY tools/ctf/install-radare2.sh tools/ctf/install-jadx.sh ./tools/ctf/
+RUN bash /app/tools/ctf/install-radare2.sh \
+    && bash /app/tools/ctf/install-jadx.sh
+COPY tools/ctf/install-python-core.sh tools/ctf/requirements-core.txt tools/ctf/verify-core-tools.sh ./tools/ctf/
+RUN bash /app/tools/ctf/install-python-core.sh \
+    && bash /app/tools/ctf/verify-core-tools.sh
+
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --legacy-peer-deps --ignore-scripts \
+    && npm cache clean --force
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN npx playwright install --with-deps chromium
+
+COPY --from=build /app/dist ./dist
+COPY config ./config
+COPY tools/tsec-hosted-entrypoint.sh ./tools/tsec-hosted-entrypoint.sh
+RUN useradd --create-home --uid 10001 xuanshu \
+    && mkdir -p /data/runs /workspace/input /workspace/work /run/xuanshu \
+    && chown -R xuanshu:xuanshu /data /workspace /run/xuanshu /ms-playwright \
+    && chmod 755 /app/tools/tsec-hosted-entrypoint.sh
+
+USER xuanshu
+ENV NODE_ENV=production
+ENV TSEC_SKIP_VPN=1
+CMD ["/app/tools/tsec-hosted-entrypoint.sh"]

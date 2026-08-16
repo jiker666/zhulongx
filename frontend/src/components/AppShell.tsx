@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { BookOpenCheck, Gauge, History, KeyRound, Library, ShieldCheck, Swords, X } from "lucide-react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
@@ -18,22 +18,49 @@ export function AppShell() {
   const queryClient = useQueryClient();
   const [tokenOpen, setTokenOpen] = useState(false);
   const [token, setToken] = useState(() => getServerToken());
+  const [tokenError, setTokenError] = useState("");
+  const tokenInput = useRef<HTMLInputElement>(null);
+  const trigger = useRef<HTMLElement | null>(null);
+  const tokenConfigured = Boolean(getServerToken());
 
   useEffect(() => {
     window.scrollTo(0, 0);
   }, [pathname]);
 
   useEffect(() => {
-    const showToken = () => setTokenOpen(true);
+    const showToken = () => { setToken(getServerToken()); setTokenError("服务令牌无效或已过期，请重新连接控制面。"); setTokenOpen(true); };
     window.addEventListener("xuanshu:unauthorized", showToken);
     return () => window.removeEventListener("xuanshu:unauthorized", showToken);
   }, []);
 
+  useEffect(() => {
+    if (!tokenOpen) return;
+    tokenInput.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => { if (event.key === "Escape") setTokenOpen(false); };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [tokenOpen]);
+
+  useEffect(() => {
+    if (!tokenOpen && trigger.current) { trigger.current.focus(); trigger.current = null; }
+  }, [tokenOpen]);
+
   const submitToken = (event: FormEvent) => {
     event.preventDefault();
-    setServerToken(token);
+    const nextToken = token.trim();
+    if (!nextToken) { setTokenError("请输入本次会话使用的服务令牌。"); tokenInput.current?.focus(); return; }
+    setServerToken(nextToken);
+    setToken(nextToken);
+    setTokenError("");
     setTokenOpen(false);
     void queryClient.invalidateQueries();
+  };
+
+  const openTokenDialog = (event?: { currentTarget: EventTarget & HTMLElement }) => {
+    trigger.current = event?.currentTarget ?? null;
+    setToken(getServerToken());
+    setTokenError("");
+    setTokenOpen(true);
   };
 
   return (
@@ -70,7 +97,7 @@ export function AppShell() {
           <span className="product-label">Autonomous Cybersecurity Agent</span>
           <div className="topbar-actions">
             <span className="topbar-status"><span className="status-dot" />Policy governed</span>
-            <IconButton className="topbar-icon-button" label="设置服务令牌" onClick={() => setTokenOpen(true)}><KeyRound size={16} aria-hidden="true" /></IconButton>
+            <IconButton className="topbar-icon-button" label={tokenConfigured ? "修改服务令牌" : "设置服务令牌"} onClick={(event) => openTokenDialog(event)}><KeyRound size={16} aria-hidden="true" /></IconButton>
           </div>
         </header>
         <main className="content"><Outlet /></main>
@@ -84,8 +111,9 @@ export function AppShell() {
               <IconButton className="icon-button" type="button" label="关闭" onClick={() => setTokenOpen(false)}><X size={17} aria-hidden="true" /></IconButton>
             </div>
             <label className="field-label" htmlFor="server-token">XUANSHU_SERVER_TOKEN</label>
-            <input id="server-token" type="password" autoComplete="current-password" value={token} onChange={(event) => setToken(event.target.value)} placeholder="输入本次会话使用的服务令牌" />
-            <p>令牌仅保存在当前浏览器会话中，不会写入运行材料。</p>
+            <input ref={tokenInput} id="server-token" type="password" autoComplete="current-password" value={token} onChange={(event) => { setToken(event.target.value); setTokenError(""); }} placeholder="输入本次会话使用的服务令牌" aria-describedby="token-dialog-help token-dialog-error" />
+            {tokenError && <div id="token-dialog-error" className="dialog-error" role="alert">{tokenError}</div>}
+            <p id="token-dialog-help">令牌仅保存在当前浏览器会话中，不会写入运行材料。</p>
             <button className="button" type="submit">连接控制面</button>
           </form>
         </div>

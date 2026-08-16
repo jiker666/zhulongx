@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { ArrowRight, Bot, Boxes, CheckCircle2, RefreshCw, ShieldCheck, Trophy } from "lucide-react";
+import { AlertTriangle, ArrowRight, Bot, Boxes, CheckCircle2, Clock3, RefreshCw, ShieldCheck, Trophy } from "lucide-react";
 import { Link } from "react-router-dom";
 import { getExperiences } from "../api/experiences";
 import { getArenaStatus, getManualJobs, getQuestionBank } from "../api/operations";
@@ -30,21 +30,32 @@ export function OverviewPage() {
   const bankProgress = totalQuestions ? Math.round((solvedQuestions / totalQuestions) * 100) : 0;
   const activeExperiences = (experiences.data?.experiences ?? []).filter((item) => item.status === "active").length;
   const isRefreshing = [arena, manual, bank, runs, experiences].some((query) => query.isFetching);
+  const sources = [
+    { label: "擂台", query: arena },
+    { label: "批量作业", query: manual },
+    { label: "题库", query: bank },
+    { label: "运行审计", query: runs },
+    { label: "经验库", query: experiences },
+  ];
+  const failedSources = sources.filter(({ query }) => query.isError).map(({ label }) => label);
+  const lastUpdatedAt = Math.max(...sources.map(({ query }) => query.dataUpdatedAt), 0);
   const refresh = () => void Promise.all([arena.refetch(), manual.refetch(), bank.refetch(), runs.refetch(), experiences.refetch()]);
 
   return (
     <div className="page overview-page">
       <div className="page-heading overview-heading">
         <div><div className="eyebrow">COMMAND OVERVIEW</div><h1>系统总览</h1><p>实时汇总执行环境、任务进度与平台验真结果。</p></div>
-        <IconButton className="icon-button bordered" label="刷新系统状态" onClick={refresh} disabled={isRefreshing}><RefreshCw size={17} className={isRefreshing ? "spinning" : ""} aria-hidden="true" /></IconButton>
+        <div className="heading-refresh"><span><Clock3 size={13} aria-hidden="true" />{lastUpdatedAt ? `更新于 ${new Date(lastUpdatedAt).toLocaleTimeString("zh-CN", { hour12: false })}` : "等待首次同步"}</span><IconButton className="icon-button bordered" label="刷新系统状态" onClick={refresh} disabled={isRefreshing}><RefreshCw size={17} className={isRefreshing ? "spinning" : ""} aria-hidden="true" /></IconButton></div>
       </div>
+
+      {failedSources.length > 0 && <div className="data-health-banner" role="alert"><AlertTriangle size={16} aria-hidden="true" /><span><strong>部分数据暂不可用</strong><small>{failedSources.join("、")}读取失败；其余模块仍保留最近一次有效结果。</small></span><button type="button" onClick={refresh}>重新同步</button></div>}
 
       <section className={`readiness-brief ${readiness?.ready ? "ready" : "attention"}`}>
         <div className="brief-mark">{readiness?.ready ? <ShieldCheck size={25} aria-hidden="true" /> : <Boxes size={25} aria-hidden="true" />}</div>
         <div className="brief-copy">
           <span className="section-label">SYSTEM READINESS</span>
-          <h2>{readiness ? (readiness.ready ? "控制面已准备就绪" : "控制面需要检查") : "正在确认运行环境"}</h2>
-          <p>{readiness?.ready ? `${readiness.model.name} · ${readiness.sandbox.network} 沙箱 · ${readiness.allowedCategories.join(" / ").toUpperCase()} 题型` : readiness?.issues.join("；") || "正在读取模型、沙箱与授权范围状态。"}</p>
+          <h2>{readiness ? (readiness.ready ? "控制面已准备就绪" : "控制面需要检查") : arena.isError ? "控制面状态暂不可用" : "正在确认运行环境"}</h2>
+          <p>{readiness?.ready ? `${readiness.model.name} · ${readiness.sandbox.network} 沙箱 · ${readiness.allowedCategories.join(" / ").toUpperCase()} 题型` : readiness?.issues.join("；") || (arena.isError ? arena.error.message : "正在读取模型、沙箱与授权范围状态。")}</p>
         </div>
         <div className="brief-actions">
           <Link className="button" to="/arena"><Trophy size={16} aria-hidden="true" />进入擂台</Link>
@@ -53,10 +64,11 @@ export function OverviewPage() {
       </section>
 
       <section className="command-metrics" aria-label="系统指标">
-        <div><span>实时运行</span><strong>{activeRuns + activeManual + (activeArena ? 1 : 0)}</strong><small>ACTIVE WORK</small></div>
-        <div><span>完成运行</span><strong>{completedRuns}</strong><small>COMPLETED RUNS</small></div>
-        <div><span>题库通过</span><strong>{solvedQuestions}<em>/{totalQuestions}</em></strong><small>VERIFIED</small></div>
-        <div><span>验真经验</span><strong>{activeExperiences}</strong><small>ACTIVE LESSONS</small></div>
+        <div><span>活动运行</span><strong>{runs.data ? activeRuns : "—"}</strong><small>ACTIVE RUNS</small></div>
+        <div><span>控制作业</span><strong>{manual.data || arena.data ? activeManual + (activeArena ? 1 : 0) : "—"}</strong><small>ACTIVE JOBS</small></div>
+        <div><span>完成运行</span><strong>{runs.data ? completedRuns : "—"}</strong><small>COMPLETED RUNS</small></div>
+        <div><span>题库通过</span><strong>{bank.data ? solvedQuestions : "—"}<em>/{bank.data ? totalQuestions : "—"}</em></strong><small>VERIFIED</small></div>
+        <div><span>验真经验</span><strong>{experiences.data ? activeExperiences : "—"}</strong><small>ACTIVE LESSONS</small></div>
         <div><span>可用工具</span><strong>{readiness?.sandbox.availablePrograms ?? "—"}</strong><small>ALLOWLISTED</small></div>
       </section>
 

@@ -12,6 +12,9 @@ FROM node:22-bookworm AS ctf-sandbox
 WORKDIR /app
 COPY tools/ctf/install-apt-core.sh ./tools/ctf/install-apt-core.sh
 RUN bash /app/tools/ctf/install-apt-core.sh
+COPY tools/ctf/install-radare2.sh tools/ctf/install-jadx.sh ./tools/ctf/
+RUN bash /app/tools/ctf/install-radare2.sh \
+    && bash /app/tools/ctf/install-jadx.sh
 COPY tools/ctf/install-python-core.sh tools/ctf/requirements-core.txt tools/ctf/verify-core-tools.sh ./tools/ctf/
 RUN bash /app/tools/ctf/install-python-core.sh \
     && bash /app/tools/ctf/verify-core-tools.sh

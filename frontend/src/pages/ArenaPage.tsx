@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, ArrowRight, CircleStop, Play, RefreshCw, RotateCcw, ShieldCheck, Trophy } from "lucide-react";
+import { Activity, AlertTriangle, ArrowRight, CircleStop, Play, RefreshCw, RotateCcw, ShieldCheck, Trophy } from "lucide-react";
 import { Link } from "react-router-dom";
 import { getArenaJob, getArenaStatus, getWrongQuestion, startArenaJob, stopArenaJob } from "../api/operations";
 import { Badge, Button, EmptyState, ErrorState, IconButton, LoadingState } from "../components/ui";
@@ -16,6 +16,11 @@ function attemptTone(attempt: ArenaAttemptEvaluation): string {
   if (attempt.outcome === "wrong" || attempt.outcome === "infrastructure-error") return "failed";
   if (attempt.outcome === "blocked" || attempt.outcome === "abandoned") return "blocked";
   return "neutral";
+}
+
+function boundedInteger(value: string, fallback: number, min: number, max: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.min(max, Math.max(min, Math.round(parsed))) : fallback;
 }
 
 export function ArenaPage() {
@@ -72,9 +77,9 @@ export function ArenaPage() {
       </div>
 
       <form className="arena-control-band" onSubmit={submit}>
-        <div className="control-group mode-control"><span className="field-label">运行模式</span><div className="segmented-control"><button type="button" className={continuous ? "active" : ""} aria-pressed={continuous} onClick={() => { setContinuous(true); setAutoSubmit(true); }}>持续运行</button><button type="button" className={!continuous ? "active" : ""} aria-pressed={!continuous} onClick={() => setContinuous(false)}>有限批次</button></div></div>
-        <label className="control-group"><span className="field-label">目标题数</span><input type="number" min={1} max={50} value={maxAttempts} disabled={continuous} onChange={(event) => setMaxAttempts(Number(event.target.value))} /></label>
-        <label className="toggle-control"><span><strong>自动提交</strong><small>向平台提交验证结果</small></span><input type="checkbox" checked={autoSubmit} disabled={continuous} onChange={(event) => setAutoSubmit(event.target.checked)} /></label>
+        <div className="control-group mode-control"><span className="field-label">运行模式</span><div className="segmented-control"><button type="button" className={continuous ? "active" : ""} aria-pressed={continuous} onClick={() => setContinuous(true)}>持续运行</button><button type="button" className={!continuous ? "active" : ""} aria-pressed={!continuous} onClick={() => setContinuous(false)}>有限批次</button></div></div>
+        <label className="control-group"><span className="field-label">目标题数</span><input type="number" min={1} max={50} value={maxAttempts} disabled={continuous} onChange={(event) => setMaxAttempts(boundedInteger(event.target.value, maxAttempts, 1, 50))} /></label>
+        <label className="toggle-control"><span><strong>自动提交</strong><small>{autoSubmit ? "向平台提交验证结果" : "仅运行并等待人工复核"}</small></span><input type="checkbox" checked={autoSubmit} onChange={(event) => setAutoSubmit(event.target.checked)} /></label>
         <div className="control-actions">
           <Button className="button" type="submit" loading={start.isPending} disabled={!readiness.ready || Boolean(activeJob)} disabledReason={!readiness.ready ? readiness.issues.join("；") : activeJob ? "已有作业正在运行" : undefined}><Play size={16} aria-hidden="true" />开始作业</Button>
           <Button className="button danger-button" type="button" disabled={!activeJob || stop.isPending} loading={stop.isPending} onClick={() => activeJob && stop.mutate(activeJob.id)}><CircleStop size={16} aria-hidden="true" />停止</Button>
@@ -89,6 +94,7 @@ export function ArenaPage() {
         <div><span className={`readiness-dot ${readiness.sandbox.reachable ? "ok" : "warn"}`} /><span>沙箱</span><strong>{readiness.sandbox.reachable ? readiness.sandbox.network : "按需启动"}</strong></div>
         <div><span className="readiness-dot ok" /><span>允许题型</span><strong>{readiness.allowedCategories.join(" / ").toUpperCase() || "ALL"}</strong></div>
       </section>
+      {!readiness.ready && readiness.issues.length > 0 && <div className="readiness-issues" role="alert"><AlertTriangle size={15} aria-hidden="true" /><span><strong>启动前需要处理</strong>{readiness.issues.join("；")}</span></div>}
 
       <section className="arena-metrics" aria-label="作业指标">
         <div><span>已处理</span><strong>{selectedJob?.completedAttempts ?? 0}</strong><small>{selectedJob?.options.continuous ? "持续模式" : `目标 ${selectedJob?.options.maxAttempts ?? 0}`}</small></div>
@@ -102,7 +108,7 @@ export function ArenaPage() {
         <section className="surface-panel activity-panel">
           <div className="panel-heading"><div><span className="section-label">LIVE TRACE</span><h2>实时执行轨迹</h2></div>{status.data.jobs.length > 0 && <select aria-label="Arena 作业历史" value={selectedJobId ?? ""} onChange={(event) => setSelectedJobId(event.target.value)}>{status.data.jobs.map((item) => <option key={item.id} value={item.id}>{formatDateTime(item.createdAt)} · {statusLabels[item.status]}</option>)}</select>}</div>
           {selectedJob ? <div className="job-state-line"><span className={`run-state-mark state-${selectedJob.status}`} /><Badge tone={selectedJob.status}>{statusLabels[selectedJob.status]}</Badge><span>{selectedJob.id}</span>{selectedJob.currentRunId && <Link to={`/runs/${selectedJob.currentRunId}`}>查看当前运行<ArrowRight size={13} /></Link>}</div> : null}
-          {job.isFetching && !selectedJob ? <LoadingState /> : selectedJob?.activity.length ? <div className="arena-activity-list">{[...selectedJob.activity].reverse().map((event, index) => <div className="arena-activity-row" key={`${event.timestamp}-${event.type}-${index}`}><span className="activity-node"><Activity size={13} aria-hidden="true" /></span><time>{formatTimestamp(event.timestamp)}</time><span><strong>{event.type}</strong><small>{event.detail}</small></span>{event.runId ? <Link to={`/runs/${event.runId}`} aria-label="查看关联运行"><ArrowRight size={14} /></Link> : <span />}</div>)}</div> : <EmptyState title="尚无擂台作业" description="环境就绪后可从上方启动持续或有限批次作业。" />}
+          {job.isError ? <ErrorState message={job.error.message} onRetry={() => void job.refetch()} /> : job.isFetching && !selectedJob ? <LoadingState /> : selectedJob?.activity.length ? <div className="arena-activity-list">{[...selectedJob.activity].reverse().map((event, index) => <div className="arena-activity-row" key={`${event.timestamp}-${event.type}-${index}`}><span className="activity-node"><Activity size={13} aria-hidden="true" /></span><time>{formatTimestamp(event.timestamp)}</time><span><strong>{event.type}</strong><small>{event.detail}</small></span>{event.runId ? <Link to={`/runs/${event.runId}`} aria-label="查看关联运行"><ArrowRight size={14} /></Link> : <span />}</div>)}</div> : <EmptyState title="尚无擂台作业" description="环境就绪后可从上方启动持续或有限批次作业。" />}
         </section>
 
         <section className="surface-panel attempts-panel">
@@ -115,7 +121,7 @@ export function ArenaPage() {
         <section className="surface-panel wrong-question-panel">
           <div className="panel-heading"><div><span className="section-label">RETRY QUEUE</span><h2>错题复盘</h2></div><span className="panel-count">{status.data.wrongQuestions.length}</span></div>
           {status.data.wrongQuestions.length ? <div className="wrong-question-list">{status.data.wrongQuestions.map((item) => <button type="button" key={item.attemptId} className={selectedWrongId === item.attemptId ? "active" : ""} onClick={() => setSelectedWrongId(item.attemptId)}><span className="attempt-id">#{item.attemptId}</span><span><strong>{item.category}</strong><small>{item.lastReason}</small></span><Badge tone="blocked">失败 {item.failureCount} 次</Badge></button>)}</div> : <div className="compact-empty"><ShieldCheck size={20} aria-hidden="true" /><span>当前没有待复盘错题</span></div>}
-          {selectedWrongId !== undefined && <div className="wrong-question-detail">{wrongQuestion.isPending ? <LoadingState /> : wrongQuestion.data ? <><h3>Attempt #{wrongQuestion.data.wrongQuestion.attemptId}</h3><p>{wrongQuestion.data.wrongQuestion.task}</p><dl><div><dt>附件</dt><dd>{wrongQuestion.data.wrongQuestion.attachments.length}</dd></div><div><dt>失败记录</dt><dd>{wrongQuestion.data.wrongQuestion.failures.length}</dd></div><div><dt>最后更新</dt><dd>{formatDateTime(wrongQuestion.data.wrongQuestion.lastFailedAt)}</dd></div></dl>{wrongQuestion.data.wrongQuestion.failures.at(-1)?.sourceRunId && <Link className="button secondary" to={`/runs/${wrongQuestion.data.wrongQuestion.failures.at(-1)!.sourceRunId}`}><RotateCcw size={15} aria-hidden="true" />查看失败轨迹</Link>}</> : null}</div>}
+          {selectedWrongId !== undefined && <div className="wrong-question-detail">{wrongQuestion.isError ? <ErrorState message={wrongQuestion.error.message} onRetry={() => void wrongQuestion.refetch()} /> : wrongQuestion.isPending ? <LoadingState /> : wrongQuestion.data ? <><h3>Attempt #{wrongQuestion.data.wrongQuestion.attemptId}</h3><p>{wrongQuestion.data.wrongQuestion.task}</p><dl><div><dt>附件</dt><dd>{wrongQuestion.data.wrongQuestion.attachments.length}</dd></div><div><dt>失败记录</dt><dd>{wrongQuestion.data.wrongQuestion.failures.length}</dd></div><div><dt>最后更新</dt><dd>{formatDateTime(wrongQuestion.data.wrongQuestion.lastFailedAt)}</dd></div></dl>{wrongQuestion.data.wrongQuestion.failures.at(-1)?.sourceRunId && <Link className="button secondary" to={`/runs/${wrongQuestion.data.wrongQuestion.failures.at(-1)!.sourceRunId}`}><RotateCcw size={15} aria-hidden="true" />查看失败轨迹</Link>}</> : null}</div>}
         </section>
 
         <section className="surface-panel capability-panel">

@@ -418,8 +418,8 @@ export class SandboxClient {
     readonly timeoutMs: number,
   ) {}
 
-  async health(): Promise<SandboxHealth> {
-    return await requestJson<SandboxHealth>(this.socketPath, "GET", "/health", undefined, this.timeoutMs);
+  async health(signal?: AbortSignal): Promise<SandboxHealth> {
+    return await requestJson<SandboxHealth>(this.socketPath, "GET", "/health", undefined, this.timeoutMs, signal);
   }
 
   async execute(input: SandboxExecRequest, signal?: AbortSignal): Promise<SandboxExecResult> {

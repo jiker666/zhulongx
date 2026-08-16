@@ -52,6 +52,16 @@ button:disabled {
   opacity: 0.5;
 }
 
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+summary:focus-visible {
+  outline: 2px solid rgb(196 97 63 / 42%);
+  outline-offset: 2px;
+}
+
 a {
   color: inherit;
   text-decoration: none;

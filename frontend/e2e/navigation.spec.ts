@@ -35,10 +35,11 @@ test("competition workspaces expose arena and batch controls", async ({ page }) 
   await expect(page.getByRole("heading", { name: "擂台指挥" })).toBeVisible();
   await expect(page.getByRole("button", { name: "开始作业" })).toBeVisible();
   await expect(page.getByText("作用域", { exact: true })).toBeVisible();
+  await expect(page.getByRole("checkbox", { name: /自动提交/ })).toBeEnabled();
   await page.goto("/workbench");
   await expect(page.getByRole("heading", { name: "任务工作台" })).toBeVisible();
   await expect(page.getByRole("textbox", { name: "任务内容" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "提交解题" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "提交解题" })).toBeDisabled();
   expect(errors.pageErrors).toEqual([]);
   expect(errors.consoleErrors).toEqual([]);
 });
@@ -62,11 +63,14 @@ test("runs page supports direct refresh and real detail navigation when data exi
   await page.reload();
   await expect(page).toHaveURL(/\/runs$/);
   await page.getByRole("textbox", { name: "搜索运行" }).fill("33333333-3333-4333-8333-333333333333");
+  await expect(page.getByRole("combobox", { name: "排序运行" })).toBeVisible();
   const detailLinks = page.locator('a[href="/runs/33333333-3333-4333-8333-333333333333"]');
   await expect(detailLinks).toBeVisible();
   await detailLinks.click();
   await expect(page).toHaveURL(/\/runs\/[0-9a-f-]+$/i);
   await expect(page.getByText("MISSION CONTROL")).toBeVisible();
+  await expect(page.getByText("审计链完整")).toBeVisible();
+  await expect(page.getByRole("button", { name: "导出审计" })).toBeEnabled();
   await expect(page.getByRole("tab").first()).toBeVisible();
   const decisionItems = page.locator(".decision-item");
   await expect(decisionItems.first()).toBeVisible();

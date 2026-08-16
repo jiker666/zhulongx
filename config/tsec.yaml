@@ -46,12 +46,27 @@ scope:
     - ffuf
     - file
     - find
+    - gap
     - gobuster
     - jq
+    - patchelf
     - python3
     - rg
+    - scalpel
     - unzip
     - xxd
+    - addr2line
+    - c++filt
+    - gdb-multiarch
+    - jadx
+    - ltrace
+    - objcopy
+    - pwn
+    - r2
+    - rabin2
+    - rafind2
+    - ragg2
+    - rax2
 
 server:
   host: 127.0.0.1

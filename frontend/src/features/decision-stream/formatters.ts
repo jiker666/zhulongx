@@ -7,6 +7,7 @@ export const kindLabels: Record<DecisionKind, string> = {
   evidence: "证据",
   result: "结果",
   policy: "策略",
+  context: "上下文",
   system: "系统",
   warning: "警告",
 };

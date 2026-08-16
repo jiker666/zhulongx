@@ -66,6 +66,15 @@
   gap: 7px;
 }
 
+.button-spinner {
+  width: 13px;
+  height: 13px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.75s linear infinite;
+}
+
 .icon-button {
   display: inline-grid;
   flex: none;
@@ -230,6 +239,13 @@
   line-height: 1.6;
 }
 
+.dialog-error {
+  margin-top: 9px;
+  color: var(--danger);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 .token-dialog > .button {
   width: 100%;
 }
@@ -308,6 +324,70 @@
   margin-bottom: 22px;
 }
 
+.heading-refresh {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.heading-refresh > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--subtle);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.data-health-banner,
+.readiness-issues,
+.audit-integrity {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  color: #7e5928;
+  background: #f7efe1;
+  border: 1px solid #ead9bc;
+  border-radius: var(--radius);
+}
+
+.data-health-banner {
+  margin: -8px 0 18px;
+}
+
+.data-health-banner > span,
+.readiness-issues > span,
+.audit-integrity > span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.data-health-banner strong,
+.readiness-issues strong,
+.audit-integrity strong {
+  font-size: 11px;
+}
+
+.data-health-banner small,
+.audit-integrity small {
+  color: inherit;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.data-health-banner button {
+  flex: none;
+  margin-left: auto;
+  padding: 5px 8px;
+  color: inherit;
+  background: transparent;
+  border: 1px solid currentColor;
+  border-radius: 5px;
+  font-size: 10px;
+}
+
 .readiness-brief {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
@@ -372,7 +452,7 @@
 .command-metrics,
 .arena-metrics {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(6, 1fr);
   margin: 18px 0;
   padding: 17px 0;
   background: var(--surface);
@@ -727,6 +807,16 @@
   padding: 12px 0;
   border-top: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
+}
+
+.readiness-issues {
+  margin: -1px 0 14px;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.readiness-issues strong {
+  margin-right: 7px;
 }
 
 .readiness-strip > div {
@@ -1166,6 +1256,45 @@
   gap: 7px;
 }
 
+.submit-control {
+  display: flex;
+  align-items: end;
+}
+
+.submit-control .button {
+  width: 100%;
+  white-space: nowrap;
+}
+
+.composer-validation {
+  margin-top: 9px;
+  color: var(--subtle);
+  font-size: 10px;
+  text-align: right;
+}
+
+.composer-validation.invalid,
+.task-count.over-limit {
+  color: var(--danger);
+}
+
+.active-job-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 0 10px;
+  color: var(--subtle);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 11px;
+}
+
+.active-job-count.active {
+  color: var(--blue);
+}
+
 .submit-task-button {
   white-space: nowrap;
 }
@@ -1302,6 +1431,18 @@
 .manual-job-header p {
   margin: 0;
   color: var(--subtle);
+  font-size: 10px;
+}
+
+.manual-job-operations {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.compact-action {
+  min-height: 32px;
+  padding: 5px 9px;
   font-size: 10px;
 }
 
@@ -1450,6 +1591,14 @@
   min-width: 0;
 }
 
+.run-toolbar-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  margin-left: auto;
+}
+
 .run-search {
   display: flex;
   align-items: center;
@@ -1475,6 +1624,63 @@
   border: 0;
   outline: 0;
   font-size: 11px;
+}
+
+.run-search button,
+.experience-search button {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  color: var(--subtle);
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+}
+
+.run-search button:hover,
+.experience-search button:hover {
+  color: var(--text);
+  background: var(--surface-elevated);
+}
+
+.run-sort {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 8px;
+  color: var(--subtle);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.run-sort select {
+  color: var(--text);
+  background: transparent;
+  border: 0;
+  outline: 0;
+  font-size: 11px;
+}
+
+.run-results-summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin: -9px 0 12px;
+  color: var(--subtle);
+  font-size: 10px;
+}
+
+.run-results-summary strong {
+  color: var(--text);
+}
+
+.run-results-summary .syncing {
+  color: var(--blue);
 }
 
 .pagination {
@@ -1504,6 +1710,53 @@
   color: var(--green);
 }
 
+.experience-toolbar {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) 130px 150px auto;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 14px;
+}
+
+.experience-search {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  height: 38px;
+  padding: 0 10px;
+  color: var(--subtle);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.experience-search input {
+  width: 100%;
+  min-width: 0;
+  color: var(--text);
+  background: transparent;
+  border: 0;
+  outline: 0;
+  font-size: 11px;
+}
+
+.experience-toolbar select {
+  height: 38px;
+  padding: 0 9px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 11px;
+}
+
+.experience-toolbar > span {
+  color: var(--subtle);
+  font-size: 10px;
+  text-align: right;
+}
+
 .experience-card {
   display: flex;
   flex-direction: column;
@@ -1523,6 +1776,94 @@
 .experience-actions .button {
   min-height: 34px;
   font-size: 11px;
+}
+
+.experience-review {
+  display: grid;
+  gap: 8px;
+  margin-top: auto;
+  padding-top: 15px;
+  border-top: 1px solid var(--border);
+}
+
+.experience-review > label {
+  color: var(--subtle);
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.experience-review textarea {
+  width: 100%;
+  min-height: 78px;
+  resize: vertical;
+  padding: 9px 10px;
+  color: var(--text);
+  background: var(--surface-soft);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.experience-review > div {
+  display: flex;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.experience-review .button {
+  min-height: 32px;
+  font-size: 10px;
+}
+
+.audit-integrity {
+  margin: -4px 0 14px;
+  color: #3f7058;
+  background: #edf3ef;
+  border-color: #d2e2d8;
+}
+
+.audit-integrity.invalid {
+  color: #9a4343;
+  background: #f8e9e7;
+  border-color: #e7c9c5;
+}
+
+.detail-toolbar > div {
+  display: flex;
+  gap: 7px;
+}
+
+.latest-review {
+  padding: 9px 10px;
+  background: var(--surface-soft);
+  border-left: 2px solid var(--green);
+  border-radius: 0 6px 6px 0;
+}
+
+.latest-review > span {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--subtle);
+  font-size: 9px;
+}
+
+.latest-review strong {
+  color: var(--green);
+  font-size: 10px;
+}
+
+.latest-review p,
+.latest-review small {
+  display: block;
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 /* Human review stays attached to the selected decision, not hidden in a second page. */
@@ -1664,6 +2005,10 @@
     align-items: stretch;
     flex-direction: column;
   }
+
+  .run-toolbar-controls {
+    margin-left: 0;
+  }
 }
 
 @media (max-width: 760px) {
@@ -1734,7 +2079,8 @@
   }
 
   .composer-settings .toggle-control,
-  .composer-settings .submit-task-button {
+  .composer-settings .submit-task-button,
+  .composer-settings .submit-control {
     grid-column: 1 / -1;
   }
 
@@ -1894,7 +2240,29 @@
     min-width: 0;
   }
 
+  .run-toolbar-controls {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .run-sort {
+    justify-content: space-between;
+  }
+
   .experience-count {
     display: none;
+  }
+
+  .experience-toolbar {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .experience-search,
+  .experience-toolbar > span {
+    grid-column: 1 / -1;
+  }
+
+  .experience-toolbar > span {
+    text-align: left;
   }
 }

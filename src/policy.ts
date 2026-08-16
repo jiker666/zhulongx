@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { basename, isAbsolute, relative, resolve, sep } from "node:path";
+import { isActionDescriptor, toolDescriptorMap, type ToolDescriptor } from "./tool-catalog.js";
 import type { ArenaConfig, RuntimeConfig, RunState, ScopeConfig } from "./types.js";
 
 export interface PolicyDecision {
@@ -13,6 +14,8 @@ const ACTION_TOOLS = new Set([
   "list_files",
   "read_file",
   "inspect_artifact",
+  "extract_archive",
+  "search_artifact",
   "observe_image",
   "list_scratch_files",
   "read_scratch_file",
@@ -93,16 +96,23 @@ function tcpAuthority(host: string, port: number): string {
 }
 
 export class PolicyEngine {
+  private readonly descriptors: Map<string, ToolDescriptor>;
+
   constructor(
     readonly scope: ScopeConfig,
     readonly runtime: RuntimeConfig,
-  ) {}
+    externalDescriptors: ToolDescriptor[] = [],
+  ) {
+    this.descriptors = toolDescriptorMap(externalDescriptors);
+  }
 
   evaluate(toolName: string, args: unknown, state: RunState): PolicyDecision {
     const actionSignature = signature(toolName, args);
-    if (!META_TOOLS.has(toolName) && !ACTION_TOOLS.has(toolName)) {
+    const descriptor = this.descriptors.get(toolName);
+    if (!descriptor || (!META_TOOLS.has(toolName) && !ACTION_TOOLS.has(toolName) && descriptor.source === "builtin")) {
       return { allowed: false, reason: `Unknown tool: ${toolName}`, signature: actionSignature };
     }
+    const action = ACTION_TOOLS.has(toolName) || (descriptor.source !== "builtin" && isActionDescriptor(descriptor));
     if (state.toolCalls >= this.runtime.maxToolCalls) {
       return { allowed: false, reason: "Tool-call budget exhausted", signature: actionSignature };
     }
@@ -214,7 +224,7 @@ export class PolicyEngine {
     const reserveStartsAt = this.runtime.maxRuntimeMs - this.runtime.finalizationReserveMs;
     const startedAt = Date.parse(state.startedAt ?? state.createdAt);
     if (
-      ACTION_TOOLS.has(toolName) &&
+      action &&
       Number.isFinite(startedAt) &&
       Date.now() - startedAt >= reserveStartsAt
     ) {
@@ -224,11 +234,11 @@ export class PolicyEngine {
         signature: actionSignature,
       };
     }
-    if (ACTION_TOOLS.has(toolName) && state.actionsSinceCheckpoint >= this.runtime.maxActionsWithoutCheckpoint) {
+    if (action && state.actionsSinceCheckpoint >= this.runtime.maxActionsWithoutCheckpoint) {
       return { allowed: false, reason: "Checkpoint required before more actions", signature: actionSignature };
     }
     const repeats = state.repeatedActions[actionSignature] ?? 0;
-    if (ACTION_TOOLS.has(toolName) && repeats >= this.runtime.maxRepeatedAction) {
+    if (action && repeats >= this.runtime.maxRepeatedAction) {
       return { allowed: false, reason: "Repeated-action limit reached; revise the strategy", signature: actionSignature };
     }
     if (toolName === "run_command") {
@@ -262,6 +272,33 @@ export class PolicyEngine {
         return {
           allowed: false,
           reason: "Artifact inspection requires a safe relative workspace or scratch path",
+          signature: actionSignature,
+        };
+      }
+    }
+    if (toolName === "search_artifact") {
+      const path = String((args as { path?: unknown })?.path ?? "");
+      const source = String((args as { source?: unknown })?.source ?? "workspace");
+      if ((source !== "workspace" && source !== "scratch") || !isRelativeSafePath(path)) {
+        return {
+          allowed: false,
+          reason: "Artifact search requires a safe relative workspace or scratch path",
+          signature: actionSignature,
+        };
+      }
+    }
+    if (toolName === "extract_archive") {
+      const path = String((args as { path?: unknown })?.path ?? "");
+      const destination = String((args as { destination?: unknown })?.destination ?? "");
+      const source = String((args as { source?: unknown })?.source ?? "workspace");
+      if (
+        (source !== "workspace" && source !== "scratch") ||
+        !isRelativeSafePath(path) ||
+        !isRelativeSafePath(destination)
+      ) {
+        return {
+          allowed: false,
+          reason: "Archive extraction requires safe relative source and scratch destination paths",
           signature: actionSignature,
         };
       }
@@ -335,16 +372,39 @@ export class PolicyEngine {
       if (["capture_screenshot", "upload", "download", "evaluate", "popup"].includes(action)) return { allowed: false, reason: "This browser action is disabled by default", signature: actionSignature };
       if (!["create_session", "open_page", "navigate", "reload", "go_back", "capture_dom", "capture_network_summary", "assert_state", "click", "fill", "select", "check", "uncheck", "submit_form", "wait_for", "close_page", "close_session"].includes(action)) return { allowed: false, reason: "Unknown browser action", signature: actionSignature };
     }
+    if (descriptor.source !== "builtin" && descriptor.effect === "network") {
+      if (this.scope.mode !== "controlled") return { allowed: false, reason: "External network tools require scope.mode=controlled", signature: actionSignature };
+      if (state.httpRequests >= this.runtime.maxHttpRequests) return { allowed: false, reason: "Network request budget exhausted", signature: actionSignature };
+      const input = args && typeof args === "object" ? args as Record<string, unknown> : {};
+      if (descriptor.networkTargetFields?.includes("url")) {
+        try {
+          const url = new URL(String(input.url ?? ""));
+          if (!["http:", "https:"].includes(url.protocol) || !this.scope.allowedHosts.some((allowed) => hostMatches(url.host, allowed))) {
+            return { allowed: false, reason: `External tool host is outside the authorized scope: ${url.host}`, signature: actionSignature };
+          }
+        } catch (error) {
+          return { allowed: false, reason: `Invalid external tool URL: ${String(error)}`, signature: actionSignature };
+        }
+      }
+      if (descriptor.networkTargetFields?.includes("host-port")) {
+        const authority = tcpAuthority(String(input.host ?? ""), Number(input.port ?? 0));
+        if (!this.scope.allowedHosts.some((allowed) => hostMatches(authority, allowed))) {
+          return { allowed: false, reason: `External tool host is outside the authorized scope: ${authority}`, signature: actionSignature };
+        }
+      }
+    }
     return { allowed: true, reason: "Allowed by configured scope and runtime budget", signature: actionSignature };
   }
 
   recordAllowed(toolName: string, decision: PolicyDecision, state: RunState): void {
     state.toolCalls += 1;
-    if (ACTION_TOOLS.has(toolName)) {
+    const descriptor = this.descriptors.get(toolName);
+    if (ACTION_TOOLS.has(toolName) || (descriptor?.source !== "builtin" && descriptor !== undefined && isActionDescriptor(descriptor))) {
       state.actionsSinceCheckpoint += 1;
       state.repeatedActions[decision.signature] = (state.repeatedActions[decision.signature] ?? 0) + 1;
     }
     if (toolName === "http_request" || toolName === "web_collect_baseline") state.httpRequests += 1;
+    if (descriptor?.source !== "builtin" && descriptor?.effect === "network") state.httpRequests += 1;
     if (toolName === "tcp_open") state.tcpSessions += 1;
     if (toolName === "observe_image") state.imageObservations = (state.imageObservations ?? 0) + 1;
     if (toolName === "checkpoint") state.actionsSinceCheckpoint = 0;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { tsecScope } from "../src/tsec.js";
+import { shouldSkipTSecVpn, tsecScope } from "../src/tsec.js";
 import type { AppConfig } from "../src/types.js";
 
 function config(mode: "controlled" | "observe"): AppConfig {
@@ -7,6 +7,12 @@ function config(mode: "controlled" | "observe"): AppConfig {
 }
 
 describe("TSec scope adapter", () => {
+  it("allows a managed runner to opt out of the local VPN bootstrap", () => {
+    expect(shouldSkipTSecVpn({ TSEC_SKIP_VPN: "1" })).toBe(true);
+    expect(shouldSkipTSecVpn({ TSEC_SKIP_VPN: "0" })).toBe(false);
+    expect(shouldSkipTSecVpn({})).toBe(false);
+  });
+
   it("narrows an operator-owned VPN range to the returned host and port", () => {
     expect(tsecScope(config("controlled"), "10.0.178.80", 80, ["10.0.*.*"])).toEqual({
       mode: "controlled",

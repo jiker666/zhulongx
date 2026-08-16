@@ -42,6 +42,22 @@
 
 每次发布应固定配置、模型标识、依赖锁文件、API 容器摘要、CTF sandbox 容器摘要、`tools/ctf/capabilities.json` 版本和评测集版本，并导出 `audit.jsonl` 供复核。
 
+## 可复现实验账本
+
+`EvaluationLedger` 将 suite、dataset version、split、模型/思考等级、Node/平台/架构、每次尝试的时间/Token/成本预算、是否允许网络、输入产物哈希和容器摘要固定成不可变 manifest hash。每次 attempt 记录 outcome、首次有效假设耗时、工具调用数、稳定错误分类和 audit/run artifact 引用；报告聚合成功率、结果分布、错误分布、耗时、Token 和成本。
+
+服务 API 使用 `XUANSHU_SERVER_TOKEN` 保护：
+
+- `GET/POST /v1/evaluations`：列出或创建有界 manifest；
+- `POST /v1/evaluations/:id/attempts`：在 manifest 的预算内登记结果；
+- `GET /v1/evaluations/:id`：读取聚合报告和有界 attempt 列表。
+
+账本不会自动调用模型或目标，也不会把一次成功包装成基准结论。开发、验证和隐藏集必须分别报告；真实模型评测属于显式启用的 evaluation suite，编排单元测试只使用确定性 faux model/runner。
+
+## 路由与 HeavyThink 评测
+
+步骤级路由必须依据节点难度、effect、required capabilities 以及 per-step Token/成本上限选择候选，而不是按整题标签固定模型。报告需包含路由决策与未匹配原因。HeavyThink 只有在至少两个独立分支、聚合器以及分支数/总时间/总 Token/总成本预算齐备时才能启用；分支结果和聚合选择必须可审计。应以相同隐藏集比较单分支与 HeavyThink 的成功率、成本和方差，数据不足时保持关闭。
+
 ## 经验闭环评测
 
 - 只允许将平台或独立验证器明确判定成功的运行经验晋升为 active；模型自报完成不能成为晋升依据。

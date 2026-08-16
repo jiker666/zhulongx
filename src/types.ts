@@ -114,6 +114,23 @@ export interface AppConfig {
   questionBank?: QuestionBankConfig;
   webReasoning?: WebReasoningConfig;
   browser?: import("./web-reasoning/browser/types.js").BrowserRuntimeConfig;
+  profile?: AgentProfileConfig;
+  connectors?: import("./connector.js").ConnectorConfig[];
+}
+
+export interface AgentProfileConfig {
+  id: string;
+  systemPrompt?: string;
+  preferredExecutor: "sandbox" | "local" | "ssh" | "connector";
+  executorTargetId?: string;
+  requiredCapabilities: string[];
+  toolAllowlist: string[];
+  approvalPolicy?: "always" | "on-request" | "never";
+  contextPolicy: {
+    compactAtRatio: number;
+    keepRecentTokens: number;
+    maxSummaryChars: number;
+  };
 }
 
 export interface TaskRequest {
@@ -230,6 +247,13 @@ export interface RunReview {
   createdAt: string;
 }
 
+export interface RunLineage {
+  parentRunId: string;
+  boundarySequence: number;
+  mode: "fork" | "resume";
+  inheritedEventCount: number;
+}
+
 export interface RunState {
   id: string;
   status: RunStatus;
@@ -265,6 +289,19 @@ export interface RunState {
   evidence?: EvidenceRecord[];
   webAgent?: import("./agents/web/types.js").WebAgentState;
   webReasoning?: import("./web-reasoning/types.js").WebReasoningState;
+  contextCuts?: ContextCut[];
+  profile?: { id: string; executorId: string; executorKind: string; capabilities: string[]; tools: string[] };
+  providerError?: ProviderError;
+  lineage?: RunLineage;
+}
+
+export interface ContextCut {
+  id: string;
+  throughSeq: number;
+  throughMessageCount: number;
+  sourceEventCount: number;
+  summary: string;
+  createdAt: string;
 }
 
 export interface AuditRecord {
@@ -272,6 +309,10 @@ export interface AuditRecord {
   timestamp: string;
   runId: string;
   type: string;
+  source?: import("./session-trajectory.js").TrajectorySource;
+  actor?: string;
+  correlationId?: string;
+  parentSequence?: number;
   data: unknown;
   previousHash: string;
   hash: string;
@@ -284,8 +325,45 @@ export interface RunEvent {
   data: unknown;
 }
 
+export interface OrderedRuntimeEvent {
+  sessionId: string;
+  runId: string;
+  epoch: number;
+  seq: number;
+  type: string;
+  timestamp: string;
+  source?: import("./session-trajectory.js").TrajectorySource;
+  actor?: string;
+  correlationId?: string;
+  parentSequence?: number;
+  data: unknown;
+}
+
+export type ProviderErrorCode =
+  | "rate_limit"
+  | "quota"
+  | "provider_config"
+  | "request_rejected"
+  | "network_policy"
+  | "network"
+  | "server"
+  | "tool_denied"
+  | "aborted"
+  | "unknown";
+
+export interface ProviderError {
+  code: ProviderErrorCode;
+  message: string;
+  retryable: boolean;
+  retryAfterMs?: number;
+}
+
 export interface RuntimeOverrides {
   streamFn?: StreamFn;
   model?: Model<string>;
   onEvent?: (event: RunEvent) => void | Promise<void>;
+  externalTools?: import("./external-tools.js").ExternalToolRegistration[];
+  permissionGate?: import("./permissions.js").PermissionGate;
+  memoryStore?: import("./memory.js").MemoryStore;
+  executorFactory?: (input: { runId: string; workspaceRoot: string; scratchRoot: string; signal?: AbortSignal }) => Promise<import("./executor.js").Executor> | import("./executor.js").Executor;
 }

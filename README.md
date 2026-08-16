@@ -11,13 +11,18 @@
 - 强制执行 `任务理解 -> 计划 -> 行动/观察 -> checkpoint -> 证据 -> 完成/阻塞` 状态机。
 - 按题型加载 9 类经过归一化审查的开源 CTF skill 索引；skill 只提供策略候选，不继承外部工具权限。
 - Crypto/Misc core profile 提供可构建验证的 ECM、PARI/GP、fpylll、Z3、OR-Tools、Pickora、OCR、音频/调制解码和常见图像隐写工具。
+- RE/PWN core profile 提供固定版本的 Radare2、JADX、Pwntools、gdb-multiarch、ltrace 和 binutils 辅助命令；归档提取与字节搜索也可在没有完整 sandbox 时以本地有界工具执行。
 - 工具失败或策略拒绝后，必须分类失败、修订计划并说明新的行动依据。
 - 只读输入、逐运行 scratch、结构化沙箱命令，以及受策略约束的 HTTP/TCP 工具。
 - 可选 Playwright Chromium 运行时提供受控浏览器会话；导航、交互、DOM 与网络摘要仍由 `WebActionGuard`、`PolicyEngine`、scope 和独立预算约束。
 - 主机、程序、路径、轮次、工具调用、请求、输出、重复动作和总时长预算。
 - 每次运行可启用附件专属工作区；Arena 运行只暴露当前题目的只读附件，图片预算由 `runtime.maxImageBytes`、`runtime.maxImageObservations` 控制，并由 `runtime.finalizationReserveMs` 预留收尾时间。
 - 同题多 agent 竞速使用有界共享证据板交换事实、候选和 dead-end；每个 agent 保留独立 scratch，且必须独立复核共享内容。
-- JSONL SHA-256 前向哈希审计链、决策时间线和人工复核记录。
+- JSONL SHA-256 前向哈希审计链；系统提示词、公开模型上下文、工具请求、策略判定、工具结果、上下文注入和运行血缘写入同一条追加事件流，隐藏推理、凭据和图片像素明确不持久化。
+- 面向网安初学者的行动轨迹用“做什么、为什么、影响、结果、下一步”解释每个步骤，并支持按模型/上下文/策略/工具/子 Agent 来源筛选、搜索、历史回放和从指定事件创建分支。
+- 服务重启时以持久状态和审计链重建运行视图；未结算运行会明确标记为中断，绝不自动重放可能已有副作用的工具调用。
+- 持久可寻址 Agent、Mailbox 和 Workflow DAG 使用租约/generation、effect 调度、结果确认、总预算和副作用 no-replay；浏览器或父进程不是任务宿主。
+- user/project 长期记忆、来源化知识摄取、反向 Connector、可复现实验账本、步骤级 Model Router 与有界 HeavyThink 均有明确的注入和预算边界。
 - 只有经过外部平台验真的通用经验才能进入经验库，且后续任务仍需重新验证。
 - CLI、异步 REST API、Docker Compose 和 NSSCTF Agent Arena 适配。
 
@@ -144,7 +149,7 @@ Arena 控制面仅允许访问配置源站的 `/api/skill/agent/arena/` 前缀�
 XUANSHU_SERVER_TOKEN="replace-with-a-long-random-value" npm run serve
 ```
 
-打开 `http://127.0.0.1:7318/` 查看运行、计划、策略门禁、工具证据、checkpoint、假设变化、经验候选和结论。页面展示可复核的外显决策，不保存或推断隐藏思维链。
+打开 `http://127.0.0.1:7318/` 查看运行、行动轨迹、模型可见上下文、策略门禁、工具证据、checkpoint、假设变化、经验候选和结论。页面展示可复核的外显决策，不保存或推断隐藏思维链。
 
 ```bash
 curl http://127.0.0.1:7318/health
@@ -153,9 +158,32 @@ curl -X POST http://127.0.0.1:7318/v1/runs \
   -H "Authorization: Bearer $XUANSHU_SERVER_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"task":"检查授权工作区并记录证据"}'
+
+# 从历史事件 #12 创建独立分支
+curl -X POST http://127.0.0.1:7318/v1/runs/<run-id>/fork \
+  -H "Authorization: Bearer $XUANSHU_SERVER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"boundarySequence":12,"instruction":"基于已有证据尝试另一条验证路径"}'
+
+# 从父运行最后一条事件继续
+curl -X POST http://127.0.0.1:7318/v1/runs/<run-id>/resume \
+  -H "Authorization: Bearer $XUANSHU_SERVER_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{}'
 ```
 
 非回环地址启动时必须设置服务令牌。
+
+持久编排与 operator 数据 API 也使用同一服务令牌：
+
+- `/v1/agents`、`/v1/agent-tasks/:id`：创建、寻址、等待、中断和确认后台任务；
+- `/v1/workflows`：创建、查询和取消有界 DAG；
+- `/v1/connectors`：对 operator 预配置的反向 Connector 做注册、心跳、断开、claim 和结果结算；
+- `/v1/memory`：管理有 TTL、来源、置信度和用户确认状态的 user/project 记忆；
+- `/v1/knowledge`：摄取、查询和删除带 URL、哈希、引用、信任级别及提示注入标记的知识快照；
+- `/v1/evaluations`：固定环境/预算 manifest、登记 attempt 并读取成功率、耗时、Token、成本和错误分类报告。
+
+Deep Research 没有裸抓取 REST 端点。宿主必须显式提供 `policyControlled` fetcher，每个 URL 仍先经过 `PolicyEngine` 和 operator scope。Step Model Router 与 HeavyThink 同样是默认不调用真实模型的应用服务库；启用时必须提供 runner，并纳入分支数、时间、Token 和成本预算。
 
 ## Docker
 
@@ -172,9 +200,11 @@ docker compose up --build
 XUANSHU_INSTALL_HEAVY_CTF_TOOLS=true docker compose build ctf-sandbox
 ```
 
-heavy 构建会固定源码 commit 并运行 `verify-heavy-tools.sh`；包含 SageMath、RsaCtfTool、CADO-NFS、flatter、radare2、stegseek、angr、qiling、frida、PyTorch 和 Transformers。Ghidra 与 GPU hashcat 调优仍需按部署环境人工处理。安装这些工具不会扩大运行时程序 allowlist 或网络 scope。
+core 构建包含并 smoke-test GAP、patchelf、scalpel、Radare2 6.2.0、JADX 1.5.5、Pwntools、gdb-multiarch、ltrace 和 binutils 辅助命令；Radare2/JADX 发行包在构建期校验 SHA-256。heavy 构建会固定源码 commit 并运行 `verify-heavy-tools.sh`；包含 SageMath、RsaCtfTool、CADO-NFS、flatter、额外的 radare2 源码构建、stegseek、angr、qiling、frida、PyTorch 和 Transformers。Ghidra、UPX 与 GPU hashcat 调优仍需按部署环境人工处理。`crypto-attacks`、`gf2bv`、`lll_cvp`、`lattice-based-cryptanalysis` 和 `cuso` 仅记录为 operator-managed 审查项，在许可证、安装与确定性样例完整前不会伪装成默认能力。安装任何工具都不会扩大运行时程序 allowlist 或网络 scope。详见 [二进制工具链](docs/binary-toolchain.md)。
 
 主服务以非 root 用户运行；`workspace` 只读挂载，scratch 和审计材料写入独立卷。Arena Token 仅在使用 Arena 功能时需要。
+
+TSecBench 托管评测使用独立的自启动镜像和网关配置，详见 [TSec 托管评测](docs/tsec-hosted.md)。
 
 ## 运行材料
 
@@ -191,11 +221,15 @@ heavy 构建会固定源码 commit 并运行 `verify-heavy-tools.sh`；包含 Sa
 ## 项目结构
 
 - `src/runtime.ts`：Agent 生命周期、状态与持久化。
+- `src/agent-store.ts`、`src/workflow.ts`：可寻址任务内核与 effect-aware 持久 DAG。
+- `src/executor.ts`、`src/connector.ts`：统一执行器和 operator 配置的反向 Connector。
+- `src/memory.ts`、`src/knowledge-store.ts`、`src/deep-research.ts`：来源化长期参考与策略受控研究摄取。
+- `src/evaluation-ledger.ts`、`src/model-routing.ts`：可复现实验账本、步骤路由和 HeavyThink 预算协调。
 - `src/skill-catalog.ts`、`skills/`：开源 CTF skill 的固定来源、类别索引与接入边界。
 - `src/policy.ts`：作用域、预算和停滞门禁。
 - `src/tools.ts`：模型可调用的有界工具。
 - `src/sandbox.ts`：sidecar 协议与结构化命令执行。
-- `src/audit.ts`、`src/trace.ts`：审计链和决策投影。
+- `src/audit.ts`、`src/session-trajectory.ts`、`src/trace.ts`：追加审计链、来源/上下文信封、行动解释、回放与运行分支。
 - `src/experience.ts`：经外部验真的通用经验。
 - `src/arena*.ts`：Arena 客户端与评测闭环。
 - `src/question-bank.ts`、`src/manual-jobs.ts`：本地题库索引与可跳过的有界批处理。
@@ -204,7 +238,11 @@ heavy 构建会固定源码 commit 并运行 `verify-heavy-tools.sh`；包含 Sa
 - `frontend/`：React 审计控制台源码与 Playwright 页面测试。
 - `test/`：确定性 faux-model、策略、沙箱和 API 测试。
 
-架构、CTF skills、参考项目研究、评测方法与路线图分别见 [docs/architecture.md](docs/architecture.md)、[skills/README.md](skills/README.md)、[docs/reference-agent-study.md](docs/reference-agent-study.md)、[docs/evaluation.md](docs/evaluation.md) 和 [docs/roadmap.md](docs/roadmap.md)。本项目当前仍缺少 DNS 解析锁定、统一出口代理和租户级 microVM 隔离；受控浏览器也不持久化登录会话，不应把当前版本视为无人值守生产安全扫描器。
+架构、工具副作用、CTF skills、参考项目研究、评测方法与路线图分别见 [docs/architecture.md](docs/architecture.md)、[docs/tool-side-effects.md](docs/tool-side-effects.md)、[skills/README.md](skills/README.md)、[docs/reference-agent-study.md](docs/reference-agent-study.md)、[docs/evaluation.md](docs/evaluation.md) 和 [docs/roadmap.md](docs/roadmap.md)。本项目当前仍缺少 DNS 解析锁定、统一出口代理、跨实例持久事件总线和租户级 microVM 隔离；受控浏览器也不持久化登录会话，不应把当前版本视为无人值守生产安全扫描器。
+
+## XH-202609 参赛材料
+
+面向“具备自主决策能力的通用网络安全智能体技术研究”榜题的源码、设计、开发、测试、使用、技术报告、演示脚本、PPT 和提交清单位于 [docs/competition/](docs/competition/README.md)。其中需要学校/团队盖章、百度网盘链接、线上测试地址或报名系统生成文件的项目明确保留为人工待办，避免在仓库中编造或提交敏感信息。
 
 ## 贡献与许可证
 

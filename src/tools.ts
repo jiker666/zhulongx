@@ -5,8 +5,10 @@ import { basename, dirname, relative, resolve } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "@earendil-works/pi-ai";
 import type { AuditChain } from "./audit.js";
+import { extractZipArchive, searchArtifact } from "./artifact-tools.js";
+import { SandboxExecutor, type Executor } from "./executor.js";
+import { adaptExternalTool, type ExternalToolRegistration } from "./external-tools.js";
 import { hostMatches, isPathInside, resolveWorkspacePath } from "./policy.js";
-import { SandboxClient } from "./sandbox.js";
 import type { PublishSharedEvidenceInput, SharedEvidenceBoard, SharedEvidenceKind } from "./shared-evidence.js";
 import { searchWebKnowledge } from "./agents/web/web-knowledge.js";
 import { ControlledBrowserRuntime } from "./web-reasoning/browser/runtime.js";
@@ -52,6 +54,23 @@ interface InspectArtifactInput {
   source?: "workspace" | "scratch";
   path: string;
   maxStrings?: number;
+}
+
+interface ExtractArchiveInput {
+  source?: "workspace" | "scratch";
+  path: string;
+  destination: string;
+  maxEntries?: number;
+  maxBytes?: number;
+}
+
+interface SearchArtifactInput {
+  source?: "workspace" | "scratch";
+  path: string;
+  pattern: string;
+  encoding?: "utf8" | "hex";
+  maxMatches?: number;
+  contextBytes?: number;
 }
 
 interface ObserveImageInput {
@@ -197,6 +216,8 @@ interface ToolContext {
   sandboxNamespace?: string;
   sharedEvidence?: SharedEvidenceBoard;
   browser?: Partial<BrowserRuntimeConfig>;
+  executor?: Executor;
+  externalTools?: ExternalToolRegistration[];
 }
 
 export interface ToolSet {
@@ -562,7 +583,14 @@ async function receiveTcp(session: TcpSession, length: number, timeoutMs: number
 
 export function createToolSet(context: ToolContext): ToolSet {
   const { state, scope, runtime, audit, sandboxNamespace, sharedEvidence, browser } = context;
-  const sandbox = new SandboxClient(runtime.sandbox.socketPath, runtime.sandbox.connectTimeoutMs);
+  const executor = context.executor ?? new SandboxExecutor({
+    id: `sandbox:${state.id}`,
+    socketPath: runtime.sandbox.socketPath,
+    connectTimeoutMs: runtime.sandbox.connectTimeoutMs,
+    workspaceRoot: scope.workspaceRoot,
+    scratchRoot: runtime.scratchRoot,
+  });
+  const externalTools = (context.externalTools ?? []).map((registration) => adaptExternalTool(registration, runtime.maxOutputBytes));
   const tcpSessions = new Map<string, TcpSession>();
   const httpSessions = new Map<string, HttpSessionMemory>();
   const httpReplays = new Map<string, HttpReplayMemory>();
@@ -585,6 +613,7 @@ export function createToolSet(context: ToolContext): ToolSet {
     httpSessions.clear();
     httpReplays.clear();
     httpResponses.clear();
+    await executor.dispose();
   };
 
   const tools: AgentTool<any, any>[] = [
@@ -887,6 +916,85 @@ export function createToolSet(context: ToolContext): ToolSet {
       },
     },
     {
+      name: "extract_archive",
+      label: "Extract archive to scratch",
+      description:
+        "Safely extract a bounded ZIP archive from workspace or scratch into this run's scratch namespace. Rejects traversal, absolute paths, duplicates, and excessive output.",
+      parameters: Type.Object({
+        source: Type.Optional(Type.Union([Type.Literal("workspace"), Type.Literal("scratch")])),
+        path: Type.String({ minLength: 1 }),
+        destination: Type.String({ minLength: 1 }),
+        maxEntries: Type.Optional(Type.Integer({ minimum: 1, maximum: 500, default: 200 })),
+        maxBytes: Type.Optional(Type.Integer({ minimum: 1, maximum: 33554432, default: 16777216 })),
+      }),
+      executionMode: "sequential",
+      async execute(_id, params, signal) {
+        const input = params as ExtractArchiveInput;
+        const source = input.source ?? "workspace";
+        await mkdir(runtime.scratchRoot, { recursive: true });
+        const sourceRoot = source === "scratch" ? runtime.scratchRoot : scope.workspaceRoot;
+        const archivePath = await resolveExistingWorkspacePath(sourceRoot, input.path);
+        const result = await extractZipArchive(
+          archivePath,
+          `${source}:${input.path}`,
+          runtime.scratchRoot,
+          input.destination,
+          input.maxEntries ?? 200,
+          input.maxBytes ?? 16 * 1024 * 1024,
+          signal,
+        );
+        await audit.append("artifact.archive_extracted", {
+          source,
+          path: result.source,
+          destination: result.destination,
+          entries: result.entries.length,
+          bytes: result.bytes,
+          truncated: result.truncated,
+        });
+        return textResult(JSON.stringify(result, null, 2), result);
+      },
+    },
+    {
+      name: "search_artifact",
+      label: "Search binary artifact",
+      description:
+        "Search a bounded workspace or scratch artifact for a UTF-8 or hex byte pattern and return offsets with bounded context.",
+      parameters: Type.Object({
+        source: Type.Optional(Type.Union([Type.Literal("workspace"), Type.Literal("scratch")])),
+        path: Type.String({ minLength: 1 }),
+        pattern: Type.String({ minLength: 1, maxLength: 8192 }),
+        encoding: Type.Optional(Type.Union([Type.Literal("utf8"), Type.Literal("hex")])),
+        maxMatches: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, default: 20 })),
+        contextBytes: Type.Optional(Type.Integer({ minimum: 0, maximum: 256, default: 64 })),
+      }),
+      executionMode: "parallel",
+      async execute(_id, params, signal) {
+        const input = params as SearchArtifactInput;
+        const source = input.source ?? "workspace";
+        if (source === "scratch") await mkdir(runtime.scratchRoot, { recursive: true });
+        const root = source === "scratch" ? runtime.scratchRoot : scope.workspaceRoot;
+        const result = await searchArtifact(
+          root,
+          input.path,
+          input.pattern,
+          input.encoding ?? "utf8",
+          input.maxMatches ?? 20,
+          input.contextBytes ?? 64,
+          signal,
+        );
+        await audit.append("artifact.searched", {
+          source,
+          path: result.path,
+          encoding: result.encoding,
+          inspectedBytes: result.inspectedBytes,
+          matches: result.matches.length,
+          truncated: result.truncated,
+          matchLimitReached: result.matchLimitReached,
+        });
+        return textResult(JSON.stringify(result, null, 2), result);
+      },
+    },
+    {
       name: "observe_image",
       label: "Observe image",
       description:
@@ -1020,7 +1128,7 @@ export function createToolSet(context: ToolContext): ToolSet {
       executionMode: "sequential",
       async execute(_id, params, signal) {
         const input = params as RunCommandInput;
-        const result = await sandbox.execute(
+        const result = await executor.exec(
           {
             program: basename(input.program),
             args: input.args,
@@ -1503,6 +1611,8 @@ export function createToolSet(context: ToolContext): ToolSet {
       },
     },
   ];
+
+  for (const registration of externalTools) tools.push(registration.tool);
 
   return { tools, cleanup };
 }

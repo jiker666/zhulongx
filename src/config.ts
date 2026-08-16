@@ -57,6 +57,8 @@ function validateConfig(value: unknown, configPath: string): AppConfig {
   const questionBank = root.questionBank === undefined ? undefined : requireObject(root.questionBank, "questionBank");
   const webReasoning = root.webReasoning === undefined ? undefined : requireObject(root.webReasoning, "webReasoning");
   const browser = root.browser === undefined ? undefined : requireObject(root.browser, "browser");
+  const profile = root.profile === undefined ? undefined : requireObject(root.profile, "profile");
+  const connectors = root.connectors === undefined ? [] : root.connectors;
   const baseDir = resolve(configPath, "..");
   const workspaceRoot = requireString(scope.workspaceRoot, "scope.workspaceRoot");
   const artifactRoot = requireString(runtime.artifactRoot, "runtime.artifactRoot");
@@ -212,6 +214,55 @@ function validateConfig(value: unknown, configPath: string): AppConfig {
   if (browser) {
     const positive = (key: string, fallback: number): number => browser[key] === undefined ? fallback : requireNumber(browser[key], "browser." + key);
     result.browser = { enabled: browser.enabled === undefined ? true : Boolean(browser.enabled), headless: browser.headless === undefined ? true : Boolean(browser.headless), maxSessionsPerRun: positive("maxSessionsPerRun", 1), maxPagesPerSession: positive("maxPagesPerSession", 2), maxNavigationsPerRun: positive("maxNavigationsPerRun", 10), maxActionsPerRun: positive("maxActionsPerRun", 40), maxNetworkEventsPerRun: positive("maxNetworkEventsPerRun", 500), maxDomElementsPerSnapshot: positive("maxDomElementsPerSnapshot", 200), maxDomSnapshotsPerRun: positive("maxDomSnapshotsPerRun", 40), maxScreenshotsPerRun: browser.maxScreenshotsPerRun === undefined ? 0 : requireNumber(browser.maxScreenshotsPerRun, "browser.maxScreenshotsPerRun"), maxResponseBodyBytes: positive("maxResponseBodyBytes", 65536), maxScriptBytes: positive("maxScriptBytes", 131072), navigationTimeoutMs: positive("navigationTimeoutMs", 15000), actionTimeoutMs: positive("actionTimeoutMs", 10000), sessionTimeoutMs: positive("sessionTimeoutMs", 900000), blockDownloads: browser.blockDownloads === undefined ? true : Boolean(browser.blockDownloads), blockUploads: browser.blockUploads === undefined ? true : Boolean(browser.blockUploads), blockPopups: browser.blockPopups === undefined ? true : Boolean(browser.blockPopups), blockExternalProtocols: browser.blockExternalProtocols === undefined ? true : Boolean(browser.blockExternalProtocols) };
+  }
+  if (profile) {
+    const preferredExecutor = requireString(profile.preferredExecutor, "profile.preferredExecutor");
+    if (!["sandbox", "local", "ssh", "connector"].includes(preferredExecutor)) throw new Error("profile.preferredExecutor is invalid");
+    if (preferredExecutor === "local" || preferredExecutor === "ssh") {
+      throw new Error(`profile.preferredExecutor=${preferredExecutor} requires an operator-provided executor adapter; built-in backends are sandbox and connector`);
+    }
+    const approvalPolicy = profile.approvalPolicy === undefined ? undefined : requireString(profile.approvalPolicy, "profile.approvalPolicy");
+    if (approvalPolicy !== undefined && !["always", "on-request", "never"].includes(approvalPolicy)) throw new Error("profile.approvalPolicy is invalid");
+    const contextPolicy = requireObject(profile.contextPolicy, "profile.contextPolicy");
+    const compactAtRatio = requireNumber(contextPolicy.compactAtRatio, "profile.contextPolicy.compactAtRatio");
+    if (compactAtRatio >= 1) throw new Error("profile.contextPolicy.compactAtRatio must be smaller than 1");
+    result.profile = {
+      id: requireString(profile.id, "profile.id"),
+      ...(profile.systemPrompt === undefined ? {} : { systemPrompt: requireString(profile.systemPrompt, "profile.systemPrompt") }),
+      preferredExecutor: preferredExecutor as NonNullable<AppConfig["profile"]>["preferredExecutor"],
+      ...(profile.executorTargetId === undefined ? {} : { executorTargetId: requireString(profile.executorTargetId, "profile.executorTargetId") }),
+      requiredCapabilities: stringArray(profile.requiredCapabilities, "profile.requiredCapabilities"),
+      toolAllowlist: stringArray(profile.toolAllowlist, "profile.toolAllowlist"),
+      ...(approvalPolicy === undefined ? {} : { approvalPolicy: approvalPolicy as "always" | "on-request" | "never" }),
+      contextPolicy: {
+        compactAtRatio,
+        keepRecentTokens: requireNumber(contextPolicy.keepRecentTokens, "profile.contextPolicy.keepRecentTokens"),
+        maxSummaryChars: requireNumber(contextPolicy.maxSummaryChars, "profile.contextPolicy.maxSummaryChars"),
+      },
+    };
+  }
+  if (!Array.isArray(connectors)) throw new Error("connectors must be an array");
+  if (connectors.length > 32) throw new Error("connectors may contain at most 32 entries");
+  result.connectors = connectors.map((entry, index) => {
+    const connector = requireObject(entry, `connectors[${index}]`);
+    if (connector.networkAccess !== false) throw new Error(`connectors[${index}].networkAccess must be false; active network remains behind PolicyEngine`);
+    return {
+      id: requireString(connector.id, `connectors[${index}].id`),
+      capabilities: stringArray(connector.capabilities, `connectors[${index}].capabilities`),
+      allowedPrograms: stringArray(connector.allowedPrograms, `connectors[${index}].allowedPrograms`),
+      networkAccess: false,
+      heartbeatTimeoutMs: requireNumber(connector.heartbeatTimeoutMs, `connectors[${index}].heartbeatTimeoutMs`),
+      maxPendingTasks: requireNumber(connector.maxPendingTasks, `connectors[${index}].maxPendingTasks`),
+      maxOutputBytes: requireNumber(connector.maxOutputBytes, `connectors[${index}].maxOutputBytes`),
+    };
+  });
+  const connectorIds = new Set(result.connectors.map((connector) => connector.id));
+  if (connectorIds.size !== result.connectors.length) throw new Error("connector ids must be unique");
+  if (result.profile?.preferredExecutor === "connector") {
+    if (!result.profile.executorTargetId) throw new Error("connector profile requires profile.executorTargetId");
+    if (!connectorIds.has(result.profile.executorTargetId)) throw new Error("profile.executorTargetId must reference an operator-configured connector");
+  } else if (result.profile?.executorTargetId) {
+    throw new Error("profile.executorTargetId is only valid for connector profiles");
   }
   return result;
 }

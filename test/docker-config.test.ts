@@ -26,6 +26,22 @@ describe("Docker sandbox wiring", () => {
     expect(launcher).toContain("--pids-limit 256");
   });
 
+  it("provides a self-starting managed TSec image without embedding credentials", async () => {
+    const [dockerfile, entrypoint, config] = await Promise.all([
+      readFile("Dockerfile.tsec", "utf8"),
+      readFile("tools/tsec-hosted-entrypoint.sh", "utf8"),
+      readFile("config/tsec-hosted.yaml", "utf8"),
+    ]);
+
+    expect(dockerfile).toContain("playwright install --with-deps chromium");
+    expect(dockerfile).toContain("TSEC_SKIP_VPN=1");
+    expect(entrypoint).toContain("BAIDU_API_KEY BENCHMARK_TOKEN BENCHMARK_BASE_URL");
+    expect(entrypoint).toContain("tsec-solve-once --config");
+    expect(entrypoint).toContain("sandbox --config");
+    expect(config).toContain("http://agent-awd.baidu.com.tsecbench.gw/v1");
+    expect(`${dockerfile}\n${entrypoint}\n${config}`).not.toMatch(/^\s*apiKey\s*:/m);
+  });
+
   it("installs, declares, and smoke-checks the core Crypto/Misc profile", async () => {
     const [installer, manifestSource, requirements, verifier, dockerfile] = await Promise.all([
       readFile("tools/ctf/install-apt-core.sh", "utf8"),
@@ -44,6 +60,7 @@ describe("Docker sandbox wiring", () => {
       };
     };
     const expectedApt = [
+      "gap",
       "gifsicle",
       "gmp-ecm",
       "libsox-fmt-all",
@@ -51,7 +68,9 @@ describe("Docker sandbox wiring", () => {
       "multimon-ng",
       "outguess",
       "pari-gp",
+      "patchelf",
       "pngcheck",
+      "scalpel",
       "sox",
       "steghide",
       "stegsnow",
@@ -80,6 +99,9 @@ describe("Docker sandbox wiring", () => {
     expect(verifier).toContain('export PATH="/opt/ctf-venv/bin:${PATH}"');
     expect(verifier).toContain("LLL.reduction(matrix)");
     expect(verifier).toContain("cp_model.CpModel()");
+    expect(verifier).toContain("Size(SymmetricGroup(3))");
+    expect(verifier).toContain("patchelf --version");
+    expect(verifier).toContain("scalpel -V");
     expect(dockerfile).toContain("verify-core-tools.sh");
   });
 
@@ -97,6 +119,7 @@ describe("Docker sandbox wiring", () => {
           commands: string[];
           sources: Array<{ name: string; commit: string; license: string }>;
           manual: string[];
+          operatorManaged: Array<{ name: string; commit: string; license: string; reason: string }>;
         };
       };
     };
@@ -106,7 +129,12 @@ describe("Docker sandbox wiring", () => {
       expect.arrayContaining(["RsaCtfTool", "cado-nfs", "flatter", "r2", "sage", "stegseek"]),
     );
     expect(manifest.profiles.heavy.manual).toContain("Ghidra");
+    expect(manifest.profiles.heavy.manual).toEqual(expect.arrayContaining(["jadx", "UPX"]));
     expect(manifest.profiles.heavy.manual).not.toContain("SageMath");
+    expect(manifest.profiles.heavy.operatorManaged).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "crypto-attacks", commit: "d42a3df980bf029f682f218fa2893ed2d6af98d8", license: "MIT" }),
+      expect.objectContaining({ name: "cuso", commit: "unresolved", license: "unverified" }),
+    ]));
     expect(manifest.profiles.heavy.sources.every((source) => /^[a-f0-9]{40}$/.test(source.commit))).toBe(true);
     expect(manifest.profiles.heavy.sources.every((source) => source.license.length > 0)).toBe(true);
     for (const commit of Object.values(commits)) expect(installer).toContain(commit);
