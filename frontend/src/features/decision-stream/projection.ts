@@ -112,6 +112,17 @@ export function projectTraceEvent(event: RawTraceEvent): DecisionRecord {
   const reason = stringField(data, ["reason", "summary", "message", "nextAction"]);
   const guide = toolGuide(tool);
   switch (event.type) {
+    case "campaign.created": return record(event, "system", "自适应编排已建立", reason ?? "编排器创建了可认领的探索任务", data, { why: "把复杂任务拆成独立、可追踪的调查焦点", impact: "后续 Agent 会并行探索并共享经过边界控制的公开证据", next: "等待 worker 认领第一层任务" });
+    case "campaign.task.claimed": return record(event, "action", "Agent 认领了调查焦点", reason ?? "一个 worker 获得了带租约的任务", data, { what: "领取一个明确的调查任务", why: "避免多个 Agent 重复执行同一条探索路径", impact: "这个 Agent 会在有限时间内负责该 lane，租约失效后任务可恢复", next: "启动受控 Run 并注入共享证据" });
+    case "campaign.run.started": return record(event, "action", "已启动 Campaign 子运行", reason ?? "编排器为认领任务启动了受控 Run", data, { why: "每条探索路径都需要独立的范围、预算和审计链", impact: "该 Run 的工具请求、策略决定和结果可以单独回放", next: "观察工具结果并整理公开证据" });
+    case "campaign.curated": return record(event, "evidence", "共享证据已整理", reason ?? "curator 对公开发现、假设和验证结果进行了去重", data, { why: "并行 Agent 需要看到简洁、可复核的共同事实", impact: "整理结果会注入后续 worker，但不会替代独立验证", next: "认领下一个焦点或升级调查层级" });
+    case "campaign.task.queued": return record(event, "system", "下一层调查已排队", reason ?? "当前方法没有收敛，编排器创建了后续调查", data, { why: "失败后换一个层级或验证视角，而不是盲目重复", impact: "新的任务仍受同一个 Campaign 预算和租约约束", next: "等待 worker 认领升级任务" });
+    case "campaign.task.retry": return record(event, "warning", "当前调查将在同一层重试", reason ?? "本轮失败但该层仍有剩余尝试次数", data, { why: "短暂错误不应立即升级或放弃", impact: "同一 work item 会获得新的租约 generation", next: "等待 worker 重新认领" });
+    case "campaign.task.succeeded": return record(event, "result", "Campaign 调查任务完成", reason ?? "该 lane 返回了公开结果", data, { why: "运行已返回可供 curator 整理的结论", impact: "结果会进入共享证据板；是否算独立验证由验证证据决定" });
+    case "campaign.task.blocked": return record(event, "warning", "Campaign 调查受阻", reason ?? "本轮没有形成可验证结论", data, { why: "阻塞结果不能当作事实或答案", impact: "编排器会在预算允许时升级到下一层调查", next: "查看失败原因和下一层焦点" });
+    case "campaign.task.failed": return record(event, "warning", "Campaign 调查失败", reason ?? "该 Run 没有完成", data, { why: "工具、基础设施或假设可能导致了失败", impact: "失败摘要会进入 curator，但敏感凭据和隐藏推理不会保存", next: "更换验证路径或等待租约恢复" });
+    case "campaign.run.verified": return record(event, "result", "Campaign 发现独立验证", reason ?? "运行提供了独立验证证据", data, { why: "平台或独立验证比模型自述更可靠", impact: "该结果会计入 Campaign 的 verified 计数" });
+    case "campaign.completed": return record(event, "result", "自适应编排已收敛", reason ?? "所有调查任务已结算", data, { why: "当前 Campaign 已完成其预算内的调查队列", impact: "所有子 Run 和公开证据仍可分别回放" });
     case "run.started": return record(event, "system", "运行环境已建立", "编排器已创建受控任务空间并装载预算", { model: data.model, scope: data.scope, lineage: data.lineage }, { why: "每次任务需要独立的范围、预算和审计身份", impact: "后续所有动作都绑定到这个 Run，并受同一策略约束", next: "整理任务材料并开始第一轮判断" });
     case "session.forked": return record(event, "context", "从历史节点创建了新分支", "新运行继承选定节点之前的公开轨迹", data, { why: "保留已有证据，同时尝试另一条分析路线", impact: "父运行不会被修改，新动作只写入当前分支" });
     case "session.resumed": return record(event, "context", "从历史结尾继续运行", "新运行继承父运行结尾处的公开轨迹", data, { why: "继续未完成工作并避免重复已完成步骤", impact: "恢复上下文来自同一条审计事件流" });

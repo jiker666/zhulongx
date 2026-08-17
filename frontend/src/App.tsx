@@ -10,6 +10,7 @@ const OverviewPage = lazy(() => import("./pages/OverviewPage").then((module) => 
 const RunDetailPage = lazy(() => import("./pages/RunDetailPage").then((module) => ({ default: module.RunDetailPage })));
 const RunsPage = lazy(() => import("./pages/RunsPage").then((module) => ({ default: module.RunsPage })));
 const WorkbenchPage = lazy(() => import("./pages/WorkbenchPage").then((module) => ({ default: module.WorkbenchPage })));
+const CampaignPage = lazy(() => import("./pages/CampaignPage").then((module) => ({ default: module.CampaignPage })));
 
 export function App() {
   return (
@@ -20,6 +21,7 @@ export function App() {
           <Route path="overview" element={<OverviewPage />} />
           <Route path="arena" element={<ArenaPage />} />
           <Route path="workbench" element={<WorkbenchPage />} />
+          <Route path="campaigns" element={<CampaignPage />} />
           <Route path="runs" element={<RunsPage />} />
           <Route path="runs/:runId" element={<RunDetailPage />} />
           <Route path="experiences" element={<ExperiencesPage />} />

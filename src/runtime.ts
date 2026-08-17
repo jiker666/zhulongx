@@ -181,6 +181,7 @@ export interface RunOptions {
   workspaceMode?: "configured" | "attachments-only";
   sharedEvidence?: SharedEvidenceBoard;
   allowedToolEffects?: ToolEffect[];
+  contextSections?: Array<{ name: string; content: string }>;
   lineage?: RunLineage & { context: string };
 }
 
@@ -616,6 +617,10 @@ export class XuanShuRuntime {
         { name: "reasoning-state", content: reasoningContext },
         { name: "verified-experience", content: renderExperienceContext(experience) },
         { name: "memory", content: memoryContext },
+        ...(options.contextSections ?? []).slice(0, 8).map((section) => ({
+          name: String(section.name).slice(0, 120),
+          content: String(section.content).slice(0, 12_000),
+        })),
         ...(options.lineage?.context ? [{ name: "inherited-trajectory", content: options.lineage.context }] : []),
         { name: "task", content: renderTaskContext(task) },
       ].filter((section) => Boolean(section.content));

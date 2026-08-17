@@ -25,6 +25,7 @@ import { ConnectorBroker, ConnectorExecutor } from "./connector.js";
 import { EvaluationLedger, type EvaluationAttempt } from "./evaluation-ledger.js";
 import { KnowledgeStore, type KnowledgeTrust } from "./knowledge-store.js";
 import { QuestionBankProgressStore } from "./question-bank-progress.js";
+import { AdaptiveCampaignManager, DurableAdaptiveCampaignStore, type AdaptiveCampaignStartInput } from "./adaptive-campaign.js";
 
 const MAX_BODY_BYTES = 1024 * 1024;
 
@@ -144,6 +145,7 @@ export interface ApiServerDependencies {
   connectorBroker?: ConnectorBroker;
   evaluationLedger?: EvaluationLedger;
   knowledgeStore?: KnowledgeStore;
+  adaptiveCampaigns?: AdaptiveCampaignManager;
 }
 
 function inputRecord(value: unknown, label = "request body"): Record<string, unknown> {
@@ -221,6 +223,36 @@ function workflowNodes(value: unknown): WorkflowNodeSpec[] {
   });
 }
 
+function adaptiveCampaignInput(value: unknown): AdaptiveCampaignStartInput {
+  const input = inputRecord(value);
+  if (!Array.isArray(input.tasks) || input.tasks.length < 1 || input.tasks.length > 64) throw new RequestInputError("tasks must contain between 1 and 64 items");
+  const tasks = input.tasks.map((item, index) => {
+    if (typeof item === "string") {
+      if (!item.trim()) throw new RequestInputError(`tasks[${index}] must not be empty`);
+      return item;
+    }
+    if (!isTaskRequest(item)) throw new RequestInputError(`tasks[${index}] must contain a task and optional attachments`);
+    return item;
+  });
+  const valueFor = (key: string): number | undefined => input[key] === undefined ? undefined : Number(input[key]);
+  const concurrency = valueFor("concurrency");
+  const raceAgents = valueFor("raceAgents");
+  const budget = input.budget && typeof input.budget === "object" && !Array.isArray(input.budget)
+    ? input.budget as AdaptiveCampaignStartInput["budget"]
+    : undefined;
+  const hints = input.hints && typeof input.hints === "object" && !Array.isArray(input.hints)
+    ? Object.fromEntries(Object.entries(input.hints).filter(([key, item]) => /^[0-3]$/.test(key) && typeof item === "string").map(([key, item]) => [Number(key), item]))
+    : undefined;
+  return {
+    ...(typeof input.name === "string" ? { name: input.name } : {}),
+    tasks,
+    ...(concurrency === undefined ? {} : { concurrency }),
+    ...(raceAgents === undefined ? {} : { raceAgents }),
+    ...(budget ? { budget } : {}),
+    ...(hints ? { hints } : {}),
+  };
+}
+
 async function questionBankSnapshot(questionBank: QuestionBank, progress: QuestionBankProgressStore) {
   const snapshot = await questionBank.snapshot();
   if (!snapshot.configured) return snapshot;
@@ -266,6 +298,10 @@ export function createApiServer(config: AppConfig, dependencies: ApiServerDepend
   workflowWorker.start();
   const evaluationLedger = dependencies.evaluationLedger ?? new EvaluationLedger(orchestrationRoot);
   const knowledgeStore = dependencies.knowledgeStore ?? new KnowledgeStore(orchestrationRoot);
+  const adaptiveCampaigns = dependencies.adaptiveCampaigns ?? new AdaptiveCampaignManager({
+    store: new DurableAdaptiveCampaignStore(orchestrationRoot),
+    runManager: manager,
+  });
   const experience = new ExperienceStore(config.runtime.artifactRoot);
   const arenaJobs = dependencies.arenaJobs ?? new ArenaJobManager(config);
   const manualJobs = dependencies.manualJobs ?? new ManualJobManager({ runManager: manager });
@@ -345,6 +381,33 @@ export function createApiServer(config: AppConfig, dependencies: ApiServerDepend
       }
       if (request.method === "GET" && url.pathname === "/v1/permissions") {
         json(response, 200, { permissions: permissionBroker.list() });
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/v1/campaigns") {
+        json(response, 200, { campaigns: await adaptiveCampaigns.list() });
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/v1/campaigns") {
+        try {
+          const campaign = await adaptiveCampaigns.start(adaptiveCampaignInput(await bodyJson(request)));
+          json(response, 202, { campaign, statusUrl: `/v1/campaigns/${campaign.id}` });
+        } catch (error) {
+          json(response, 400, { error: error instanceof Error ? error.message : String(error) });
+        }
+        return;
+      }
+      const campaignStopMatch = url.pathname.match(/^\/v1\/campaigns\/([0-9a-f-]+)\/stop$/i);
+      if (request.method === "POST" && campaignStopMatch?.[1]) {
+        const campaign = await adaptiveCampaigns.stop(campaignStopMatch[1]);
+        if (!campaign) json(response, 404, { error: "Campaign not found" });
+        else json(response, 202, { campaign });
+        return;
+      }
+      const campaignMatch = url.pathname.match(/^\/v1\/campaigns\/([0-9a-f-]+)$/i);
+      if (request.method === "GET" && campaignMatch?.[1]) {
+        const campaign = await adaptiveCampaigns.get(campaignMatch[1]);
+        if (!campaign) json(response, 404, { error: "Campaign not found" });
+        else json(response, 200, { campaign });
         return;
       }
       if (request.method === "GET" && url.pathname === "/v1/agents") {
@@ -789,7 +852,7 @@ export function createApiServer(config: AppConfig, dependencies: ApiServerDepend
       json(response, error instanceof RequestInputError ? 400 : 500, { error: error instanceof Error ? error.message : String(error) });
     }
   });
-  return { server, manager, arenaJobs, manualJobs, manualUploads, questionBank, permissionBroker, agentStore, agentWorker, memoryStore, workflowStore, workflowWorker, connectorBroker, evaluationLedger, knowledgeStore, closeStreams: () => { for (const client of streamClients) client.end(); streamClients.clear(); } };
+  return { server, manager, arenaJobs, manualJobs, manualUploads, questionBank, permissionBroker, agentStore, agentWorker, memoryStore, workflowStore, workflowWorker, connectorBroker, evaluationLedger, knowledgeStore, adaptiveCampaigns, closeStreams: () => { for (const client of streamClients) client.end(); streamClients.clear(); } };
 }
 
 export async function startApiServer(
@@ -801,7 +864,8 @@ export async function startApiServer(
     throw new Error(`Refusing non-loopback API without ${config.server.tokenEnv}`);
   }
   await recoverInterruptedRuns(config.runtime.artifactRoot);
-  const { server, arenaJobs, manualJobs, manualUploads, agentWorker, workflowWorker, closeStreams } = createApiServer(config, dependencies);
+  const { server, arenaJobs, manualJobs, manualUploads, agentWorker, workflowWorker, adaptiveCampaigns, closeStreams } = createApiServer(config, dependencies);
+  await adaptiveCampaigns.resumePending();
   await new Promise<void>((resolveListen, reject) => {
     server.once("error", reject);
     server.listen(config.server.port, config.server.host, resolveListen);
@@ -816,6 +880,7 @@ export async function startApiServer(
       await arenaJobs.close();
       await manualJobs.close();
       await manualUploads.close();
+      await adaptiveCampaigns.close();
       await agentWorker.close();
       await workflowWorker.close();
     },

@@ -178,3 +178,10 @@ export interface QuestionBankSnapshot {
 }
 
 export interface ManualUploadSnapshot { id: string; files: Array<{ id: string; name: string; size: number }>; totalBytes: number }
+
+export type AdaptiveCampaignStatus = "queued" | "running" | "completed" | "failed" | "aborted";
+export type CampaignWorkStatus = "queued" | "running" | "succeeded" | "failed" | "blocked" | "cancelled";
+export interface CampaignEvidence { id: string; kind: "fact" | "candidate" | "dead-end"; claim: string; evidence: string[]; confidence: number; sourceRunIds: string[]; createdAt: string; updatedAt: string }
+export interface CampaignEvent { sequence: number; id: string; campaignId: string; itemId?: string; runId?: string; type: string; detail?: string; data?: unknown; createdAt: string }
+export interface CampaignWorkItem { id: string; campaignId: string; rootIndex: number; lane: number; parentItemId?: string; tier: 0 | 1 | 2 | 3; task: { task: string; attachments?: string[]; metadata?: Record<string, string> }; status: CampaignWorkStatus; attempts: number; leaseGeneration: number; leaseOwner?: string; leaseExpiresAt?: string; runId?: string; summary?: string; error?: string; createdAt: string; updatedAt: string; startedAt?: string; finishedAt?: string }
+export interface AdaptiveCampaignSnapshot { id: string; name: string; status: AdaptiveCampaignStatus; createdAt: string; updatedAt: string; startedAt?: string; finishedAt?: string; concurrency: number; raceAgents: number; budget: { maxRuntimeMs: number; maxWorkers: number; maxItems: number; maxRuns: number }; tiers: Array<{ tier: 0 | 1 | 2 | 3; label: string; maxAttempts: number; hintAfterTier?: 0 | 1 | 2 | 3 }>; items: CampaignWorkItem[]; evidence: CampaignEvidence[]; curation: Array<{ id: string; itemId: string; runId?: string; summary: string; evidenceIds: string[]; proposedTasks: string[]; createdAt: string }>; events: CampaignEvent[]; runsStarted: number; verifiedRuns: number; queued: number; running: number; succeeded: number; blocked: number; failed: number; currentTier: 0 | 1 | 2 | 3; error?: string }
