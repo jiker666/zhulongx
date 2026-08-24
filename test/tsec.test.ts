@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { shouldSkipTSecVpn, tsecScope } from "../src/tsec.js";
+import { inferCategory, shouldSkipTSecVpn, tsecScope } from "../src/tsec.js";
 import type { AppConfig } from "../src/types.js";
 
 function config(mode: "controlled" | "observe"): AppConfig {
@@ -7,6 +7,13 @@ function config(mode: "controlled" | "observe"): AppConfig {
 }
 
 describe("TSec scope adapter", () => {
+  it("uses description signals when benchmark prefixes are mixed", () => {
+    expect(inferCategory("g-01", "带噪 CRC 服务使用 AES 密钥解密 flag")).toBe("Crypto");
+    expect(inferCategory("g-04", "网络服务存在内存破坏漏洞，可取得 shell")).toBe("Pwn");
+    expect(inferCategory("g-12", "下载 packed 二进制并逆向分析")).toBe("RE");
+    expect(inferCategory("g-02", "受限 Unpickler 反序列化沙箱逃逸")).toBe("Misc");
+  });
+
   it("allows a managed runner to opt out of the local VPN bootstrap", () => {
     expect(shouldSkipTSecVpn({ TSEC_SKIP_VPN: "1" })).toBe(true);
     expect(shouldSkipTSecVpn({ TSEC_SKIP_VPN: "0" })).toBe(false);

@@ -1,0 +1,74 @@
+# DASC Agent API + Wanqing OpenAI-compatible model configuration.
+# Keep both credentials in the environment; never put their values in this file.
+model:
+  provider: wanqing-corp
+  id: ep-spmlx5-1786072758181058776
+  name: Wanqing ep-spmlx5
+  api: openai-completions
+  baseUrl: https://llm-gateway.dasctf.com/llm-gateway/proxy/e/3MFM7utdReth3Tc2
+  apiKeyEnv: WQ_API_KEY
+  reasoning: true
+  contextWindow: 1048576
+  maxTokens: 16384
+
+runtime:
+  thinkingLevel: medium
+  artifactRoot: .xuan-shu/runs
+  scratchRoot: .xuan-shu/work
+  maxTurns: 60
+  maxToolCalls: 160
+  maxRuntimeMs: 1200000
+  modelMinIntervalMs: 7500
+  modelRequestsPerMinute: 48
+  modelTokensPerMinute: 480000
+  modelMaxRetryDelayMs: 180000
+  maxActionsWithoutCheckpoint: 6
+  maxRepeatedAction: 3
+  maxOutputBytes: 65536
+  maxImageBytes: 5242880
+  maxImageObservations: 8
+  maxScratchFileBytes: 1048576
+  finalizationReserveMs: 120000
+  commandTimeoutMs: 30000
+  httpTimeoutMs: 15000
+  maxHttpRequests: 40
+  maxTcpSessions: 8
+  maxTcpBytes: 1048576
+  sandbox:
+    socketPath: tcp://127.0.0.1:7320
+    connectTimeoutMs: 2000
+
+# The control-plane host is authorized here. Add exact challenge endpoint
+# authorities returned by `dasc-exercise` before using network tools on a task.
+scope:
+  mode: controlled
+  workspaceRoot: ./workspace
+  allowedHosts:
+    - pro.dasctf.com
+    - llm-gateway.dasctf.com
+  allowedPrograms:
+    - 7z
+    - base32
+    - base64
+    - file
+    - find
+    - jq
+    - python3
+    - rg
+    - strings
+    - tar
+    - unzip
+    - xxd
+
+server:
+  host: 127.0.0.1
+  port: 7318
+  tokenEnv: XUANSHU_SERVER_TOKEN
+
+dasc:
+  enabled: true
+  baseUrl: https://pro.dasctf.com
+  accessKeyEnv: DASCTF_ACCESS_KEY
+  timeoutMs: 30000
+  maxResponseBytes: 262144
+  maxRequests: 40

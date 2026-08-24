@@ -32,6 +32,14 @@ function stringArray(value: unknown, label: string): string[] {
   return [...new Set(value)];
 }
 
+function pythonModuleArray(value: unknown, label: string): string[] {
+  const modules = stringArray(value, label);
+  if (modules.some((moduleName) => !/^[A-Za-z_][A-Za-z0-9_.]*$/.test(moduleName))) {
+    throw new Error(`${label} contains an invalid Python module name`);
+  }
+  return modules;
+}
+
 function categoryArray(value: unknown, label: string): string[] {
   const values = stringArray(value, label).map((item) => item.trim().toLowerCase());
   if (values.some((item) => item.length === 0)) throw new Error(`${label} must not contain empty categories`);
@@ -54,6 +62,7 @@ function validateConfig(value: unknown, configPath: string): AppConfig {
   const scope = requireObject(root.scope, "scope");
   const server = requireObject(root.server, "server");
   const arena = root.arena === undefined ? undefined : requireObject(root.arena, "arena");
+  const dasc = root.dasc === undefined ? undefined : requireObject(root.dasc, "dasc");
   const questionBank = root.questionBank === undefined ? undefined : requireObject(root.questionBank, "questionBank");
   const webReasoning = root.webReasoning === undefined ? undefined : requireObject(root.webReasoning, "webReasoning");
   const browser = root.browser === undefined ? undefined : requireObject(root.browser, "browser");
@@ -116,6 +125,7 @@ function validateConfig(value: unknown, configPath: string): AppConfig {
         "runtime.maxActionsWithoutCheckpoint",
       ),
       maxRepeatedAction: requireNumber(runtime.maxRepeatedAction, "runtime.maxRepeatedAction"),
+      policyPermissive: runtime.policyPermissive === undefined ? false : Boolean(runtime.policyPermissive),
       maxOutputBytes: requireNumber(runtime.maxOutputBytes, "runtime.maxOutputBytes"),
       maxImageBytes: requireNumber(runtime.maxImageBytes, "runtime.maxImageBytes"),
       maxImageObservations: requireNumber(runtime.maxImageObservations, "runtime.maxImageObservations"),
@@ -140,6 +150,9 @@ function validateConfig(value: unknown, configPath: string): AppConfig {
       workspaceRoot: isAbsolute(workspaceRoot) ? workspaceRoot : resolve(baseDir, "..", workspaceRoot),
       allowedHosts: stringArray(scope.allowedHosts, "scope.allowedHosts"),
       allowedPrograms: stringArray(scope.allowedPrograms, "scope.allowedPrograms"),
+      ...(scope.extraPaths !== undefined ? { extraPaths: stringArray(scope.extraPaths, "scope.extraPaths") } : {}),
+      ...(scope.pythonModules !== undefined ? { pythonModules: pythonModuleArray(scope.pythonModules, "scope.pythonModules") } : {}),
+      ...(scope.readOnlyPaths !== undefined ? { readOnlyPaths: stringArray(scope.readOnlyPaths, "scope.readOnlyPaths") } : {}),
     },
     server: {
       host: requireString(server.host, "server.host"),
@@ -159,6 +172,16 @@ function validateConfig(value: unknown, configPath: string): AppConfig {
       maxResponseBytes: requireNumber(arena.maxResponseBytes, "arena.maxResponseBytes"),
       ...(arena.allowedCategories === undefined ? {} : { allowedCategories: categoryArray(arena.allowedCategories, "arena.allowedCategories") }),
       maxCategorySkips: arena.maxCategorySkips === undefined ? 10 : requireNumber(arena.maxCategorySkips, "arena.maxCategorySkips"),
+    };
+  }
+  if (dasc) {
+    result.dasc = {
+      enabled: dasc.enabled !== undefined ? Boolean(dasc.enabled) : true,
+      baseUrl: requireString(dasc.baseUrl, "dasc.baseUrl").replace(/\/$/, ""),
+      accessKeyEnv: requireString(dasc.accessKeyEnv, "dasc.accessKeyEnv"),
+      timeoutMs: requireNumber(dasc.timeoutMs, "dasc.timeoutMs"),
+      maxResponseBytes: requireNumber(dasc.maxResponseBytes, "dasc.maxResponseBytes"),
+      maxRequests: dasc.maxRequests === undefined ? 40 : requireNumber(dasc.maxRequests, "dasc.maxRequests"),
     };
   }
   if (questionBank) {
@@ -283,11 +306,17 @@ export async function loadScopeFile(path: string): Promise<Partial<ScopeConfig>>
   if (value.workspaceRoot !== undefined) result.workspaceRoot = resolve(requireString(value.workspaceRoot, "workspaceRoot"));
   if (value.allowedHosts !== undefined) result.allowedHosts = stringArray(value.allowedHosts, "allowedHosts");
   if (value.allowedPrograms !== undefined) result.allowedPrograms = stringArray(value.allowedPrograms, "allowedPrograms");
+  if (value.pythonModules !== undefined) result.pythonModules = pythonModuleArray(value.pythonModules, "pythonModules");
   return result;
 }
 
 export function mergeScope(base: ScopeConfig, override?: Partial<ScopeConfig>): ScopeConfig {
-  if (!override) return { ...base, allowedHosts: [...base.allowedHosts], allowedPrograms: [...base.allowedPrograms] };
+  if (!override) return {
+    ...base,
+    allowedHosts: [...base.allowedHosts],
+    allowedPrograms: [...base.allowedPrograms],
+    ...(base.pythonModules ? { pythonModules: [...base.pythonModules] } : {}),
+  };
   const workspaceRoot = resolve(override.workspaceRoot ?? base.workspaceRoot);
   if (!isPathInside(base.workspaceRoot, workspaceRoot)) {
     throw new Error("A per-run scope cannot expand workspaceRoot beyond the configured scope");
@@ -303,6 +332,10 @@ export function mergeScope(base: ScopeConfig, override?: Partial<ScopeConfig>): 
   if (allowedPrograms.some((program) => !base.allowedPrograms.includes(program))) {
     throw new Error("A per-run scope cannot add programs beyond the configured scope");
   }
+  const pythonModules = override.pythonModules ?? base.pythonModules;
+  if (pythonModules && base.pythonModules && pythonModules.some((moduleName) => !base.pythonModules?.includes(moduleName))) {
+    throw new Error("A per-run scope cannot add Python modules beyond the configured scope");
+  }
   return {
     ...base,
     ...override,
@@ -310,5 +343,6 @@ export function mergeScope(base: ScopeConfig, override?: Partial<ScopeConfig>): 
     workspaceRoot,
     allowedHosts: [...allowedHosts],
     allowedPrograms: [...allowedPrograms],
+    ...(pythonModules ? { pythonModules: [...pythonModules] } : {}),
   };
 }

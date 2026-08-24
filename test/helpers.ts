@@ -26,6 +26,7 @@ export function testConfig(root: string): AppConfig {
       modelMaxRetryDelayMs: 120_000,
       maxActionsWithoutCheckpoint: 2,
       maxRepeatedAction: 2,
+      policyPermissive: false,
       maxOutputBytes: 16_384,
       maxImageBytes: 256 * 1024,
       maxImageObservations: 2,

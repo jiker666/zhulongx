@@ -144,6 +144,24 @@ npm run dev -- arena-evaluate --max-attempts 20 --config config/arena.yaml
 
 Arena 控制面仅允许访问配置源站的 `/api/skill/agent/arena/` 前缀。平台返回的动态题目地址必须先被完整配置授权，运行时再收窄到实际 `host:port`。
 
+## DASC Agent API
+
+项目提供了 DASC Agent API 的受控客户端，配置样例为 `config/dasctf-wanqing.yaml`。DASC 平台 AccessKey 与模型 API Key 是两套凭证，分别只从 `DASCTF_ACCESS_KEY` 和 `WQ_API_KEY` 读取；不要把它们写进 YAML、命令行历史、运行附件或审计材料。任何曾在聊天、终端或工单中暴露过的密钥都应在平台侧轮换后再使用。
+
+```bash
+export DASCTF_ACCESS_KEY="replace-with-a-rotated-access-key"
+export WQ_API_KEY="replace-with-the-model-api-key"
+npm run dev -- dasc-match-info --config config/dasctf-wanqing.yaml
+npm run dev -- dasc-exercise-list --config config/dasctf-wanqing.yaml
+npm run dev -- dasc-exercise --exercise-id 1001 --config config/dasctf-wanqing.yaml
+```
+
+可用命令还包括 `dasc-overview`、`dasc-build-env`、`dasc-recover-env`、`dasc-submit`、`dasc-notice-list` 和 `dasc-notice`。每次请求都经过 `PolicyEngine`：必须是 `scope.mode=controlled`、目标必须命中 operator-owned 的 `allowedHosts`、只能访问 `/slab-match/api/v1/agent/` 前缀，并受 `dasc.maxRequests`、响应字节上限、超时和 `AbortSignal` 约束。题目详情返回的靶机地址不会自动扩大作用域；确认授权后把精确的 `host:port` 加入配置，再让单次运行继续收窄范围。
+
+比赛 API Host 和 AccessKey 不等于模型网关 URL。创建万擎渠道后，需要从 DASC 控制台复制完整网关 URL，并替换 `config/dasctf-wanqing.yaml` 的 `model.baseUrl`；不要根据 `pro.dasctf.com` 自行拼接 endpoint code。样例暂保留万擎办公网原始 URL，便于按其 SDK 文档进行本地连通性验证。
+
+这些命令只执行平台控制面操作：读取竞赛信息、题目列表/详情、公告和成绩，以及显式请求环境启停或答案提交。环境启停和答案提交会对平台产生外部副作用，提交命令不会自动重试；客户端可通过 `onAudit` 回调记录不含凭证的 `dasc.request` 审计事件。
+
 ## REST API 与审计台
 
 ```bash

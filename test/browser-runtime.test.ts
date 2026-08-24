@@ -28,11 +28,17 @@ describe("controlled browser runtime boundaries", () => {
     expect(state.browser?.sessions.every((session) => session.status !== "active")).toBe(true);
   });
 
-  it("keeps browser authorization in PolicyEngine and blocks unsafe browser actions", () => {
+  it("keeps browser authorization in PolicyEngine and blocks only popup actions", () => {
     const scope = { mode: "controlled" as const, workspaceRoot: process.cwd(), allowedHosts: ["127.0.0.1:3000"], allowedPrograms: [] };
     const policy = new PolicyEngine(scope, { maxToolCalls: 10, maxActionsWithoutCheckpoint: 5, maxRepeatedAction: 2 } as never);
     expect(policy.evaluate("browser", { action: "capture_dom" }, fakeRun()).allowed).toBe(true);
     expect(policy.evaluate("browser", { action: "assert_state", expectedText: "done" }, fakeRun()).allowed).toBe(true);
-    expect(policy.evaluate("browser", { action: "evaluate" }, fakeRun()).allowed).toBe(false);
+    // Operator enabled CTF-oriented browser actions: evaluate, upload, download, screenshot.
+    expect(policy.evaluate("browser", { action: "evaluate" }, fakeRun()).allowed).toBe(true);
+    expect(policy.evaluate("browser", { action: "upload", path: "shell.png" }, fakeRun()).allowed).toBe(true);
+    expect(policy.evaluate("browser", { action: "download" }, fakeRun()).allowed).toBe(true);
+    expect(policy.evaluate("browser", { action: "capture_screenshot" }, fakeRun()).allowed).toBe(true);
+    // popup remains disabled: it bridges into host browser privileges.
+    expect(policy.evaluate("browser", { action: "popup" }, fakeRun()).allowed).toBe(false);
   });
 });

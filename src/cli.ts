@@ -26,6 +26,7 @@ import { ManualJobManager } from "./manual-jobs.js";
 import { RunManager } from "./run-manager.js";
 import type { AppConfig } from "./types.js";
 import { createTSecClient, solveTSecOnce, tsecReadiness } from "./tsec.js";
+import { DascClient } from "./dasc.js";
 
 const MAX_CLI_ATTEMPT_HISTORY = 200;
 const MAX_CLI_SEEN_ATTEMPTS = 1000;
@@ -37,6 +38,8 @@ interface ParsedArgs {
   taskFile?: string;
   scope?: string;
   attemptId?: number;
+  exerciseId?: number;
+  noticeId?: number;
   flag?: string;
   autoSubmit?: boolean;
   maxAttempts?: number;
@@ -72,6 +75,15 @@ Usage:
   xuan-shu arena-solve-once [--no-auto-submit] [--config path]
   xuan-shu arena-loop [--max-attempts n] [--idle-seconds n] [--config path]  # continuous unless bounded
   xuan-shu arena-evaluate [--max-attempts 20] [--idle-seconds n] [--config path]
+  xuan-shu dasc-match-info [--config path]
+  xuan-shu dasc-overview [--config path]
+  xuan-shu dasc-exercise-list [--config path]
+  xuan-shu dasc-exercise --exercise-id id [--config path]
+  xuan-shu dasc-build-env --exercise-id id [--config path]
+  xuan-shu dasc-recover-env --exercise-id id [--config path]
+  xuan-shu dasc-submit --exercise-id id --flag "..." [--config path]
+  xuan-shu dasc-notice-list [--config path]
+  xuan-shu dasc-notice --notice-id id [--config path]
   xuan-shu tsec-solve-once [--challenge-code code] [--config path]
   xuan-shu tsec-doctor [--config path]
   xuan-shu resource-export --endpoint URL [--ids task_ids.json] [--output report.json] [--config path]
@@ -99,7 +111,7 @@ function parseArgs(argv: string[]): ParsedArgs {
       continue;
     }
     if (
-      ["--config", "--task", "--task-file", "--scope", "--attach", "--attempt-id", "--flag", "--max-attempts", "--idle-seconds", "--ids", "--endpoint", "--app-id", "--auth-key", "--model", "--output", "--concurrency", "--race-agents", "--challenge-code"].includes(
+      ["--config", "--task", "--task-file", "--scope", "--attach", "--attempt-id", "--exercise-id", "--notice-id", "--flag", "--max-attempts", "--idle-seconds", "--ids", "--endpoint", "--app-id", "--auth-key", "--model", "--output", "--concurrency", "--race-agents", "--challenge-code"].includes(
         arg,
       )
     ) {
@@ -113,6 +125,16 @@ function parseArgs(argv: string[]): ParsedArgs {
         const attemptId = Number(value);
         if (!Number.isInteger(attemptId) || attemptId <= 0) throw new Error("--attempt-id must be a positive integer");
         result.attemptId = attemptId;
+      }
+      if (arg === "--exercise-id") {
+        const exerciseId = Number(value);
+        if (!Number.isInteger(exerciseId) || exerciseId <= 0) throw new Error("--exercise-id must be a positive integer");
+        result.exerciseId = exerciseId;
+      }
+      if (arg === "--notice-id") {
+        const noticeId = Number(value);
+        if (!Number.isInteger(noticeId) || noticeId <= 0) throw new Error("--notice-id must be a positive integer");
+        result.noticeId = noticeId;
       }
       if (arg === "--flag") result.flag = value;
       if (arg === "--max-attempts") {
@@ -182,14 +204,27 @@ async function doctor(configPath?: string): Promise<number> {
     ok: Boolean(process.env[config.model.apiKeyEnv]),
     detail: process.env[config.model.apiKeyEnv] ? `${config.model.apiKeyEnv} is set` : `${config.model.apiKeyEnv} is not set`,
   });
+  if (config.dasc?.enabled) {
+    checks.push({
+      check: "DASC AccessKey",
+      ok: Boolean(process.env[config.dasc.accessKeyEnv]),
+      detail: process.env[config.dasc.accessKeyEnv]
+        ? `${config.dasc.accessKeyEnv} is set`
+        : `${config.dasc.accessKeyEnv} is not set`,
+    });
+  }
   try {
     const health = await new SandboxClient(config.runtime.sandbox.socketPath, config.runtime.sandbox.connectTimeoutMs).health();
     const missing = config.scope.allowedPrograms.filter((program) => !health.allowedPrograms.includes(program));
+    const missingPythonModules = config.scope.pythonModules?.filter((moduleName) => !health.pythonModules?.includes(moduleName)) ?? [];
     checks.push({
       check: "CTF sandbox",
-      ok: missing.length === 0,
-      detail: missing.length
-        ? `reachable but missing allowlisted programs: ${missing.join(", ")}`
+      ok: missing.length === 0 && missingPythonModules.length === 0,
+      detail: missing.length || missingPythonModules.length
+        ? `reachable but missing ${[
+            ...(missing.length ? [`allowlisted programs: ${missing.join(", ")}`] : []),
+            ...(missingPythonModules.length ? [`Python modules: ${missingPythonModules.join(", ")}`] : []),
+          ].join("; ")}`
         : `reachable at ${config.runtime.sandbox.socketPath}`,
     });
   } catch (error) {
@@ -213,6 +248,14 @@ function requireArenaCredentials(config: AppConfig): void {
   }
 }
 
+function createDascClient(config: AppConfig): DascClient {
+  if (!config.dasc?.enabled) throw new Error("DASC integration is disabled in the selected config");
+  if (!process.env[config.dasc.accessKeyEnv]) {
+    throw new Error(`Missing DASC AccessKey in environment variable ${config.dasc.accessKeyEnv}`);
+  }
+  return new DascClient(config.dasc, config.scope);
+}
+
 async function ensureSandbox(config: AppConfig): Promise<{ close: () => Promise<void>; owned: boolean }> {
   const client = new SandboxClient(config.runtime.sandbox.socketPath, config.runtime.sandbox.connectTimeoutMs);
   try {
@@ -224,9 +267,12 @@ async function ensureSandbox(config: AppConfig): Promise<{ close: () => Promise<
       workspaceRoot: config.scope.workspaceRoot,
       scratchRoot: config.runtime.scratchRoot,
       allowedPrograms: config.scope.allowedPrograms,
+      ...(config.scope.pythonModules ? { pythonModules: config.scope.pythonModules } : {}),
       defaultTimeoutMs: config.runtime.commandTimeoutMs,
       maxOutputBytes: config.runtime.maxOutputBytes,
       network: process.env.XUANSHU_SANDBOX_NETWORK ?? "external",
+      ...(config.scope.extraPaths ? { extraPaths: config.scope.extraPaths } : {}),
+      ...(config.runtime.policyPermissive ? { permissivePaths: true } : {}),
     });
     return { close: running.close, owned: true };
   }
@@ -572,6 +618,52 @@ async function main(): Promise<void> {
     process.exitCode = await runArenaEvaluation(config, targetAttempts, args.autoSubmit ?? true, idleSeconds);
     return;
   }
+  if (args.command.startsWith("dasc-")) {
+    const client = createDascClient(config);
+    if (args.command === "dasc-match-info") {
+      printJson(await client.matchInfo());
+      return;
+    }
+    if (args.command === "dasc-overview") {
+      printJson(await client.overview());
+      return;
+    }
+    if (args.command === "dasc-exercise-list") {
+      printJson(await client.exerciseList());
+      return;
+    }
+    if (args.command === "dasc-exercise") {
+      if (!args.exerciseId) throw new Error("dasc-exercise requires --exercise-id");
+      printJson(await client.exercise(args.exerciseId));
+      return;
+    }
+    if (args.command === "dasc-build-env") {
+      if (!args.exerciseId) throw new Error("dasc-build-env requires --exercise-id");
+      printJson(await client.buildExerciseEnv(args.exerciseId));
+      return;
+    }
+    if (args.command === "dasc-recover-env") {
+      if (!args.exerciseId) throw new Error("dasc-recover-env requires --exercise-id");
+      printJson(await client.recoverExerciseEnv(args.exerciseId));
+      return;
+    }
+    if (args.command === "dasc-submit") {
+      if (!args.exerciseId) throw new Error("dasc-submit requires --exercise-id");
+      if (!args.flag) throw new Error("dasc-submit requires --flag");
+      printJson({ submitted: true, response: await client.answer(args.exerciseId, args.flag) });
+      return;
+    }
+    if (args.command === "dasc-notice-list") {
+      printJson(await client.noticeList());
+      return;
+    }
+    if (args.command === "dasc-notice") {
+      if (!args.noticeId) throw new Error("dasc-notice requires --notice-id");
+      printJson(await client.notice(args.noticeId));
+      return;
+    }
+    throw new Error(`Unknown DASC command: ${args.command}`);
+  }
   if (args.command === "tsec-solve-once") {
     const result = await solveTSecOnce(config, createTSecClient(), args.challengeCode);
     printJson(result);
@@ -601,9 +693,12 @@ async function main(): Promise<void> {
       workspaceRoot: config.scope.workspaceRoot,
       scratchRoot: config.runtime.scratchRoot,
       allowedPrograms: config.scope.allowedPrograms,
+      ...(config.scope.pythonModules ? { pythonModules: config.scope.pythonModules } : {}),
       defaultTimeoutMs: config.runtime.commandTimeoutMs,
       maxOutputBytes: config.runtime.maxOutputBytes,
       network: process.env.XUANSHU_SANDBOX_NETWORK ?? "external",
+      ...(config.scope.extraPaths ? { extraPaths: config.scope.extraPaths } : {}),
+      ...(config.runtime.policyPermissive ? { permissivePaths: true } : {}),
     });
     console.log(`CTF sandbox listening at ${running.endpoint}`);
     console.log(`workspace=${config.scope.workspaceRoot} scratch=${config.runtime.scratchRoot}`);

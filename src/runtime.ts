@@ -445,6 +445,8 @@ export class XuanShuRuntime {
           network: sandboxNetwork,
           configuredPrograms: [...configuredScope.allowedPrograms],
           unavailablePrograms,
+          availablePythonModules: [...(executorHealth.pythonModules ?? [])],
+          unavailablePythonModules: [...(executorHealth.missingPythonModules ?? [])],
         }, { sharedEvidence: Boolean(options.sharedEvidence) }, { id: profile.id, instructions: profile.systemPrompt }),
         model,
         thinkingLevel: runtimeConfig.thinkingLevel,

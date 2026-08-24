@@ -1,6 +1,6 @@
 import { hostMatches } from "./policy.js";
 import { Agent as DirectAgent, ProxyAgent, setGlobalDispatcher } from "undici";
-import { access, mkdir } from "node:fs/promises";
+import { access, mkdir, readdir, rm } from "node:fs/promises";
 import { spawn, type ChildProcess } from "node:child_process";
 import { join } from "node:path";
 import { chromium } from "playwright";
@@ -114,16 +114,205 @@ async function ensureVpn(config: AppConfig): Promise<{ close: () => Promise<void
   throw new Error(`TSec VPN did not become healthy; inspect ${logPath}`);
 }
 
+export function inferCategory(code: string, description?: string): string {
+  const prefix = code.split("-")[0]?.toLowerCase() ?? "";
+  if (["f1"].includes(prefix)) return "Pwn";
+  if (["f2"].includes(prefix)) return "RE";
+  if (["e1", "e2", "e3"].includes(prefix)) return "Web";
+  if (["b"].includes(prefix)) return "Misc";
+  // Benchmark prefixes are not a reliable category contract. Prefer explicit
+  // signals in the operator-provided description so mixed challenge batches do
+  // not all inherit a Web workflow by default.
+  const desc = description?.toLowerCase() ?? "";
+  const webSignals = /\b(web|http|https|upload|sql|ssrf|ssti|xss|jwt|waf|spring boot|api|blog|proxy|gateway)\b|网站|登录|表单|博客|网关|代理/;
+  if (/\b(crc|rsa|aes|ecc|cipher|decrypt|encrypt|cryptograph|lattice|modular|mac|csidh|lcg|chacha|diffie[- ]?hellman|s-box|spn)\b|加密|密钥|密码|分组密码|预言机/.test(desc) && !webSignals.test(desc)) return "Crypto";
+  if (/\b(overflow|memory corruption|shellcode|rop|heap|libc|format string)\b|内存破坏|缓冲区溢出/.test(desc)) return "Pwn";
+  if (/\b(reverse|binary|elf|bytecode|packed|disassembl|vm)\b|逆向|汇编|反编译|可执行文件|二进制|加壳/.test(desc) && !webSignals.test(desc)) return "RE";
+  if (/\b(pickle|unpickler|serialization|deserialization|pyjail|bash jail|sandbox escape|encoding|qr code|esolang)\b|序列化|反序列化|沙箱|逃逸|编码|二维码|压缩格式/.test(desc) && !webSignals.test(desc)) return "Misc";
+  if (["a"].includes(prefix)) return "Web";
+  if (webSignals.test(desc)) return "Web";
+  return "Web";
+}
+
+function categoryWorkflowHint(category: string): string {
+  // ══════════════════════════════════════════════════════════════════════
+  // FLAG CONTRACT  (MANDATORY — violation = wrong submission)
+  // ══════════════════════════════════════════════════════════════════════
+  // 1. The flag MUST come from actual execution/exploitation of the live
+  //    target binary or service — it is the STDOUT you get when running
+  //    the binary with the correct input, or the service response.
+  // 2. The benchmark may preserve a challenge's native flag wrapper. Never
+  //    add, remove, or transform a wrapper that the live target did not emit.
+  // 3. Workspace attachment files are HINTS only; ignore any example
+  //    hex/UUID strings in them.
+  // ══════════════════════════════════════════════════════════════════════
+  const flagContract = [
+    "⚠️  FLAG CONTRACT — MANDATORY:",
+    "    • Submit EXACTLY the flag string emitted by the live target — the challenge may use its native wrapper.",
+    "    • When a live response or command output contains an explicit flag-shaped value (for example flag{...},",
+    "      FLAG{...}, or a wrapper stated in the challenge description), stop and call finish_task with that exact value.",
+    "    • Workspace attachment files are HINTS only — do NOT submit example strings from them.",
+  ].join("\n");
+
+  switch (category) {
+    case "Pwn":
+      return [
+        "This is a binary exploitation (Pwn) challenge. Use sandbox tools: run_command, write_scratch_file.",
+        "Workflow:",
+        "  1. Download the binary: http GET http://<host>:<port>/download (binary, save to scratch).",
+        "  2. Inspect: chmod +x, file, rabin2 -I, checksec.",
+        "  3. If it is a network service (no /download), interact via tcp_open/tcp_send/tcp_receive.",
+        "     For a line-based protocol: send commands one at a time and read responses to discover the protocol.",
+        "     Try 'HELP\\n', 'help\\n', 'LIST\\n', '?\\n', 'INFO\\n' to enumerate available commands first.",
+        "  4. Find the vulnerability class: buffer overflow (cyclic pattern), format string (%p leak), heap, etc.",
+        "  5. Write and iteratively test the exploit with pwntools in the sandbox.",
+        "  6. Capture the flag printed verbatim by the service/binary — submit it exactly as-is.",
+        "Do not use browser tools unless the challenge description explicitly mentions a web interface.",
+        flagContract,
+      ].join("\n");
+    case "RE":
+      return [
+        "This is a reverse engineering challenge. Use sandbox tools: run_command, write_scratch_file.",
+        "Available Python libraries (use via python3 script): angr, unicorn, capstone, pwntools (pwn), z3-solver.",
+        "Workflow:",
+        "  1. Download the binary: http GET http://<host>:<port>/download, save binary to scratch/.",
+        "  2. chmod +x ./binary; file ./binary; rabin2 -I ./binary; strings ./binary | head -80.",
+        "  3. r2 -A -q -c 'afl; s main; pdf' ./binary  — understand main logic.",
+        "  4. Look for key-check function. Disassemble: r2 -q -c 'aaa; s fcn.XXXXX; pdf' ./binary.",
+        "  5. Reverse-engineer the correct key or authorization code from the logic.",
+        "  6. RUN the binary with that key: ./binary <key>  — submit its stdout verbatim.",
+        "",
+        "  SPECIAL CASE — Linux ELF on macOS sandbox (Exec format error):",
+        "    The sandbox is macOS/Darwin. If ./binary gives 'Exec format error',",
+        "    Option A: try  qemu-x86_64 ./binary <key>",
+        "    Option B: use angr symbolic execution to find the key and extract the flag:",
+        "      import angr, claripy",
+        "      proj = angr.Project('./binary', auto_load_libs=False)",
+        "      key = claripy.BVS('key', 15*8)   # adjust length",
+        "      st = proj.factory.full_init_state(args=['./binary', key])",
+        "      sim = proj.factory.simgr(st)",
+        "      sim.explore(find=lambda s: b'flag{' in s.posix.dumps(1),",
+        "                  avoid=lambda s: b'Invalid' in s.posix.dumps(1))",
+        "      print(sim.found[0].posix.dumps(1))  # the flag",
+        "    Option C: use unicorn to emulate just the decrypt function with candidate keys.",
+        "",
+        "  SPECIAL CASE — Custom VM / bytecode interpreter:",
+        "    If running the binary only prints dots or 'VM execution complete' with no flag,",
+        "    the flag is produced by the VM at runtime. You must emulate it.",
+        "    Steps:",
+        "      1. Dump bytecode: r2 -q -c 'px 128 @ <bytecode_addr>' ./binary",
+        "      2. Disassemble opcode dispatch table to learn each opcode's semantics.",
+        "      3. Write a Python VM emulator using the capstone or plain bytes:",
+        "         import capstone; from unicorn import *; from unicorn.x86_const import *",
+        "         or just parse the bytecode manually based on the dispatch table.",
+        "      4. Collect all putc/write arguments during emulation — that is the flag.",
+        "    Alternatively: use unicorn to emulate the full VM function with the correct key argv:",
+        "      from unicorn import *; from unicorn.x86_const import *",
+        "      # load ELF sections, set up stack/argv, hook memory writes to stdout fd",
+        "",
+        "  SPECIAL CASE — Unknown key / brute-force needed:",
+        "    Use z3 to solve key constraints derived from disassembly:",
+        "      from z3 import *",
+        "      key = [BitVec(f'k{i}', 8) for i in range(N)]",
+        "      s = Solver(); s.add( <constraints from disasm> )",
+        "      if s.check() == sat: print([s.model()[k].as_long() for k in key])",
+        "    Or use angr with claripy symbolic variables as shown above.",
+        "",
+        "  SPECIAL CASE — Go statically linked stripped binary:",
+        "    Use r2 with 'aaa' + 'afl' to list recovered function names.",
+        "    Look for main.main, keySchedule, reveal patterns.",
+        "    Reconstruct the algorithm in Python; brute-force or symbolically solve for the key.",
+        "Do not use browser tools unless the challenge description explicitly mentions a web interface.",
+        flagContract,
+      ].join("\n");
+    case "Crypto":
+      return [
+        "This is a cryptography challenge. Use sandbox tools: run_command, write_scratch_file.",
+        "Workflow: capture the complete protocol/banner or challenge files first, identify the primitive and exact encodings, implement one bounded solver in Python, independently verify every recovered value, then submit the flag verbatim from the live target output.",
+        "  1. Verify required imports/tools once at the start (for example Crypto, z3, pycosat, ortools, fpylll). If a capability is missing, checkpoint and change strategy; do not spend the run retrying the same unavailable solver.",
+        "  2. For CRC or other linear leakage, model the primitive over GF(2) and solve all observations together. If each observation contains noisy alternatives, encode exactly-one/one-hot selection variables and solve the complete system with Z3, pycosat, or OR-Tools. Validate the recovered key against every original observation and check uniqueness before moving on.",
+        "  3. For a recovered secret followed by AES, derive candidates from the exact observed byte/int representation (raw bytes, explicit endian form, hex/text form, and standard hash/KDF outputs). Use the ciphertext length to choose modes: non-block-aligned ciphertext means prioritize CTR, OFB, and CFB before ECB/CBC padding assumptions. Enumerate only documented or evidence-backed nonce/IV sources and record the winning derivation.",
+        "  4. Use a single bounded offline script for candidate derivations/modes and score only protocol-confirmed flag formats. Do not spend dozens of turns writing one-off decrypt scripts; after two contradicted variants, checkpoint and switch to the next evidence-supported representation.",
+        "  5. Reserve the final portion of the budget for independent decryption/round-trip checks, record_lesson, and finish_task. A plausible plaintext without a live ciphertext/decryption verification is blocked, not a submission.",
+        flagContract,
+      ].join("\n");
+    case "Misc":
+      return [
+        "This is a miscellaneous CTF challenge (jail, serialization, encoding, protocol, or hybrid puzzle). Use sandbox tools: run_command, write_scratch_file.",
+        "Workflow:",
+        "  1. Capture the exact service banner/protocol and read every provided artifact before crafting input. Preserve bytes, framing, and the challenge's stated flag wrapper.",
+        "  2. For pickle/Python or shell sandboxes, identify the parser, allowed globals/attributes, normalization steps, and rejection behavior with one baseline and one controlled input. Build a minimal offline payload generator and test it against the live service.",
+        "  3. For encoding, compression, or custom formats, identify magic bytes and transformations first; use deterministic scripts and round-trip checks rather than guessing strings.",
+        "  4. Keep probes bounded. After two contradicted payload families, checkpoint with the exact observed constraint and switch to the next evidence-supported primitive. Reserve time for independent flag verification and finish_task.",
+        "Do not use browser tools unless the challenge description explicitly mentions a web interface.",
+        flagContract,
+      ].join("\n");
+    case "Web":
+    default:
+      return [
+        "This is a web exploitation challenge.",
+        "",
+        "METHODOLOGY — follow this reasoning chain; do not skip phases:",
+        "  1. RECON: Read ALL page source, JS files, network traffic. Extract: exact API field names, internal",
+        "     hostnames, auth mechanism, tech stack. Do not assume field names — observe them from source.",
+        "  2. FINGERPRINT: Identify stack from response headers, error pages, cookie names, framework signals.",
+        "     Use web_knowledge_lookup with the identified technology to get applicable vuln classes.",
+        "  3. HYPOTHESIZE: Map observations to specific vuln types. Rank by evidence strength. Each hypothesis",
+        "     requires: exact parameter name (from recon), test payload, expected difference from baseline.",
+        "  4. EXPLOIT: Execute one variable at a time. Compare each response to baseline. Chain results:",
+        "     if step N returns a token/key, immediately use it in step N+1. Do not retry identical payloads.",
+        "  5. RECOVER when stuck: wrong field name → re-read JS source; filter blocked → try encoding variants;",
+        "     wrong vuln type → re-query web_knowledge_lookup; budget low → pick highest-confidence path.",
+        "",
+        "KEY PRINCIPLES:",
+        "  • CRITICAL: The instant any response body (including inside HTML wrappers) contains flag{...} or",
+        "    FLAG{...}, call finish_task with submission=<that exact flag value>. Do not call finish_task(blocked).",
+        "  • Source code leak is often the fastest path: always try GET /.git/HEAD, /static/../app.py,",
+        "    /proc/self/environ early in recon — these expose SECRET_KEY, hardcoded passwords, and config.",
+        "  • If login returns 500 on ALL inputs: do NOT keep trying login. Instead read JS source for required",
+        "    fields, check /.git/HEAD and /static/../app.py for source leak. A 500 means missing field or bug.",
+        "  • SSRF response may be wrapped in HTML page — the actual internal JSON is INSIDE the HTML body.",
+        "    Extract it: look for JSON-shaped content {\"key\":...} embedded in the HTML, or use Python regex.",
+        "  • After SSRF reaches internal service and gets admin_token: use SSRF vector itself to probe /flag,",
+        "    /secret, /admin/flag on the internal service — not direct HTTP (internal IPs are unreachable directly).",
+        "  • When writing Python scripts in sandbox: NEVER name files enum.py, re.py, os.py, sys.py \u2014",
+        "    these shadow stdlib modules and cause ImportError. Use exploit.py, scanner.py, brute.py instead.",
+        "  • Use run_command with a Python/bash script instead of 50+ individual http_request calls.",
+        "  • Flag format: flag{...}  Common locations: /flag /flag.txt /challenge/flag.txt /root/flag",
+        "",
+        "Browser action names: create_session, open_page, navigate, reload, go_back, capture_dom,",
+        "capture_network_summary, click, fill, select, check, uncheck, submit_form, wait_for,",
+        "capture_screenshot, close_page, close_session.",
+        "Use http_request for precise control over headers, cookies, body, and encoding.",
+        flagContract,
+      ].join("\n");
+  }
+}
+
 function challengeTask(challenge: TSecChallenge, target: string): string {
+  const category = inferCategory(challenge.unique_code, challenge.description);
   return [
     "Authorized TSec Benchmark challenge. Solve only the provided container through registered tools.",
-    "Use the existing Web Agent workflow and independently verify any flag before finish_task.",
-    `Challenge difficulty: ${challenge.difficulty}; level: ${challenge.level}; score: ${challenge.total_score}.`,
-    `Target URL: ${target}`,
+    categoryWorkflowHint(category),
+    `Challenge difficulty: ${challenge.difficulty}; level: ${challenge.level}; score: ${challenge.total_score}; category: ${category}.`,
+    `Target: ${target}`,
     "Challenge description:", challenge.description ?? "(no description provided)",
-    "Browser action names are exact: create_session, open_page, navigate, reload, go_back, capture_dom, capture_network_summary, click, fill, select, check, uncheck, submit_form, wait_for, capture_screenshot, close_page, close_session.",
     "Submission contract: call finish_task with the exact verified flag in submission; do not guess.",
   ].join("\n");
+}
+
+/** Remove all regular files from the workspace root except .gitkeep, leaving directories intact. */
+async function purgeWorkspace(workspaceRoot: string): Promise<void> {
+  try {
+    const entries = await readdir(workspaceRoot, { withFileTypes: true });
+    await Promise.all(
+      entries
+        .filter((entry) => entry.isFile() && entry.name !== ".gitkeep")
+        .map((entry) => rm(join(workspaceRoot, entry.name), { force: true })),
+    );
+  } catch {
+    // If the workspace does not exist yet, that is fine — nothing to purge.
+  }
 }
 
 export function tsecScope(config: AppConfig, targetHost: string, targetPort: number, configuredHosts: string[]): Partial<ScopeConfig> {
@@ -151,6 +340,10 @@ export async function solveTSecOnce(config: AppConfig, client: TSecClient, code?
   let challengeCode: string | undefined;
   try {
     challengeCode = challenge.unique_code;
+    // Clean the shared workspace before each run so stale arena attachment files
+    // from previous runs (e.g. arena-*-attachment.txt left by Arena jobs) cannot
+    // pollute the agent's context and cause it to submit wrong flags.
+    await purgeWorkspace(config.scope.workspaceRoot);
     const started = await client.startChallenge(challenge.unique_code);
     const address = started.container_addr[0];
     if (!address) throw new Error("TSec started without a container address");
@@ -168,7 +361,7 @@ export async function solveTSecOnce(config: AppConfig, client: TSecClient, code?
     }});
     sandbox = await ensureSandbox(tsecConfig);
     let state: RunState | undefined;
-    state = await runtime.run({ task: challengeTask(challenge, parsed.url), scope: perRunScope, metadata: { source: "tsec-benchmark", category: "Web", challengeCode: challenge.unique_code } });
+    state = await runtime.run({ task: challengeTask(challenge, parsed.url), scope: { ...perRunScope, allowedHosts: tsecConfig.scope.allowedHosts }, metadata: { source: "tsec-benchmark", category: inferCategory(challenge.unique_code, challenge.description), challengeCode: challenge.unique_code } });
     console.error(`[tsec] Agent finished with status=${state.status} stopReason=${state.stopReason ?? "none"}`);
     const flag = extractFlagCandidate(state);
     if (state.status !== "completed" || !flag) return { code: challenge.unique_code, outcome: "agent-incomplete", state: state.status, stopReason: state.stopReason };
@@ -183,21 +376,29 @@ export async function solveTSecOnce(config: AppConfig, client: TSecClient, code?
 
 async function ensureSandbox(config: AppConfig): Promise<{ close: () => Promise<void> }> {
   const client = new SandboxClient(config.runtime.sandbox.socketPath, config.runtime.sandbox.connectTimeoutMs);
-  try {
-    await client.health();
-    return { close: async () => {} };
-  } catch {
-    const running = await startSandboxServer({
-      socketPath: config.runtime.sandbox.socketPath,
-      workspaceRoot: config.scope.workspaceRoot,
-      scratchRoot: config.runtime.scratchRoot,
-      allowedPrograms: config.scope.allowedPrograms,
-      defaultTimeoutMs: config.runtime.commandTimeoutMs,
-      maxOutputBytes: config.runtime.maxOutputBytes,
-      network: process.env.XUANSHU_SANDBOX_NETWORK ?? "external",
-    });
-    return { close: running.close };
+  // If readOnlyPaths is configured, we must own the sandbox process so the new config takes effect.
+  // Kill any pre-existing sandbox that may have been started without readOnlyPaths.
+  const needsOwnedProcess = (config.scope.readOnlyPaths?.length ?? 0) > 0;
+  if (!needsOwnedProcess) {
+    try {
+      await client.health();
+      return { close: async () => {} };
+    } catch { /* fall through to start */ }
   }
+  const running = await startSandboxServer({
+    socketPath: config.runtime.sandbox.socketPath,
+    workspaceRoot: config.scope.workspaceRoot,
+    scratchRoot: config.runtime.scratchRoot,
+    allowedPrograms: config.scope.allowedPrograms,
+    ...(config.scope.pythonModules ? { pythonModules: config.scope.pythonModules } : {}),
+    defaultTimeoutMs: config.runtime.commandTimeoutMs,
+    maxOutputBytes: config.runtime.maxOutputBytes,
+    network: process.env.XUANSHU_SANDBOX_NETWORK ?? "external",
+    ...(config.scope.extraPaths ? { extraPaths: config.scope.extraPaths } : {}),
+    ...(config.scope.readOnlyPaths ? { readOnlyPaths: config.scope.readOnlyPaths } : {}),
+    ...(config.runtime.policyPermissive ? { permissivePaths: true } : {}),
+  });
+  return { close: running.close };
 }
 
 export function createTSecClient(): TSecClient {

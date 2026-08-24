@@ -4,6 +4,8 @@ export interface SandboxCapabilityPrompt {
   reachable: boolean;
   configuredPrograms: string[];
   unavailablePrograms: string[];
+  availablePythonModules?: string[];
+  unavailablePythonModules?: string[];
   network: string;
 }
 
@@ -44,8 +46,11 @@ Operating contract:
 14. In attachments-only runs, the workspace contains only the current run's regular-file attachments. Do not expect shared workspace files, and do not use run_command with cwd=workspace.
 15. Arena completion is candidate-specific: include the exact submission in at least two independent verification strings, tie it to a confirmed hypothesis and a finding with confidence >= 0.8, and leave remainingRisks empty. A self-reported independentlyVerified flag is not evidence.
 16. Reserve the final ${runtime.finalizationReserveMs} ms for checkpoint, record_finding, record_lesson, and finish_task; do not start new investigative actions after the reserve begins.
-${collaboration?.sharedEvidence ? `17. This run is part of a same-task race with a bounded shared evidence board. After submit_plan, use read_shared_evidence before committing to a direction. Publish concise direct observations, candidates, and evidenced dead ends with publish_shared_evidence so other agents avoid duplicate work.
-18. Shared entries are coordination hints, not proof. Independently reproduce any shared candidate before using it in a finding or completion. Never publish credentials, authorization headers, cookies, hidden reasoning, or unsupported claims.` : ""}
+17. Speed and decisiveness: avoid speculative multi-step probing chains. Commit to the highest-probability hypothesis first; pivot only when it is explicitly contradicted by evidence. Prefer one well-targeted tool call over a sequence of open-ended scans.
+18. Flag validation before submission: (a) the flag MUST originate from a live target — it is the stdout/response you receive when you run the binary with the correct input or exploit the live service; (b) workspace attachment files (arena-*-attachment.txt) show the challenge mechanics only — ignore any example hex/UUID strings in them; (c) submit the flag EXACTLY as the binary/service prints it — do NOT add, remove, or change any prefix/wrapper, including a challenge-specific native wrapper; (d) never submit a value derived solely from decoding an attachment file; (e) if exact flag bytes are uncertain, finish blocked.
+19. Budget awareness: if more than 60% of the turn budget or 70% of the time budget has been consumed without a confirmed flag candidate, checkpoint, revise the strategy to the next most likely primitive (different endpoint, different vuln class, different binary function), and continue. Do not repeat the identical tool call more than twice without new evidence.
+${collaboration?.sharedEvidence ? `20. This run is part of a same-task race with a bounded shared evidence board. After submit_plan, use read_shared_evidence before committing to a direction. Publish concise direct observations, candidates, and evidenced dead ends with publish_shared_evidence so other agents avoid duplicate work.
+21. Shared entries are coordination hints, not proof. Independently reproduce any shared candidate before using it in a finding or completion. Never publish credentials, authorization headers, cookies, hidden reasoning, or unsupported claims.` : ""}
 
  Web execution contract:
 1. Use http_request sessionId="default" or a named session for Cookie Jar continuity; create separate names for separate identities. Use form/multipart fields and requestId/replayOf/compareTo for reproducible request workflows.
@@ -65,6 +70,19 @@ CTF operating mode:
     8. Treat the negotiated sandbox program list as authoritative. Do not run package managers during a task; verify a needed import or command once, then revise the plan or report an infrastructure blocker if it is unavailable.
     9. Use extract_archive and search_artifact for bounded offline fallback when the available sandbox toolchain cannot answer an archive or byte-pattern question.
 
+    WAF / filter-bypass workflow (use when a WAF, ModSecurity, or custom filter is confirmed to be blocking payloads):
+1. Baseline first: confirm the echo/reflection point and the exact HTTP parameter before any payload work. One normal request + one safe probe string is sufficient.
+2. Identify WAF vendor from headers (X-Content-Security-Policy, Server: nginx/ModSecurity, cf-ray, x-sucuri-id, etc.) and block-response signatures.
+3. Use a tiered token-binary-search approach: split candidate payloads into isolated tokens to pinpoint the blocking rule in at most 6-8 requests, not one-by-one character probes.
+4. Apply known bypass tiers in order, stopping at the first success:
+   Tier-1 (encoding): HTML entity encode (&lt; &gt; &#60; &#x3c;), URL double-encode (%253c), unicode fullwidth (＜＞), null-byte insertion (%00), tab/newline insertion (%09 %0a %0d).
+   Tier-2 (case/space variants): mixed case <ScRiPt>, SVG namespace <svg/onload=>, unusual event handlers (ontoggle, oninput, onpointerover, onpointermove, onmouseenter, onfocusin, onanimationstart), JS template literals.
+   Tier-3 (tag substitution): <details open ontoggle=>, <body onresize=>, <input autofocus onfocus=>, <select onchange=>, <video src=x onerror=>, <marquee onstart=>, <meter onmouseover=>.
+   Tier-4 (context-sensitive): if reflection lands inside an existing attribute (value="..."), break out: "><payload> or use on-event continuation onfocus=... with autofocus. If inside a script block, close with </script> or use JS template injection.
+   Tier-5 (protocol/obfuscation): javascript:void(0) with vbscript: fallback, data: URIs, srcdoc= with entity-encoded inner HTML, expression() in IE-quirks contexts.
+5. For cookie-steal objectives, the stolen value only needs to reach the examiner; use out-of-band only when direct reflected read is unavailable within scope.
+6. Aim to confirm the XSS trigger in at most 15 requests from WAF discovery to confirmed injection. Checkpoint with the exact working payload and evidence. Do not loop beyond 20 WAF probes without a checkpoint and strategy revision.
+
     Pwn-specific workflow (use only when evidence identifies a native binary or a remote Pwn service):
     1. Establish the binary facts first with file, rabin2, readelf, strings, nm, and objdump. Use r2 for native disassembly/cross-references only after that baseline; record architecture, symbols, imported functions, and likely input boundaries before attempting an exploit.
 2. Check protections from available evidence (PIE, NX, canary, RELRO, and stripping). If a preferred tool is unavailable, use the available disassembly and ELF metadata tools and state the limitation.
@@ -83,6 +101,8 @@ Current authorization:
 - allowed sandbox programs: ${scope.allowedPrograms.length ? scope.allowedPrograms.join(", ") : "none"}
 - sandbox reachable: ${sandboxCapability?.reachable === true ? "yes" : "no"}
 - configured but unavailable sandbox programs: ${sandboxCapability?.unavailablePrograms.length ? sandboxCapability.unavailablePrograms.join(", ") : "none"}
+- available sandbox Python modules: ${sandboxCapability?.availablePythonModules?.length ? sandboxCapability.availablePythonModules.join(", ") : "none reported"}
+- unavailable sandbox Python modules: ${sandboxCapability?.unavailablePythonModules?.length ? sandboxCapability.unavailablePythonModules.join(", ") : "none reported"}
 - sandbox network profile: ${sandboxCapability?.network ?? "unknown"}
 
 Sandbox capability manifest:

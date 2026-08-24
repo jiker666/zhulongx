@@ -9,5 +9,12 @@ test-results/
 *.log
 workspace/*
 !workspace/.gitkeep
+
+# NYU CTF Bench is an operator-provided/generated corpus. It can contain
+# large binaries, archives, and evaluator-only answer metadata; keep it out of
+# source control while retaining the adapter and runner scripts.
+nyu-ctf/bench/
+nyu-ctf/results.json
+nyu-ctf/failure_report.md
 pnpm-lock.yaml
 pnpm-workspace.yaml

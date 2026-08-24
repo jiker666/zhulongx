@@ -226,9 +226,12 @@ async function defaultEnsureSandbox(config: AppConfig): Promise<{ owned: boolean
       workspaceRoot: config.scope.workspaceRoot,
       scratchRoot: config.runtime.scratchRoot,
       allowedPrograms: config.scope.allowedPrograms,
+      ...(config.scope.pythonModules ? { pythonModules: config.scope.pythonModules } : {}),
       defaultTimeoutMs: config.runtime.commandTimeoutMs,
       maxOutputBytes: config.runtime.maxOutputBytes,
       network: process.env.XUANSHU_SANDBOX_NETWORK ?? "external",
+      ...(config.scope.extraPaths ? { extraPaths: config.scope.extraPaths } : {}),
+      ...(config.runtime.policyPermissive ? { permissivePaths: true } : {}),
     });
     return { owned: true, close: running.close };
   }

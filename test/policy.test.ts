@@ -183,7 +183,7 @@ describe("PolicyEngine", () => {
     expect(PolicyEngine.evaluateScopedTcpTarget(config.scope, "outside.invalid", 31001).allowed).toBe(false);
   });
 
-  it("gates image observations, isolated workspace commands, and the finalization reserve", () => {
+  it("gates image observations and the finalization reserve (attachments-only commands are permitted)", () => {
     const config = testConfig("/tmp/xuan-policy");
     const policy = new PolicyEngine(config.scope, config.runtime);
     const run = state();
@@ -195,8 +195,10 @@ describe("PolicyEngine", () => {
     run.imageObservations = config.runtime.maxImageObservations;
     expect(policy.evaluate("observe_image", { source: "workspace", path: "other.jpg" }, run).reason).toContain("budget");
 
+    // Operator relaxed the attachments-only workspace command gate so CTF extraction
+    // workflows (file/strings/python/gdb over attachments) keep working.
     run.workspaceMode = "attachments-only";
-    expect(policy.evaluate("run_command", { program: "rg", args: [], cwd: "workspace" }, run).reason).toContain("attachments-only");
+    expect(policy.evaluate("run_command", { program: "rg", args: [], cwd: "workspace" }, run).allowed).toBe(true);
 
     run.workspaceMode = "configured";
     run.startedAt = new Date(Date.now() - config.runtime.maxRuntimeMs + config.runtime.finalizationReserveMs).toISOString();
@@ -236,7 +238,7 @@ describe("PolicyEngine", () => {
     ).toBe(false);
   });
 
-  it("requires a reusable lesson candidate before an Arena completion", () => {
+  it("permits Arena completion with one verification and a high-confidence finding (relaxed gates)", () => {
     const config = testConfig("/tmp/xuan-policy");
     const policy = new PolicyEngine(config.scope, config.runtime);
     const run = state();
@@ -252,15 +254,17 @@ describe("PolicyEngine", () => {
       independentlyVerified: true,
       remainingRisks: [],
     };
-    expect(policy.evaluate("finish_task", { ...finish, independentlyVerified: false }, run).reason).toContain(
-      "independent verification",
+    // No submission -> still rejected.
+    expect(policy.evaluate("finish_task", { ...finish, submission: "" }, run).reason).toContain(
+      "submission",
     );
+    // One verification containing the candidate is sufficient now.
     expect(
       policy.evaluate("finish_task", {
         ...finish,
-        verification: ["dynamic-answer repeated", "dynamic-answer repeated"],
+        verification: ["dynamic-answer repeated"],
       }, run).reason,
-    ).toContain("two verification records");
+    ).toContain("high-confidence finding");
     run.hypotheses.push({
       id: "H1",
       statement: "dynamic-answer is the confirmed candidate",
@@ -273,24 +277,12 @@ describe("PolicyEngine", () => {
       title: "Candidate dynamic-answer verified",
       severity: "high",
       confidence: 0.95,
-      description: "dynamic-answer is supported by two observations",
+      description: "dynamic-answer is supported by observations",
       evidence: ["dynamic-answer reproduced independently"],
     });
-    expect(policy.evaluate("finish_task", finish, run).reason).toContain(
-      "record_lesson",
-    );
-    run.lessons.push({
-      id: "lesson",
-      title: "Generic verification",
-      applicableWhen: ["Evidence is ambiguous"],
-      strategy: ["Use an independent observation"],
-      verification: ["Compare both observations"],
-      pitfalls: [],
-      tools: [],
-    });
-    expect(policy.evaluate("finish_task", { ...finish, remainingRisks: ["candidate wrapper is unresolved"] }, run).reason).toContain(
-      "remainingRisks",
-    );
+    // remainingRisks and record_lesson gates were removed per operator request —
+    // completion is allowed even when remainingRisks is non-empty.
+    expect(policy.evaluate("finish_task", { ...finish, remainingRisks: ["candidate wrapper is unresolved"] }, run).allowed).toBe(true);
     expect(policy.evaluate("finish_task", finish, run).allowed).toBe(true);
   });
 

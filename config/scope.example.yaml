@@ -22,3 +22,10 @@ allowedPrograms:
   - strings
   - xxd
   - z3
+# Optional interpreter-level checks for host-backed sandboxes. These are
+# verified with HOME set to the run scratch directory.
+pythonModules:
+  - ortools
+  - pycosat
+  - sympy
+  - z3

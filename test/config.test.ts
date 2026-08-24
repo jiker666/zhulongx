@@ -77,6 +77,28 @@ describe("model configuration", () => {
     expect(source).not.toMatch(/Bearer\s+[A-Za-z0-9._~-]+/i);
   });
 
+  it("loads the DASC and Wanqing configuration with environment-only credentials", async () => {
+    const configPath = "config/dasctf-wanqing.yaml";
+    const [config, source] = await Promise.all([loadConfig(configPath), readFile(configPath, "utf8")]);
+
+    expect(config.model).toMatchObject({
+      provider: "wanqing-corp",
+      api: "openai-completions",
+      apiKeyEnv: "WQ_API_KEY",
+    });
+    expect(config.scope).toMatchObject({ mode: "controlled" });
+    expect(config.scope.allowedHosts).toContain("pro.dasctf.com");
+    expect(config.dasc).toMatchObject({
+      enabled: true,
+      baseUrl: "https://pro.dasctf.com",
+      accessKeyEnv: "DASCTF_ACCESS_KEY",
+      maxRequests: 40,
+    });
+    expect(source).not.toMatch(/^\s*accessKey\s*:/m);
+    expect(source).not.toMatch(/ak_(?:live|test)_[A-Za-z0-9_-]+/);
+    expect(source).not.toMatch(/api-[A-Za-z0-9_-]{12,}/);
+  });
+
   it("loads Baidu TSec local and hosted configurations without embedded credentials", async () => {
     const [local, hosted, localSource, hostedSource] = await Promise.all([
       loadConfig("config/tsec-baidu-local.yaml"),
@@ -104,6 +126,11 @@ describe("model configuration", () => {
       expect(source).not.toMatch(/^\s*apiKey\s*:/m);
       expect(source).not.toMatch(/Bearer\s+[A-Za-z0-9._~-]+/i);
     }
+  });
+
+  it("loads the TSec host-backed Python module contract", async () => {
+    const config = await loadConfig("config/tsec-wanqing.yaml");
+    expect(config.scope.pythonModules).toEqual(expect.arrayContaining(["numpy", "ortools", "pycosat", "sympy", "z3"]));
   });
 
   it("rejects executor kinds without a built-in or operator-provided adapter", async () => {

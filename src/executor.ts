@@ -44,6 +44,8 @@ export interface ExecutorHealth {
   capabilities: string[];
   allowedPrograms: string[];
   missingPrograms: string[];
+  pythonModules?: string[];
+  missingPythonModules?: string[];
   detail?: string;
 }
 
@@ -188,6 +190,8 @@ export class SandboxExecutor implements Executor {
         capabilities: ["structured-exec", "workspace-read", "scratch-read", "scratch-write", "abort"],
         allowedPrograms: [...health.allowedPrograms],
         missingPrograms: [...health.missingPrograms],
+        pythonModules: [...(health.pythonModules ?? [])],
+        missingPythonModules: [...(health.missingPythonModules ?? [])],
       };
     } catch (error) {
       return {

@@ -75,7 +75,7 @@
         "reverse": ["addr2line", "apktool", "c++filt", "file", "gdb-multiarch", "jadx", "java", "ltrace", "nm", "objcopy", "objdump", "qemu-aarch64", "qemu-arm", "qemu-i386", "qemu-x86_64", "r2", "rabin2", "rafind2", "ragg2", "rax2", "readelf", "strings", "strace"],
         "web": ["curl", "flask-unsign", "jq", "python3", "sqlmap"]
       },
-      "pythonModules": ["Crypto", "cysignals", "fpylll", "gmpy2", "mmh3", "ortools", "pickora", "sympy", "tqdm", "volatility3", "z3"],
+      "pythonModules": ["Crypto", "cysignals", "fpylll", "gmpy2", "mmh3", "numpy", "ortools", "pickora", "pycosat", "sympy", "tqdm", "volatility3", "z3"],
       "binutilsCommands": ["addr2line", "c++filt", "nm", "objcopy", "objdump", "readelf", "strings"],
       "bundled": {
         "radare2": {"version": "6.2.0", "programs": ["r2", "rabin2", "rafind2", "ragg2", "rax2"], "installer": "tools/ctf/install-radare2.sh"},

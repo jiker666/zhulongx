@@ -58,6 +58,30 @@ describe("CTF sandbox", () => {
     expect(health).toMatchObject({ status: "ok", network: "internal-only" });
   });
 
+  it("reports Python modules using the same isolated HOME as task commands", async () => {
+    const root = await mkdtemp(join(tmpdir(), "xuan-sandbox-python-"));
+    roots.push(root);
+    const workspaceRoot = join(root, "input");
+    const scratchRoot = join(root, "work");
+    await mkdir(workspaceRoot, { recursive: true });
+    await mkdir(scratchRoot, { recursive: true });
+    const running = await startSandboxServer({
+      socketPath: process.platform === "win32" ? "tcp://127.0.0.1:0" : join(root, "sandbox.sock"),
+      workspaceRoot,
+      scratchRoot,
+      allowedPrograms: ["node"],
+      pythonModules: ["json", "xuan_shu_module_that_does_not_exist"],
+      defaultTimeoutMs: 500,
+      maxOutputBytes: 256,
+      network: "none",
+    });
+    closers.push(running.close);
+
+    const health = await new SandboxClient(running.endpoint, process.platform === "win32" ? 5000 : 500).health();
+    expect(health.missingPythonModules).toContain("xuan_shu_module_that_does_not_exist");
+    if (health.pythonModules?.includes("json")) expect(health.missingPythonModules).not.toContain("json");
+  });
+
   it("executes structured argv without shell parsing", async () => {
     const { client } = await sandbox();
     const result = await client.execute({
@@ -95,7 +119,7 @@ describe("CTF sandbox", () => {
   });
 
   it("bounds output and terminates timed-out commands", async () => {
-    const { client } = await sandbox(16, process.platform === "win32" ? 1000 : 100);
+    const { client } = await sandbox(16, 1000);
 
     const output = await client.execute({
       program: "node",

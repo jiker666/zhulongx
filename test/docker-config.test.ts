@@ -80,6 +80,7 @@ describe("Docker sandbox wiring", () => {
       "cysignals==1.12.5",
       "mmh3==5.2.1",
       "ortools==9.15.6755",
+      "pycosat==0.6.6",
       "pickora==1.0.1",
       "tqdm==4.70.0",
     ];
@@ -94,10 +95,12 @@ describe("Docker sandbox wiring", () => {
       expect.arrayContaining(["pickora", "sox", "steghide", "tesseract"]),
     );
     expect(manifest.profiles.core.pythonModules).toEqual(
-      expect.arrayContaining(["cysignals", "fpylll", "mmh3", "ortools", "pickora"]),
+      expect.arrayContaining(["cysignals", "fpylll", "mmh3", "numpy", "ortools", "pickora", "pycosat"]),
     );
     expect(verifier).toContain('export PATH="/opt/ctf-venv/bin:${PATH}"');
     expect(verifier).toContain("LLL.reduction(matrix)");
+    expect(verifier).toContain("pycosat.solve");
+    expect(await readFile("tools/ctf/install-local-python-core.sh", "utf8")).toContain("--target \"$SITE_PACKAGES\"");
     expect(verifier).toContain("cp_model.CpModel()");
     expect(verifier).toContain("Size(SymmetricGroup(3))");
     expect(verifier).toContain("patchelf --version");

@@ -21,4 +21,6 @@
 
 Sandbox programs 不是独立 AgentTool。`gap`、`patchelf`、`scalpel` 等程序只有同时出现在镜像、`capabilities.json`、operator `allowedPrograms` 和 sandbox health 中时才可由 `run_command` 使用。程序可能创建大量文件或消耗显著 CPU，因此必须把输出写入本次 scratch，并依赖统一命令超时与取消。
 
+Python 模块同样必须在 operator 选定的解释器 site-packages 中预装；sandbox health 会在隔离 `HOME` 下检查 `scope.pythonModules`。host-backed sandbox 的安装只通过构建前的 `tools/ctf/install-local-python-core.sh` 完成，任务运行中禁止包管理器。
+
 Deep Research、Step Model Router 和 HeavyThink 是应用服务库，不是默认 REST 动作。宿主必须显式提供策略受控 fetcher 或真实模型 runner，并把它们的事件、Token、成本和时间计入当前任务预算；项目默认测试只使用确定性 faux 实现。

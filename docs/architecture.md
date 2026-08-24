@@ -127,7 +127,7 @@ flowchart LR
 
 - Web/API：HTTP 工具、curl/sqlmap/flask-unsign/requests/jq。
 - Pwn：pwntools、ROPgadget、ropper、gdb/gdb-multiarch、checksec、seccomp-tools、one_gadget、patchelf、qemu-user、binutils。
-- Crypto：pycryptodome、sympy、gmpy2、py_ecc、hashpumpy；`fpylll+cysignals` 提供可用的 LLL/BKZ 基础，Z3/OR-Tools 提供 SMT 与 CP-SAT，`ecm`、`gp`、`gap`、`factor`、`bc` 提供有界的整数分解、代数和数论 CLI。
+- Crypto：pycryptodome、sympy、gmpy2、py_ecc、hashpumpy、pycosat；`fpylll+cysignals` 提供可用的 LLL/BKZ 基础，Z3/OR-Tools 提供 SMT 与 CP-SAT，`ecm`、`gp`、`gap`、`factor`、`bc` 提供有界的整数分解、代数和数论 CLI。Host-backed sandbox 会在隔离 `HOME` 下验证这些 Python 模块，避免误用 operator 用户目录中的依赖。
 - Reverse/Malware：固定版本的 Radare2、JADX、file/strings/xxd/binutils、gdb-multiarch、ltrace、capstone、unicorn、lief、pefile、yara、oletools、apktool。
 - Forensics/Misc/OSINT：binwalk、foremost、scalpel、exiftool、tshark、sleuthkit、ffmpeg/ffprobe、ImageMagick、SoX、minimodem、multimon-ng、zbar/qrencode、Tesseract、pngcheck/gifsicle、steghide/outguess/stegsnow、Pickora、Pillow/numpy/matplotlib。Pwn 额外提供 `patchelf` 修补解释器和依赖路径。
 

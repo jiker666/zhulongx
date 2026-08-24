@@ -1,0 +1,299 @@
+# TSecBench local run with Wanqing internal model.
+# Requires: WQ_API_KEY, BENCHMARK_TOKEN, BENCHMARK_BASE_URL in environment.
+# VPN is expected to already be up; set TSEC_SKIP_VPN=1 to bypass health check.
+model:
+  provider: wanqing-internal
+  id: ep-spmlx5-1786072758181058776
+  name: Wanqing ep-spmlx5
+  api: openai-completions
+  baseUrl: https://wanqing-api.corp.kuaishou.com/api/gateway/v1/endpoints
+  apiKeyEnv: WQ_API_KEY
+  reasoning: true
+  contextWindow: 1048576
+  maxTokens: 16384
+
+runtime:
+  # low thinking = faster token generation, still sufficient for Web/pwn/re challenges.
+  thinkingLevel: low
+  artifactRoot: .xuan-shu/runs
+  scratchRoot: .xuan-shu/work
+  maxTurns: 120
+  maxToolCalls: 1500
+  # 45 min per challenge — gives hard sandbox/RE/binary tasks enough runway.
+  maxRuntimeMs: 2700000
+  # Single-instance throughput: one agent at a time avoids shared TPM exhaustion.
+  # modelMinIntervalMs controls the intra-run gap; inter-run gap is enforced by
+  # the batch script which serialises runs (CONCURRENCY=1 by default).
+  modelMinIntervalMs: 3000
+  modelRequestsPerMinute: 60
+  modelTokensPerMinute: 600000
+  # Allow up to 5 min of back-off when a 429 retry-after is not specified.
+  modelMaxRetryDelayMs: 300000
+  maxActionsWithoutCheckpoint: 1000
+  maxRepeatedAction: 1000
+  # Permissive policy: skip flow-control gates (checkpoint/repeat limits) and let
+  # the sandbox do read-wide path permitting. Budgets below still apply.
+  policyPermissive: true
+  maxOutputBytes: 65536
+  maxImageBytes: 5242880
+  maxImageObservations: 32
+  maxScratchFileBytes: 2097152
+  # finalization reserve: keep small so agents can finish right up to the last seconds.
+  finalizationReserveMs: 15000
+  commandTimeoutMs: 120000
+  httpTimeoutMs: 15000
+  maxHttpRequests: 2000
+  maxTcpSessions: 32
+  maxTcpBytes: 4194304
+  sandbox:
+    socketPath: tcp://127.0.0.1:7320
+    connectTimeoutMs: 3000
+
+# Operator-owned scope for TSec VPN range.
+# Per-run scope is narrowed to the exact container address from the platform.
+scope:
+  mode: controlled
+  workspaceRoot: ./workspace
+  allowedHosts:
+    - 10.0.*.*
+    - 10.0.*.*:*
+    - tsecbench.zc.tencent.com
+  allowedPrograms:
+    # shell & text
+    - bash
+    - sh
+    - zsh
+    - cat
+    - head
+    - tail
+    - grep
+    - egrep
+    - sed
+    - awk
+    - sort
+    - uniq
+    - wc
+    - cut
+    - tr
+    - find
+    - xargs
+    - which
+    - env
+    - echo
+    - printf
+    - sleep
+    - tee
+    - diff
+    - cmp
+    - md5
+    - md5sum
+    - sha1sum
+    - sha256sum
+    - base32
+    - base58
+    - base64
+    - hexdump
+    - xxd
+    - od
+    - strings
+    - file
+    - stat
+    - ls
+    - cp
+    - mv
+    - rm
+    - mkdir
+    - touch
+    - chmod
+    - chown
+    # archives
+    - tar
+    - unzip
+    - zip
+    - gzip
+    - gunzip
+    - bzip2
+    - xz
+    - zstd
+    - 7z
+    - 7za
+    - 7zr
+    - unrar
+    - rar
+    - ar
+    - cpio
+    - zsteg
+    - binwalk
+    - foremost
+    - scalpel
+    - steghide
+    - stegseek
+    # reverse engineering
+    - objdump
+    - readelf
+    - nm
+    - gdb
+    - gdb-multiarch
+    - radare2
+    - r2
+    - rabin2
+    - rafind2
+    - ragg2
+    - rax2
+    - ltrace
+    - strace
+    - objcopy
+    - addr2line
+    - c++filt
+    - gcc
+    - g++
+    - clang
+    - make
+    - cmake
+    - checksec
+    - ROPgadget
+    - one_gadget
+    - ropper
+    - patchelf
+    - seccomp-tools
+    - jadx
+    - apktool
+    - javap
+    - java
+    # pwn
+    - python3
+    - python
+    - pwntools
+    - pwn
+    # web
+    - curl
+    - wget
+    - httpx
+    - ffuf
+    - dirsearch
+    - gobuster
+    - wfuzz
+    - nuclei
+    - sqlmap
+    - hydra
+    - nc
+    - ncat
+    - socat
+    - telnet
+    - openssl
+    - php
+    - git
+    - flask-unsign
+    # crypto
+    - openssl
+    - sage
+    - gp
+    - gap
+    - factor
+    - RsaCtfTool
+    - z3
+    - hashcat
+    - john
+    # forensics
+    - exiftool
+    - identify
+    - convert
+    - tesseract
+    - zbarimg
+    - qrencode
+    - pngcheck
+    - gifsicle
+    - sox
+    - ffprobe
+    - ffmpeg
+    - tshark
+    - tcpdump
+    - strings
+    - vol
+    - tsk_recover
+    - fls
+    - icat
+    - mmls
+    - fsstat
+    - testdisk
+    - dcfldd
+    - sqlite3
+    - sqlite3
+    # misc
+    - jq
+    - nmap
+    - masscan
+    - ssh
+    - scp
+    - gzip
+    - base64
+    - xxd
+  # Verify imports under the sandbox's isolated HOME, not the operator's user site.
+  pythonModules:
+    - Crypto
+    - cysignals
+    - fpylll
+    - gmpy2
+    - mmh3
+    - numpy
+    - ortools
+    - pickora
+    - pycosat
+    - sympy
+    - z3
+  # Prepend these directories to PATH inside the sandbox so python3 resolves to
+  # the conda/miniforge environment where angr, unicorn, z3, pwntools, capstone live.
+  extraPaths:
+    - /Users/j1k3r/miniforge3/bin
+    - /opt/homebrew/bin
+  # Read-only paths that sandbox commands may reference (e.g. wordlists for flask-unsign, hydra, etc.)
+  readOnlyPaths:
+    - /Users/j1k3r/wordlists
+    - /opt/homebrew/share/john
+    - /etc
+    - /usr/share
+    - /opt/homebrew/share
+
+server:
+  host: 127.0.0.1
+  port: 7318
+  tokenEnv: XUANSHU_SERVER_TOKEN
+
+webReasoning:
+  enabled: true
+  autoDetectWebTasks: true
+  persistState: true
+  enableHypothesisManagement: true
+  enableReflection: true
+  enableActionDeduplication: true
+  noEvidenceRoundLimit: 3
+  duplicateActionLimit: 2
+  toolFailureLimit: 3
+  finalizationRoundReserve: 3
+  maxObservations: 80
+  maxHypotheses: 40
+  maxActions: 320
+  maxReflections: 12
+
+browser:
+  enabled: true
+  headless: true
+  maxSessionsPerRun: 1
+  maxPagesPerSession: 2
+  maxNavigationsPerRun: 12
+  maxActionsPerRun: 50
+  maxNetworkEventsPerRun: 500
+  maxDomElementsPerSnapshot: 200
+  maxDomSnapshotsPerRun: 40
+  maxScreenshotsPerRun: 12
+  maxResponseBodyBytes: 65536
+  maxScriptBytes: 131072
+  navigationTimeoutMs: 15000
+  actionTimeoutMs: 10000
+  sessionTimeoutMs: 900000
+  # CTF work often needs upload/download (file upload vulns, dynamic artifacts).
+  # Popups and external protocols stay blocked for safety.
+  blockDownloads: false
+  blockUploads: false
+  blockPopups: true
+  blockExternalProtocols: true

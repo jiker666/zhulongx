@@ -1,0 +1,217 @@
+# Wanqing internal endpoint configuration.
+# Uses the intranet base URL: http://wanqing.internal/api/gateway/v1/endpoints
+# For office-network access, use config/nss-wanqing.yaml instead.
+# Keep WQ_API_KEY in the shell environment or an ignored .env file; never commit it.
+model:
+  provider: wanqing-internal
+  id: ep-spmlx5-1786072758181058776
+  name: Wanqing ep-spmlx5
+  api: openai-completions
+  # The OpenAI-compatible client appends /chat/completions to this base URL.
+  baseUrl: http://wanqing.internal/api/gateway/v1/endpoints
+  apiKeyEnv: WQ_API_KEY
+  reasoning: true
+  contextWindow: 1048576
+  maxTokens: 16384
+
+runtime:
+  thinkingLevel: medium
+  artifactRoot: .xuan-shu/runs
+  scratchRoot: .xuan-shu/work
+  maxTurns: 60
+  maxToolCalls: 160
+  maxRuntimeMs: 1200000
+  modelMinIntervalMs: 7500
+  modelRequestsPerMinute: 48
+  modelTokensPerMinute: 480000
+  modelMaxRetryDelayMs: 180000
+  maxActionsWithoutCheckpoint: 6
+  maxRepeatedAction: 3
+  maxOutputBytes: 65536
+  maxImageBytes: 5242880
+  maxImageObservations: 8
+  maxScratchFileBytes: 1048576
+  finalizationReserveMs: 120000
+  commandTimeoutMs: 30000
+  httpTimeoutMs: 15000
+  maxHttpRequests: 40
+  maxTcpSessions: 8
+  maxTcpBytes: 1048576
+  sandbox:
+    socketPath: tcp://127.0.0.1:7320
+    connectTimeoutMs: 2000
+
+scope:
+  mode: observe
+  workspaceRoot: ./workspace
+  allowedHosts: []
+  allowedPrograms:
+    - 7z
+    - apktool
+    - base32
+    - base64
+    - bc
+    - binwalk
+    - bzip2
+    - checksec
+    - convert
+    - dcfldd
+    - ecm
+    - exiftool
+    - factor
+    - dirsearch
+    - ffmpeg
+    - ffprobe
+    - file
+    - ffuf
+    - find
+    - fls
+    - flask-unsign
+    - foremost
+    - fsstat
+    - g++
+    - gap
+    - gcc
+    - gdb
+    - gifsicle
+    - gp
+    - gzip
+    - gobuster
+    - hashcat
+    - icat
+    - identify
+    - java
+    - john
+    - jq
+    - make
+    - minimodem
+    - mmls
+    - multimon-ng
+    - nm
+    - objdump
+    - one_gadget
+    - outguess
+    - openssl
+    - patchelf
+    - pickora
+    - pngcheck
+    - python3
+    - qemu-aarch64
+    - qemu-arm
+    - qemu-i386
+    - qemu-x86_64
+    - qrencode
+    - readelf
+    - rg
+    - ropper
+    - ROPgadget
+    - RsaCtfTool
+    - r2
+    - sage
+    - seccomp-tools
+    - scalpel
+    - sox
+    - soxi
+    - sqlite3
+    - steghide
+    - stegseek
+    - stegsnow
+    - strings
+    - strace
+    - tar
+    - tesseract
+    - testdisk
+    - tshark
+    - tsk_recover
+    - unzip
+    - vol
+    - xfs_db
+    - xfs_repair
+    - xxd
+    - xz
+    - z3
+    - zbarimg
+    - zip
+    - zsteg
+    - cado-nfs
+    - flatter
+    - zstd
+    - addr2line
+    - c++filt
+    - gdb-multiarch
+    - jadx
+    - ltrace
+    - objcopy
+    - pwn
+    - rabin2
+    - rafind2
+    - ragg2
+    - rax2
+
+profile:
+  id: general-ctf
+  preferredExecutor: sandbox
+  approvalPolicy: never
+  requiredCapabilities:
+    - workspace-read
+    - scratch-read
+    - scratch-write
+    - abort
+  toolAllowlist:
+    - submit_plan
+    - checkpoint
+    - record_finding
+    - record_lesson
+    - finish_task
+    - list_files
+    - read_file
+    - inspect_artifact
+    - extract_archive
+    - search_artifact
+    - observe_image
+    - list_scratch_files
+    - read_scratch_file
+    - write_scratch_file
+    - run_command
+    - web_collect_baseline
+    - web_knowledge_lookup
+    - web_compare_responses
+    - web_timing_stats
+    - http_request
+    - browser
+    - tcp_open
+    - tcp_send
+    - tcp_receive
+    - tcp_close
+    - read_shared_evidence
+    - publish_shared_evidence
+  contextPolicy:
+    compactAtRatio: 0.75
+    keepRecentTokens: 100000
+    maxSummaryChars: 12000
+
+connectors: []
+
+server:
+  host: 127.0.0.1
+  port: 7318
+  tokenEnv: XUANSHU_SERVER_TOKEN
+
+arena:
+  enabled: true
+  baseUrl: https://www.nssctf.cn
+  tokenEnv: NSSCTF_AGENT_TOKEN
+  timeoutMs: 15000
+  maxResponseBytes: 262144
+  allowedCategories:
+    - crypto
+    - misc
+  maxCategorySkips: 10
+
+questionBank:
+  enabled: true
+  rootEnv: XUANSHU_QUESTION_BANK_ROOT
+  listFiles:
+    - task_list_crypto.txt
+    - task_list_misc.txt
+  maxQuestions: 20

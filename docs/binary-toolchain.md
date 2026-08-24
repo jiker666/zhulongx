@@ -29,6 +29,22 @@ before the runtime adds a program to the agent prompt.
 
 ## Local Fallback
 
+The TSec Wanqing profile may use a host-backed Miniforge interpreter instead
+of the Docker image. Because each command runs with `HOME` set to its run
+scratch directory, packages installed only under the operator's `~/.local`
+site are intentionally invisible. Before starting a host-backed sandbox,
+install the reviewed core requirements into the interpreter's own
+site-packages:
+
+```bash
+XUANSHU_CTF_PYTHON=/Users/j1k3r/miniforge3/bin/python3 \
+  sh tools/ctf/install-local-python-core.sh
+```
+
+The sandbox health endpoint verifies configured Python modules with that same
+isolated `HOME` and reports missing imports before an agent run starts. Task
+runs never invoke `pip`, `conda`, or another package manager.
+
 When the operator-selected sandbox image is unavailable, the runtime still has
 two bounded artifact capabilities. `extract_archive` extracts ZIP entries only
 into the current run scratch root, rejecting traversal and symbolic-link paths;

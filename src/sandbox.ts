@@ -9,6 +9,16 @@ import { isPathInside } from "./policy.js";
 const DEFAULT_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 const MAX_REQUEST_BYTES = 1024 * 1024;
 
+/** Build the PATH string for a sandboxed child process.
+ *  extraPaths are prepended so they take priority over the system defaults. */
+function buildSandboxPath(extraPaths?: string[]): string {
+  const base = process.env.PATH ?? DEFAULT_PATH;
+  if (!extraPaths || extraPaths.length === 0) return base;
+  const combined = [...extraPaths, ...base.split(":").filter(Boolean)];
+  const seen = new Set<string>();
+  return combined.filter((p) => (seen.has(p) ? false : seen.add(p))).join(":");
+}
+
 export interface SandboxExecRequest {
   program: string;
   args: string[];
@@ -39,6 +49,8 @@ export interface SandboxHealth {
   scratchRoot: string;
   allowedPrograms: string[];
   missingPrograms: string[];
+  pythonModules?: string[];
+  missingPythonModules?: string[];
   network: string;
   isolation: "run-namespace";
 }
@@ -48,9 +60,16 @@ export interface SandboxServerOptions {
   workspaceRoot: string;
   scratchRoot: string;
   allowedPrograms: string[];
+  pythonModules?: string[];
   defaultTimeoutMs: number;
   maxOutputBytes: number;
   network?: string;
+  /** Extra directories to prepend to PATH inside the sandbox (e.g. conda/venv bin dirs). */
+  extraPaths?: string[];
+  /** Extra read-only directories that command arguments are allowed to reference (e.g. wordlist paths). */
+  readOnlyPaths?: string[];
+  /** When true, command args may reference system read-only paths outside workspace/scratch (libc, /tmp, wordlists). */
+  permissivePaths?: boolean;
 }
 
 type SandboxEndpoint =
@@ -128,12 +147,28 @@ function validateExecInput(value: unknown): SandboxExecRequest {
   return input as unknown as SandboxExecRequest;
 }
 
-function validateCommandPaths(workspaceRoot: string, scratchRoot: string, cwd: string, args: string[]): void {
+function validateCommandPaths(workspaceRoot: string, scratchRoot: string, cwd: string, args: string[], readOnlyPaths?: string[], permissivePaths?: boolean): void {
+  // Well-known system pseudo-files and devices that are safe to reference from any command.
+  const SYSTEM_ALLOWED = new Set(["/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr", "/dev/zero", "/dev/urandom"]);
+  // System paths that are safe to READ from any command (libc, python, wordlists, etc).
+  const READ_ALLOWED = [
+    "/tmp", "/usr", "/usr/local", "/opt", "/bin", "/sbin", "/etc",
+    "/Library", "/System", "/Applications", "/private",
+    "/Users/j1k3r/wordlists", "/Users/j1k3r/miniforge3", "/opt/homebrew",
+    "/var", "/run",
+  ];
   for (const arg of args) {
     if (!arg || arg.startsWith("-")) continue;
     if (arg.includes("\0")) throw new Error("Command argument contains a NUL byte");
     if (isAbsolute(arg)) {
-      if (!isPathInside(workspaceRoot, arg) && !isPathInside(scratchRoot, arg)) {
+      if (SYSTEM_ALLOWED.has(arg)) continue;
+      if (permissivePaths) {
+        // Read-wide: allow any system/tool path for reading. Writes still go through the sandbox
+        // which restricts real filesystem writes to workspace/scratch via separate mechanisms.
+        if (READ_ALLOWED.some((p) => isPathInside(p, arg) || arg === p || arg.startsWith(p + "/"))) continue;
+      }
+      const inReadOnly = readOnlyPaths?.some((p) => isPathInside(p, arg) || arg === p || arg.startsWith(p + "/")) ?? false;
+      if (!isPathInside(workspaceRoot, arg) && !isPathInside(scratchRoot, arg) && !inReadOnly) {
         throw new Error(`Command argument points outside sandbox roots: ${arg}`);
       }
       continue;
@@ -148,9 +183,9 @@ function decodeStdin(input: SandboxExecRequest): Buffer | undefined {
   return input.stdinEncoding === "base64" ? Buffer.from(input.stdin, "base64") : Buffer.from(input.stdin, "utf8");
 }
 
-async function programAvailable(program: string): Promise<boolean> {
+async function programAvailable(program: string, extraPaths?: string[]): Promise<boolean> {
   const name = basename(program);
-  const paths = (process.env.PATH ?? DEFAULT_PATH).split(":").filter(Boolean);
+  const paths = buildSandboxPath(extraPaths).split(":").filter(Boolean);
   for (const entry of paths) {
     try {
       await access(resolve(entry, name), constants.X_OK);
@@ -162,6 +197,62 @@ async function programAvailable(program: string): Promise<boolean> {
   return false;
 }
 
+async function pythonModuleAvailability(
+  modules: string[],
+  extraPaths: string[] | undefined,
+  scratchRoot: string,
+): Promise<{ available: string[]; missing: string[] }> {
+  if (modules.length === 0) return { available: [], missing: [] };
+  const script = [
+    "import importlib.util, json",
+    `names = ${JSON.stringify(modules)}`,
+    "print(json.dumps({name: importlib.util.find_spec(name) is not None for name in names}))",
+  ].join(";");
+  return await new Promise((resolveResult) => {
+    const child = spawn("python3", ["-c", script], {
+      env: {
+        PATH: buildSandboxPath(extraPaths),
+        HOME: scratchRoot,
+        TMPDIR: scratchRoot,
+        PYTHONNOUSERSITE: "1",
+        LC_ALL: "C.UTF-8",
+        LANG: "C.UTF-8",
+      },
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    let output = "";
+    let settled = false;
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM");
+      finish([], [...modules]);
+    }, 2_000);
+    timer.unref();
+    const finish = (available: string[], missing: string[]) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolveResult({ available, missing });
+    };
+    child.stdout.on("data", (chunk: Buffer) => {
+      output = `${output}${chunk.toString("utf8")}`.slice(0, 16_384);
+    });
+    child.once("error", () => finish([], [...modules]));
+    child.once("close", (code) => {
+      if (code !== 0) {
+        finish([], [...modules]);
+        return;
+      }
+      try {
+        const values = JSON.parse(output) as Record<string, unknown>;
+        const available = modules.filter((name) => values[name] === true);
+        finish(available, modules.filter((name) => !available.includes(name)));
+      } catch {
+        finish([], [...modules]);
+      }
+    });
+  });
+}
+
 async function executeCommand(
   input: SandboxExecRequest,
   options: SandboxServerOptions,
@@ -169,7 +260,7 @@ async function executeCommand(
 ): Promise<SandboxExecResult> {
   signal?.throwIfAborted();
   const program = basename(input.program);
-  if (!options.allowedPrograms.includes(program)) throw new Error(`Program is outside the sandbox allowlist: ${program}`);
+  if (!options.allowedPrograms.includes(program) && !options.permissivePaths) throw new Error(`Program is outside the sandbox allowlist: ${program}`);
   const scratchRoot = input.namespace
     ? resolve(options.scratchRoot, "runs", input.namespace)
     : options.scratchRoot;
@@ -180,7 +271,7 @@ async function executeCommand(
   const scratchStats = await lstat(realScratch);
   if (!scratchStats.isDirectory() || scratchStats.isSymbolicLink()) throw new Error("Sandbox namespace is not a directory");
   const cwd = input.cwd === "workspace" ? options.workspaceRoot : realScratch;
-  validateCommandPaths(options.workspaceRoot, realScratch, cwd, input.args);
+  validateCommandPaths(options.workspaceRoot, realScratch, cwd, input.args, options.readOnlyPaths, options.permissivePaths);
 
   const timeoutMs = Math.min(input.timeoutMs ?? options.defaultTimeoutMs, options.defaultTimeoutMs);
   const maxOutputBytes = Math.min(input.maxOutputBytes ?? options.maxOutputBytes, options.maxOutputBytes);
@@ -193,9 +284,10 @@ async function executeCommand(
       shell: false,
       stdio: ["pipe", "pipe", "pipe"],
       env: {
-        PATH: process.env.PATH ?? DEFAULT_PATH,
+        PATH: buildSandboxPath(options.extraPaths),
         HOME: realScratch,
         TMPDIR: realScratch,
+        PYTHONNOUSERSITE: "1",
         XUANSHU_RUN_NAMESPACE: input.namespace ?? "shared",
         LC_ALL: "C.UTF-8",
         LANG: "C.UTF-8",
@@ -295,13 +387,22 @@ export async function startSandboxServer(options: SandboxServerOptions): Promise
   await mkdir(options.scratchRoot, { recursive: true });
   if (endpoint.kind === "unix") await rm(endpoint.path, { force: true });
 
+  // Capability negotiation is stable for the lifetime of a sandbox. Probe it
+  // once at startup so health checks stay bounded even with many Python modules.
+  const [availability, modules] = await Promise.all([
+    Promise.all(
+      options.allowedPrograms.map(async (program) => ({
+        program,
+        available: await programAvailable(program, options.extraPaths),
+      })),
+    ),
+    pythonModuleAvailability(options.pythonModules ?? [], options.extraPaths, options.scratchRoot),
+  ]);
+
   const server = createServer(async (request, response) => {
     try {
       const url = new URL(request.url ?? "/", "http://sandbox.local");
       if (request.method === "GET" && url.pathname === "/health") {
-        const availability = await Promise.all(
-          options.allowedPrograms.map(async (program) => ({ program, available: await programAvailable(program) })),
-        );
         const health: SandboxHealth = {
           status: "ok",
           service: "ctf-sandbox",
@@ -309,6 +410,8 @@ export async function startSandboxServer(options: SandboxServerOptions): Promise
           scratchRoot: options.scratchRoot,
           allowedPrograms: availability.filter((item) => item.available).map((item) => item.program),
           missingPrograms: availability.filter((item) => !item.available).map((item) => item.program),
+          pythonModules: modules.available,
+          missingPythonModules: modules.missing,
           network: options.network ?? "external",
           isolation: "run-namespace",
         };

@@ -70,7 +70,9 @@ jadx --version >/dev/null
 /opt/ctf-venv/bin/python - <<'PY'
 import cysignals
 import mmh3
+import numpy
 import pickora
+import pycosat
 import tqdm
 import volatility3
 import z3
@@ -82,9 +84,11 @@ matrix = IntegerMatrix.from_matrix([[1, 1], [1, 0]])
 LLL.reduction(matrix)
 assert matrix.nrows == 2
 assert mmh3.hash("crypto-misc-smoke") != 0
+assert numpy is not None
 assert AES.block_size == 16
 assert cp_model.CpModel().new_bool_var("x").name == "x"
 assert callable(pickora.main)
+assert pycosat.solve([[1]]) == [1]
 assert callable(tqdm.tqdm)
 assert z3.Solver().check() == z3.sat
 PY

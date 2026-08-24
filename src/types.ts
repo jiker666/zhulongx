@@ -31,6 +31,9 @@ export interface RuntimeConfig {
   modelMaxRetryDelayMs: number;
   maxActionsWithoutCheckpoint: number;
   maxRepeatedAction: number;
+  // When true, PolicyEngine skips flow-control gates (checkpoint requirements,
+  // repeated-action limits) and path checks that would otherwise slow exploration.
+  policyPermissive: boolean;
   maxOutputBytes: number;
   maxImageBytes: number;
   maxImageObservations: number;
@@ -71,6 +74,12 @@ export interface ScopeConfig {
   workspaceRoot: string;
   allowedHosts: string[];
   allowedPrograms: string[];
+  /** Extra directories prepended to PATH inside the sandbox (e.g. conda/venv bin dirs). */
+  extraPaths?: string[];
+  /** Python modules that the operator expects in the selected sandbox interpreter. */
+  pythonModules?: string[];
+  /** Extra read-only directories that command arguments may reference (e.g. wordlists). */
+  readOnlyPaths?: string[];
 }
 
 export interface ServerConfig {
@@ -87,6 +96,15 @@ export interface ArenaConfig {
   maxResponseBytes: number;
   allowedCategories?: string[];
   maxCategorySkips?: number;
+}
+
+export interface DascConfig {
+  enabled: boolean;
+  baseUrl: string;
+  accessKeyEnv: string;
+  timeoutMs: number;
+  maxResponseBytes: number;
+  maxRequests: number;
 }
 
 export interface QuestionBankConfig {
@@ -111,6 +129,7 @@ export interface AppConfig {
   scope: ScopeConfig;
   server: ServerConfig;
   arena?: ArenaConfig;
+  dasc?: DascConfig;
   questionBank?: QuestionBankConfig;
   webReasoning?: WebReasoningConfig;
   browser?: import("./web-reasoning/browser/types.js").BrowserRuntimeConfig;
