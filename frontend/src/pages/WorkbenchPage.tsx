@@ -53,14 +53,14 @@ function JobResult({ job, onStop, stopping }: { job: ManualJobSnapshot; onStop: 
   return (
     <article className="surface-panel manual-job-panel">
       <div className="manual-job-header">
-        <div><span className="section-label">BATCH / {job.id.slice(0, 8)}</span><h3>{jobStatusLabels[job.status] ?? job.status}</h3><p>{formatDateTime(job.createdAt)} · 并发 {job.concurrency} · 每题 {job.raceAgents} Agent{job.writeup ? " · 生成 WP" : ""}</p></div>
+        <div><span className="section-label">BATCH / {job.id.slice(0, 8)}</span><h3>{jobStatusLabels[job.status] ?? job.status}</h3><p>{formatDateTime(job.createdAt)} · 并发 {job.concurrency} · 每项 {job.raceAgents} Agent{job.writeup ? " · 生成报告" : ""}</p></div>
         <div className="manual-job-operations"><div className="job-progress-value"><strong>{settled}</strong><span>/{job.total}</span></div>{active && <Button className="button danger-button compact-action" loading={stopping} onClick={() => onStop(job.id)}><CircleStop size={14} aria-hidden="true" />停止</Button>}</div>
       </div>
       <div className="progress-track"><span style={{ width: `${progress}%` }} /></div>
       <div className="manual-task-list">
         {job.tasks.map((task) => {
           const key = `${job.id}-${task.index}`;
-          return <div className="manual-task-row" key={key}><span className="manual-task-index">{String(task.index + 1).padStart(2, "0")}</span><span className="manual-task-copy"><strong>{task.task}</strong><small>{task.race ? `${task.race.agentCount} Agent 竞速${task.race.winnerAgent === undefined ? "" : ` · Agent ${task.race.winnerAgent + 1} 胜出`}` : task.run ? `${task.run.turns} 回合 · ${task.run.toolCalls} 工具调用` : "等待运行"}</small>{task.error && <em>{task.error}</em>}{task.flag && <span className="flag-result"><span>FLAG</span><code>{task.flag}</code><IconButton className="icon-button" label="复制 FLAG" onClick={() => void copy(task.flag!, `${key}-flag`)}>{copied === `${key}-flag` ? <Check size={15} /> : <Copy size={15} />}</IconButton></span>}{task.writeup && <details className="writeup-result"><summary><FileText size={14} />解题报告</summary><div className="writeup-toolbar"><IconButton className="icon-button bordered" label="复制解题报告" onClick={() => void copy(task.writeup!, `${key}-wp`)}>{copied === `${key}-wp` ? <Check size={15} /> : <Copy size={15} />}</IconButton></div><pre>{task.writeup}</pre></details>}</span><span className="manual-task-actions"><Badge tone={taskTone(task.status)}>{taskStatusLabels[task.status]}</Badge>{task.runId && <Link className="icon-link" to={`/runs/${task.runId}`} title="查看运行轨迹" aria-label="查看运行轨迹"><ExternalLink size={15} /></Link>}</span></div>;
+          return <div className="manual-task-row" key={key}><span className="manual-task-index">{String(task.index + 1).padStart(2, "0")}</span><span className="manual-task-copy"><strong>{task.task}</strong><small>{task.race ? `${task.race.agentCount} Agent 竞速${task.race.winnerAgent === undefined ? "" : ` · Agent ${task.race.winnerAgent + 1} 胜出`}` : task.run ? `${task.run.turns} 回合 · ${task.run.toolCalls} 工具调用` : "等待运行"}</small>{task.error && <em>{task.error}</em>}{task.submission && <span className="submission-result"><span>结果</span><code>{task.submission}</code><IconButton className="icon-button" label="复制结果" onClick={() => void copy(task.submission!, `${key}-submission`)}>{copied === `${key}-submission` ? <Check size={15} /> : <Copy size={15} />}</IconButton></span>}{task.writeup && <details className="writeup-result"><summary><FileText size={14} />任务报告</summary><div className="writeup-toolbar"><IconButton className="icon-button bordered" label="复制任务报告" onClick={() => void copy(task.writeup!, `${key}-report`)}>{copied === `${key}-report` ? <Check size={15} /> : <Copy size={15} />}</IconButton></div><pre>{task.writeup}</pre></details>}</span><span className="manual-task-actions"><Badge tone={taskTone(task.status)}>{taskStatusLabels[task.status]}</Badge>{task.runId && <Link className="icon-link" to={`/runs/${task.runId}`} title="查看运行轨迹" aria-label="查看运行轨迹"><ExternalLink size={15} /></Link>}</span></div>;
         })}
       </div>
     </article>
@@ -117,7 +117,7 @@ export function WorkbenchPage() {
   return (
     <div className="page workbench-page">
       <div className="page-heading">
-        <div><div className="eyebrow">HUMAN + AGENT</div><h1>任务工作台</h1><p>组织手工任务、附件、并发批次与本地题库评测。</p></div>
+        <div><div className="eyebrow">HUMAN + AGENT</div><h1>任务工作台</h1><p>组织安全任务、附件、并发批次与 operator 配置的本地任务集。</p></div>
         <div className="heading-actions"><span className={`active-job-count ${activeJobs.length ? "active" : ""}`}><Users size={15} aria-hidden="true" />{activeJobs.length ? `${activeJobs.length} 个活动批次` : "当前无活动批次"}</span></div>
       </div>
 
@@ -132,28 +132,28 @@ export function WorkbenchPage() {
           {files.length > 0 && <div className="file-chip-list">{files.map((file, index) => <span key={`${file.name}-${file.size}-${index}`}>{file.name}<small>{formatBytes(file.size)}</small><button type="button" aria-label={`移除 ${file.name}`} title={`移除 ${file.name}`} onClick={() => setFiles((items) => items.filter((_, itemIndex) => itemIndex !== index))}><X size={13} /></button></span>)}</div>}
           <div className="composer-settings">
             <label><span className="field-label">批次并发</span><input type="number" min={1} max={8} value={concurrency} onChange={(event) => setConcurrency(boundedInteger(event.target.value, concurrency, 1, 8))} /></label>
-            <label><span className="field-label">每题 Agent</span><input type="number" min={1} max={8} value={raceAgents} onChange={(event) => setRaceAgents(boundedInteger(event.target.value, raceAgents, 1, 8))} /></label>
-            <label className="toggle-control"><span><strong>生成 WP</strong><small>输出可复核报告</small></span><input type="checkbox" checked={writeup} onChange={(event) => setWriteup(event.target.checked)} /></label>
-            <div className="submit-control">{submitJob.isPending ? <Button className="button danger-button" type="button" onClick={() => submissionController.current?.abort()}><CircleStop size={15} aria-hidden="true" />取消提交</Button> : <Button className="button submit-task-button" type="submit" disabled={Boolean(submissionIssue)} disabledReason={submissionIssue}><Send size={16} aria-hidden="true" />提交解题</Button>}</div>
+            <label><span className="field-label">每项 Agent</span><input type="number" min={1} max={8} value={raceAgents} onChange={(event) => setRaceAgents(boundedInteger(event.target.value, raceAgents, 1, 8))} /></label>
+            <label className="toggle-control"><span><strong>生成报告</strong><small>输出可复核结论</small></span><input type="checkbox" checked={writeup} onChange={(event) => setWriteup(event.target.checked)} /></label>
+            <div className="submit-control">{submitJob.isPending ? <Button className="button danger-button" type="button" onClick={() => submissionController.current?.abort()}><CircleStop size={15} aria-hidden="true" />取消提交</Button> : <Button className="button submit-task-button" type="submit" disabled={Boolean(submissionIssue)} disabledReason={submissionIssue}><Send size={16} aria-hidden="true" />提交任务</Button>}</div>
           </div>
           <div className={`composer-validation ${submissionIssue && taskText.trim() ? "invalid" : ""}`}>{submissionIssue && taskText.trim() ? submissionIssue : `${parsedTasks.length || 0} 项任务 · ${files.length} 个附件 · 最大 8 并发`}</div>
           {formError && <div className="inline-error">{formError}</div>}
         </form>
 
         <section className="surface-panel question-bank-panel">
-          <div className="panel-heading"><div><span className="section-label">BENCHMARK BANK</span><h2>本地题库</h2></div><Database size={19} aria-hidden="true" /></div>
+          <div className="panel-heading"><div><span className="section-label">LOCAL CORPUS</span><h2>本地任务集</h2></div><Database size={19} aria-hidden="true" /></div>
           {bank.isError ? <ErrorState message={bank.error.message} onRetry={() => void bank.refetch()} /> : questionBank ? <>
-            <div className="bank-summary"><div><strong>{solvedCount}<span>/{questionBank.count}</span></strong><small>已通过</small></div><div className="bank-progress-copy"><span>{progress}%</span><div className="progress-track"><span style={{ width: `${progress}%` }} /></div><small>{pendingCount} 题待处理</small></div></div>
-            <Button className="button question-bank-action" disabled={!questionBank.configured || pendingCount === 0 || activeJobs.length > 0} loading={startBank.isPending} onClick={() => startBank.mutate()} disabledReason={!questionBank.configured ? questionBank.error ?? "题库未配置" : pendingCount === 0 ? "题库已全部通过" : activeJobs.length > 0 ? "已有批次正在运行" : undefined}>{pendingCount ? <><Play size={16} aria-hidden="true" />处理未完成题目</> : <><Check size={16} aria-hidden="true" />已全部通过</>}</Button>
+            <div className="bank-summary"><div><strong>{solvedCount}<span>/{questionBank.count}</span></strong><small>已完成</small></div><div className="bank-progress-copy"><span>{progress}%</span><div className="progress-track"><span style={{ width: `${progress}%` }} /></div><small>{pendingCount} 项待处理</small></div></div>
+            <Button className="button question-bank-action" disabled={!questionBank.configured || pendingCount === 0 || activeJobs.length > 0} loading={startBank.isPending} onClick={() => startBank.mutate()} disabledReason={!questionBank.configured ? questionBank.error ?? "任务集未配置" : pendingCount === 0 ? "任务集已全部完成" : activeJobs.length > 0 ? "已有批次正在运行" : undefined}>{pendingCount ? <><Play size={16} aria-hidden="true" />处理未完成任务</> : <><Check size={16} aria-hidden="true" />已全部完成</>}</Button>
             {startBank.error && <div className="inline-error">{startBank.error.message}</div>}
-            <div className="question-list">{questionBank.questions?.map((question) => <div className="question-row" key={question.id}><span className={`question-status-mark ${question.status}`} aria-hidden="true" /><span><strong>{question.title}</strong><small>{question.category.toUpperCase()} · {question.attachmentCount} 个附件{question.instanceAvailable ? " · 可启动实例" : ""}</small></span><Badge tone={question.status === "solved" ? "completed" : "neutral"}>{question.status === "solved" ? "已通过" : "待处理"}</Badge></div>)}</div>
+            <div className="question-list">{questionBank.questions?.map((question) => <div className="question-row" key={question.id}><span className={`question-status-mark ${question.status}`} aria-hidden="true" /><span><strong>{question.title}</strong><small>{question.category.toUpperCase()} · {question.attachmentCount} 个附件{question.instanceAvailable ? " · 可启动实例" : ""}</small></span><Badge tone={question.status === "solved" ? "completed" : "neutral"}>{question.status === "solved" ? "已完成" : "待处理"}</Badge></div>)}</div>
           </> : <LoadingState />}
         </section>
       </div>
 
       <section className="batch-section">
         <div className="section-heading-row"><div><span className="section-label">BATCH HISTORY</span><h2>批量作业</h2></div><span>{jobs.data?.jobs.length ?? 0} 个批次</span></div>
-        {jobs.data?.jobs.length ? <div className="manual-job-list">{jobs.data.jobs.map((job) => <JobResult key={job.id} job={job} onStop={(id) => stop.mutate(id)} stopping={stop.isPending && stop.variables === job.id} />)}</div> : <EmptyState title="尚无批量作业" description="提交任务或启动本地题库后，执行状态会显示在这里。" />}
+        {jobs.data?.jobs.length ? <div className="manual-job-list">{jobs.data.jobs.map((job) => <JobResult key={job.id} job={job} onStop={(id) => stop.mutate(id)} stopping={stop.isPending && stop.variables === job.id} />)}</div> : <EmptyState title="尚无批量作业" description="提交任务或启动本地任务集后，执行状态会显示在这里。" />}
         {stop.error && <div className="inline-error" role="alert">{stop.error.message}</div>}
       </section>
     </div>

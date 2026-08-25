@@ -40,12 +40,6 @@ function pythonModuleArray(value: unknown, label: string): string[] {
   return modules;
 }
 
-function categoryArray(value: unknown, label: string): string[] {
-  const values = stringArray(value, label).map((item) => item.trim().toLowerCase());
-  if (values.some((item) => item.length === 0)) throw new Error(`${label} must not contain empty categories`);
-  return [...new Set(values)];
-}
-
 function stringRecord(value: unknown, label: string): Record<string, string> {
   const record = requireObject(value, label);
   if (Object.values(record).some((item) => typeof item !== "string" || item.length === 0)) {
@@ -61,8 +55,6 @@ function validateConfig(value: unknown, configPath: string): AppConfig {
   const sandbox = requireObject(runtime.sandbox, "runtime.sandbox");
   const scope = requireObject(root.scope, "scope");
   const server = requireObject(root.server, "server");
-  const arena = root.arena === undefined ? undefined : requireObject(root.arena, "arena");
-  const dasc = root.dasc === undefined ? undefined : requireObject(root.dasc, "dasc");
   const questionBank = root.questionBank === undefined ? undefined : requireObject(root.questionBank, "questionBank");
   const webReasoning = root.webReasoning === undefined ? undefined : requireObject(root.webReasoning, "webReasoning");
   const browser = root.browser === undefined ? undefined : requireObject(root.browser, "browser");
@@ -125,7 +117,6 @@ function validateConfig(value: unknown, configPath: string): AppConfig {
         "runtime.maxActionsWithoutCheckpoint",
       ),
       maxRepeatedAction: requireNumber(runtime.maxRepeatedAction, "runtime.maxRepeatedAction"),
-      policyPermissive: runtime.policyPermissive === undefined ? false : Boolean(runtime.policyPermissive),
       maxOutputBytes: requireNumber(runtime.maxOutputBytes, "runtime.maxOutputBytes"),
       maxImageBytes: requireNumber(runtime.maxImageBytes, "runtime.maxImageBytes"),
       maxImageObservations: requireNumber(runtime.maxImageObservations, "runtime.maxImageObservations"),
@@ -162,27 +153,6 @@ function validateConfig(value: unknown, configPath: string): AppConfig {
   };
   if (result.runtime.finalizationReserveMs >= result.runtime.maxRuntimeMs) {
     throw new Error("runtime.finalizationReserveMs must be smaller than runtime.maxRuntimeMs");
-  }
-  if (arena) {
-    result.arena = {
-      enabled: arena.enabled !== undefined ? Boolean(arena.enabled) : true,
-      baseUrl: requireString(arena.baseUrl, "arena.baseUrl").replace(/\/$/, ""),
-      tokenEnv: requireString(arena.tokenEnv, "arena.tokenEnv"),
-      timeoutMs: requireNumber(arena.timeoutMs, "arena.timeoutMs"),
-      maxResponseBytes: requireNumber(arena.maxResponseBytes, "arena.maxResponseBytes"),
-      ...(arena.allowedCategories === undefined ? {} : { allowedCategories: categoryArray(arena.allowedCategories, "arena.allowedCategories") }),
-      maxCategorySkips: arena.maxCategorySkips === undefined ? 10 : requireNumber(arena.maxCategorySkips, "arena.maxCategorySkips"),
-    };
-  }
-  if (dasc) {
-    result.dasc = {
-      enabled: dasc.enabled !== undefined ? Boolean(dasc.enabled) : true,
-      baseUrl: requireString(dasc.baseUrl, "dasc.baseUrl").replace(/\/$/, ""),
-      accessKeyEnv: requireString(dasc.accessKeyEnv, "dasc.accessKeyEnv"),
-      timeoutMs: requireNumber(dasc.timeoutMs, "dasc.timeoutMs"),
-      maxResponseBytes: requireNumber(dasc.maxResponseBytes, "dasc.maxResponseBytes"),
-      maxRequests: dasc.maxRequests === undefined ? 40 : requireNumber(dasc.maxRequests, "dasc.maxRequests"),
-    };
   }
   if (questionBank) {
     const rootPath = questionBank.root === undefined ? undefined : requireString(questionBank.root, "questionBank.root");

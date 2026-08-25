@@ -261,11 +261,11 @@ async function loadInstanceSpec(
 
 function questionTask(question: QuestionBankQuestion): string {
   return [
-    `Solve the authorized local CTF exercise "${question.title}" in category "${question.category}".`,
-    "Use only the attached public challenge materials and the scoped local tools.",
+    `Analyze the authorized local security task "${question.title}" in category "${question.category}".`,
+    "Use only the attached operator-provided materials and the scoped local tools.",
     "Establish the result with reproducible evidence; do not guess or read reference-answer material.",
-    "If the evidence is insufficient or the challenge cannot be completed within the run budget, finish as blocked so the batch can mark this question skipped.",
-    "When solved, finish the task with the exact final answer and a concise verification summary.",
+    "If the evidence is insufficient or the task cannot be completed within the run budget, finish as blocked so the batch can mark this item skipped.",
+    "When completed, finish the task with the exact final result and a concise verification summary.",
   ].join("\n");
 }
 

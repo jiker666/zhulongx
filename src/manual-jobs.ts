@@ -8,7 +8,7 @@ const MAX_CONCURRENCY = 8;
 const MAX_RACE_AGENTS = 8;
 const MAX_JOB_HISTORY = 50;
 const MAX_TASK_PREVIEW = 180;
-const MAX_FLAG_LENGTH = 512;
+const MAX_SUBMISSION_LENGTH = 512;
 const MAX_WRITEUP_LENGTH = 16 * 1024;
 
 export type ManualJobStatus = "queued" | "running" | "stopping" | "completed" | "aborted";
@@ -31,7 +31,7 @@ export interface ManualTaskSnapshot {
   status: ManualTaskStatus;
   attachmentCount: number;
   runId?: string;
-  flag?: string;
+  submission?: string;
   writeup?: string;
   error?: string;
   runAttempts?: number;
@@ -147,7 +147,7 @@ function taskWithOutputContract(
   ];
   const contract = [
     "Operator output contract:",
-    "- When completed, call finish_task and set submission to the exact final answer only (for example, the exact flag), without explanation or Markdown wrappers.",
+    "- When completed, call finish_task and set submission to the exact final result only, without explanation or Markdown wrappers.",
     "- Do not guess an answer. If evidence is insufficient, finish as blocked and describe the blocker.",
     ...(raceAgent
       ? [
@@ -159,8 +159,8 @@ function taskWithOutputContract(
       : []),
     ...(writeup
       ? [
-          "- Set summary to a concise Markdown solution writeup no longer than 12000 characters.",
-          "- The writeup must cover the approach, key evidence, essential commands or scripts, verification, and exact final answer.",
+          "- Set summary to a concise Markdown task report no longer than 12000 characters.",
+          "- The report must cover the approach, key evidence, essential commands or scripts, verification, and exact final result.",
           "- Do not include hidden reasoning, model keys, authorization headers, cookies, credentials, or unrelated environment/configuration values.",
         ]
       : ["- Keep summary concise and include only the result and its verification."]),
@@ -175,23 +175,23 @@ function boundedWriteup(value: string | undefined): string | undefined {
   return `${writeup.slice(0, MAX_WRITEUP_LENGTH - 12)}\n[truncated]`;
 }
 
-function cleanExplicitFlag(value: string): string | undefined {
-  let flag = value.trim();
-  if (flag.length >= 2 && flag.startsWith("`") && flag.endsWith("`")) flag = flag.slice(1, -1).trim();
-  return flag.length > 0 && flag.length <= MAX_FLAG_LENGTH ? flag : undefined;
+function cleanSubmission(value: string): string | undefined {
+  let submission = value.trim();
+  if (submission.length >= 2 && submission.startsWith("`") && submission.endsWith("`")) {
+    submission = submission.slice(1, -1).trim();
+  }
+  return submission.length > 0 && submission.length <= MAX_SUBMISSION_LENGTH ? submission : undefined;
 }
 
-function extractExplicitFlag(state: RunState): string | undefined {
-  if (state.submission) return cleanExplicitFlag(state.submission);
-  const match = state.summary?.match(/(?:^|\n)\s*FLAG\s*[:：=]\s*(.+?)\s*(?:\n|$)/i);
-  return match?.[1] ? cleanExplicitFlag(match[1]) : undefined;
+function extractSubmission(state: RunState): string | undefined {
+  return state.submission ? cleanSubmission(state.submission) : undefined;
 }
 
 function raceWinnerState(state: RunState): boolean {
   if (state.status !== "completed") return false;
-  const flag = extractExplicitFlag(state);
-  if (!flag || state.independentlyVerified !== true) return false;
-  return (state.verification ?? []).some((record) => record.includes(flag));
+  const submission = extractSubmission(state);
+  if (!submission || state.independentlyVerified !== true) return false;
+  return (state.verification ?? []).some((record) => record.includes(submission));
 }
 
 function validateTaskInput(input: unknown, index: number): ManualTaskInput {
@@ -468,8 +468,8 @@ export class ManualJobManager {
                 : "blocked";
             if (valid && !(job.skipBlocked && state.status === "blocked")) delete task.snapshot.error;
             else task.snapshot.error = settled.error ?? "No race agent produced a validated completion";
-            const flag = extractExplicitFlag(state);
-            if (flag) task.snapshot.flag = flag;
+            const submission = extractSubmission(state);
+            if (submission) task.snapshot.submission = submission;
             if (job.writeup) {
               const writeup = boundedWriteup(state.summary);
               if (writeup) task.snapshot.writeup = writeup;

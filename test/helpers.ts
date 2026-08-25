@@ -26,7 +26,6 @@ export function testConfig(root: string): AppConfig {
       modelMaxRetryDelayMs: 120_000,
       maxActionsWithoutCheckpoint: 2,
       maxRepeatedAction: 2,
-      policyPermissive: false,
       maxOutputBytes: 16_384,
       maxImageBytes: 256 * 1024,
       maxImageObservations: 2,
@@ -49,12 +48,5 @@ export function testConfig(root: string): AppConfig {
       allowedPrograms: ["file", "rg"],
     },
     server: { host: "127.0.0.1", port: 0, tokenEnv: "XUANSHU_TEST_SERVER_TOKEN" },
-    arena: {
-      enabled: true,
-      baseUrl: "https://www.nssctf.cn",
-      tokenEnv: "XUANSHU_TEST_ARENA_TOKEN",
-      timeoutMs: 2000,
-      maxResponseBytes: 64 * 1024,
-    },
   };
 }

@@ -223,15 +223,15 @@ describe("XuanShuRuntime", () => {
     expect(getSupportedThinkingLevels(model)).toContain("xhigh");
   });
 
-  it("builds an Anthropic Messages-compatible model for the office Wanqing gateway", () => {
+  it("builds a model for an operator-managed Anthropic-compatible gateway", () => {
     const config = testConfig("/tmp/xuan-anthropic-model");
     config.model = {
       ...config.model,
-      provider: "wanqing-corp",
-      id: "ep-test",
+      provider: "anthropic-compatible",
+      id: "gateway-model",
       api: "anthropic-messages",
-      baseUrl: "https://wanqing-api.corp.kuaishou.com/api/gateway",
-      apiKeyEnv: "TAKUMI_BU_TOKEN",
+      baseUrl: "https://gateway.example.invalid/v1",
+      apiKeyEnv: "MODEL_GATEWAY_KEY",
       reasoning: true,
     };
 
@@ -239,7 +239,7 @@ describe("XuanShuRuntime", () => {
 
     expect(model).toMatchObject({
       api: "anthropic-messages",
-      baseUrl: "https://wanqing-api.corp.kuaishou.com/api/gateway",
+      baseUrl: "https://gateway.example.invalid/v1",
       compat: {
         supportsEagerToolInputStreaming: false,
         supportsLongCacheRetention: false,

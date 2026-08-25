@@ -25,7 +25,7 @@ flowchart LR
     F --> L
     L --> V["可视化决策审计与人工复核"]
     F --> E["经验候选"]
-    E -->|平台验真成功| K["通用经验库"]
+    E -->|操作员或独立验证器确认| K["通用经验库"]
     K --> A
     A --> C["Timeline / Context 双投影"]
     A --> Q["持久 Agent / Workflow"]
@@ -48,7 +48,7 @@ flowchart LR
 | `sandbox.ts` | Unix socket sidecar 协议、结构化命令执行、输出和超时上限 | 不持有模型密钥或出网授权 |
 | `audit.ts` | 顺序化写入和 SHA-256 前向哈希校验 | 不替代外部不可篡改存储 |
 | `trace.ts` / `dashboard.ts` | 将审计记录投影为外显决策时间线，接受人工纠错 | 不展示或推断隐藏思维链 |
-| `experience.ts` | 脱敏、平台验真后晋升、按类别检索和人工启停通用经验 | 不保存题号、flag、固定地址或未经验证的答案 |
+| `experience.ts` | 脱敏、operator 验真后晋升、按类别检索和人工启停通用经验 | 不保存题号、固定答案、地址或未经验证的结论 |
 | `skill-catalog.ts` | 将固定版本的开源 CTF skill 归一化为类别、技术族和 pivot 信号 | 不执行上游脚本、不继承外部工具权限、不把上游内容当证据 |
 | `server.ts` | 健康检查、异步运行、鉴权、审计台与复核 API | 不允许远程扩大配置范围 |
 | `manual-jobs.ts` | 有界批处理与同题多 agent 竞速；首个通过验证闸门的 run 胜出并取消同题其余 run | 不改变任务 scope，不让未经验证的 submission 结束竞速 |
@@ -69,14 +69,14 @@ flowchart LR
 5. 轮次、工具、HTTP、TCP、时间、scratch 文件和输出量均有独立上限；任何一个上限都不能由模型提高。
 6. 每个模型请求（包括并发运行的首轮请求）都经过进程共享的滚动 RPM/TPM 门控；请求按估算上下文和最大输出预算预约额度，等待与预约写入审计链，并接受 `AbortSignal` 终止。
 7. CTF 任务先做通用 triage，再根据证据在 web、pwn、crypto、reverse、forensics、malware、OSINT、misc、AI/ML 之间 pivot。
-8. Arena 完成前必须调用 `record_lesson` 记录通用经验候选；只有平台接受提交后才写入经验库，后续运行仍必须重新验证。
+8. 运行可调用 `record_lesson` 记录通用经验候选；只有 operator 明确验真后才可写入经验库，后续运行仍必须重新验证。
 9. 任务类别命中时只加载一个经过审查且长度受限的 skill 索引。它与 playbook 一样只是决策提示，任何行动仍需经过工具注册表和 `PolicyEngine`。
 10. `observe_image` 与其他调查动作一样经过 `PolicyEngine`，检查安全相对路径、单图字节上限和 run 级观察次数；其副作用仅为读取文件、返回模型上下文，并追加不含像素的 `image.observed` 审计事件。
-11. Arena 完成要求候选答案出现在至少两条验证记录中，并同时绑定到 confirmed hypothesis、高置信度 finding 和空的 remainingRisks；`independentlyVerified` 不能单独充当证据。
-12. Arena 可由 operator-owned `arena.allowedCategories` 限定题型；不在 allowlist 的题目不会启动模型、不会自动放弃，作业会停止并保留当前题供 operator 调整配置后重试，避免触发平台 early-abandon 冷却。
-13. 持续作业会把错误提交或阻塞题归档到 `.xuan-shu/wrong-questions/`，保留题面、失败原因、运行统计和附件副本；记录不包含模型凭据、会话 Cookie、Authorization 或隐藏推理。
-14. 同题竞速共享题目准备结果和进程内 `SharedEvidenceBoard`，不共享可变工作目录；每个 agent 使用独立 run/scratch。证据板最多 64 条、64 KiB，只保存脱敏后的 fact/candidate/dead-end，并记录来源 run。读写工具属于策略控制的调查动作，消耗工具与 checkpoint 预算并写入 `collaboration.evidence_*` 审计事件；共享内容必须独立复核。
-15. winner 必须提供结构化 submission、`independentlyVerified=true` 和包含该 submission 的 verification 记录，随后统一停止并等待 loser 收尾，避免后台 run 或题目实例泄漏。
+11. `finish_task` 使用结构化 `submission` 承载可选最终结果；核心运行时不假定 Flag、报告或平台答案格式，也不从自由文本猜测结果。
+12. operator 可配置本地任务集和分类；公开默认配置不包含语料路径、题目 ID、平台凭据或答案元数据。
+13. 批量作业为每项任务启用 `attachments-only` 工作区，并在停止时通过 `AbortSignal` 终止尚未完成的运行。
+14. 多 Agent 竞速共享任务准备结果和进程内 `SharedEvidenceBoard`，不共享可变工作目录；每个 agent 使用独立 run/scratch。证据板最多 64 条、64 KiB，只保存脱敏后的 fact/candidate/dead-end，并记录来源 run。读写工具属于策略控制的调查动作，消耗工具与 checkpoint 预算并写入 `collaboration.evidence_*` 审计事件；共享内容必须独立复核。
+15. winner 必须提供结构化 submission、`independentlyVerified=true` 和包含该 submission 的 verification 记录，随后统一停止并等待其他运行收尾，避免后台 run 或任务实例泄漏。
 
 ## 隔离与可观测性
 
@@ -135,9 +135,9 @@ Core profile 固定安装并 smoke-test Radare2 6.2.0、JADX 1.5.5、Pwntools、
 
 这些能力是 sandbox programs，不是新的核心 AgentTool。它们只在无外网 sidecar 内通过 `run_command` 执行，并接受 `PolicyEngine` 的 operator-owned 程序白名单、总工具调用预算、重复动作与 checkpoint 门禁。读取型命令只观察输入；转换、OCR、隐写提取和 Pickora 可在本次运行的 scratch 命名空间内创建文件；分解、约束、OCR、音频和密码尝试可能消耗较多 CPU。所有命令受统一超时、AbortSignal 终止和 stdout/stderr 字节上限约束，每次调用都会写入 `policy.decision` 与 `tool.result` 审计事件。
 
-镜像构建会运行 `tools/ctf/verify-core-tools.sh`：检查声明的 CLI、导入关键 Python 模块，并执行最小 LLL、CP-SAT 与 Z3 smoke test。heavy 构建额外验证固定源码工具、SageMath 和关键 Python 模块；它体积较大，且分解、符号执行和 ML 工作负载仍受同一命令超时与资源预算。远程交互依然只能使用作用域内的 HTTP/TCP AgentTool；题目依赖中的 netcat 不会因此进入 Arena/default 程序白名单，运行中也禁止临时调用包管理器扩展能力。
+镜像构建会运行 `tools/ctf/verify-core-tools.sh`：检查声明的 CLI、导入关键 Python 模块，并执行最小 LLL、CP-SAT 与 Z3 smoke test。heavy 构建额外验证固定源码工具、SageMath 和关键 Python 模块；它体积较大，且分解、符号执行和 ML 工作负载仍受同一命令超时与资源预算。远程交互依然只能使用作用域内的 HTTP/TCP AgentTool；任务依赖中的额外程序不会因此进入公共配置的程序白名单，运行中也禁止临时调用包管理器扩展能力。
 
-当前默认、Arena 和 Wanqing NSS 配置将 Arena 题型 allowlist 设置为 `crypto`、`misc`；核心循环仍不认识题目专属逻辑，其他部署可通过省略该 operator 配置恢复全题型模式。
+公开默认配置保持领域中立且不启用本地任务集。operator 可在被 Git 忽略的私有配置中启用语料、分类和实例适配，但不能修改核心任务循环或扩大单次运行 scope。
 
 开源 skill 来源、固定版本与内容筛选规则见 [`skills/README.md`](../skills/README.md)。外部 skill 的网络、shell 或安装权限不会进入运行时。
 

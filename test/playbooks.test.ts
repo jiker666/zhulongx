@@ -12,7 +12,7 @@ describe("category capability playbooks", () => {
     expect(crypto).toContain("infer any wrapper only from direct evidence");
     expect(crypto).toContain("CURATED CTF SKILL INDEX (ctf-crypto)");
     expect(crypto).toContain("PolicyEngine scope/budgets");
-    expect(crypto).not.toMatch(/NSSCTF\{|0x[0-9a-f]+/i);
+    expect(crypto).not.toMatch(/[A-Za-z][A-Za-z0-9_-]{1,63}\{[^{}]+\}|0x[0-9a-f]+/i);
 
     expect(renderCapabilityPlaybook("Pwn")).toContain("never use guessed offsets");
     expect(renderCapabilityPlaybook("Misc")).toContain("pickora");

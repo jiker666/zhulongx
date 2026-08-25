@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 import { isActionDescriptor, toolDescriptorMap, type ToolDescriptor } from "./tool-catalog.js";
-import type { ArenaConfig, DascConfig, RuntimeConfig, RunState, ScopeConfig } from "./types.js";
+import type { RuntimeConfig, RunState, ScopeConfig } from "./types.js";
 
 export interface PolicyDecision {
   allowed: boolean;
@@ -119,17 +119,14 @@ export class PolicyEngine {
     if (!state.plan && toolName !== "submit_plan" && toolName !== "finish_task") {
       return { allowed: false, reason: "A plan must be submitted before actions", signature: actionSignature };
     }
-    // Permissive mode: drop flow-control gates that only slow exploration down.
-    // Budget and host/program allowlists still apply.
-    const permissive = this.runtime.policyPermissive === true;
-    if (!permissive && state.plan && state.strategyRevisionRequired && toolName !== "checkpoint") {
+    if (state.plan && state.strategyRevisionRequired && toolName !== "checkpoint") {
       return {
         allowed: false,
         reason: "A strategy-revision checkpoint is required after the previous failure or denial",
         signature: actionSignature,
       };
     }
-    if (toolName === "checkpoint" && state.strategyRevisionRequired && !permissive) {
+    if (toolName === "checkpoint" && state.strategyRevisionRequired) {
       const checkpoint = args as {
         failureClassification?: unknown;
         planChanges?: unknown;
@@ -148,52 +145,6 @@ export class PolicyEngine {
         return { allowed: false, reason: "Failure recovery requires a next-action rationale", signature: actionSignature };
       }
     }
-    if (
-      toolName === "finish_task" &&
-      (args as { status?: unknown })?.status === "completed" &&
-      state.task.metadata.source === "nssctf-agent-arena"
-    ) {
-      const finish = args as {
-        submission?: unknown;
-        confidence?: unknown;
-        verification?: unknown;
-        independentlyVerified?: unknown;
-      };
-      if (typeof finish.submission !== "string" || !finish.submission.trim()) {
-        return { allowed: false, reason: "Arena completion requires a machine-readable submission", signature: actionSignature };
-      }
-      // Relaxed per operator request: CTF flags are usually verified by the remote
-      // service itself, so we keep only one independent verification + one finding.
-      if (!Array.isArray(finish.verification) || finish.verification.length === 0) {
-        return {
-          allowed: false,
-          reason: "Arena completion requires at least one verification record",
-          signature: actionSignature,
-        };
-      }
-      const candidate = finish.submission.trim();
-      const candidateVerification = finish.verification.some(
-        (item): boolean => typeof item === "string" && item.includes(candidate),
-      );
-      if (!candidateVerification) {
-        return {
-          allowed: false,
-          reason: "Arena completion requires the exact candidate in at least one verification record",
-          signature: actionSignature,
-        };
-      }
-      const candidateFinding = state.findings.some((finding) => {
-        const text = [finding.title, finding.description, ...finding.evidence].join("\n");
-        return finding.confidence >= 0.8 && text.includes(candidate);
-      });
-      if (!candidateFinding) {
-        return {
-          allowed: false,
-          reason: "Arena completion requires a high-confidence finding tied to the submitted candidate",
-          signature: actionSignature,
-        };
-      }
-    }
     const reserveStartsAt = this.runtime.maxRuntimeMs - this.runtime.finalizationReserveMs;
     const startedAt = Date.parse(state.startedAt ?? state.createdAt);
     if (
@@ -207,17 +158,17 @@ export class PolicyEngine {
         signature: actionSignature,
       };
     }
-    if (action && !permissive && state.actionsSinceCheckpoint >= this.runtime.maxActionsWithoutCheckpoint) {
+    if (action && state.actionsSinceCheckpoint >= this.runtime.maxActionsWithoutCheckpoint) {
       return { allowed: false, reason: "Checkpoint required before more actions", signature: actionSignature };
     }
     const repeats = state.repeatedActions[actionSignature] ?? 0;
-    if (action && !permissive && repeats >= this.runtime.maxRepeatedAction) {
+    if (action && repeats >= this.runtime.maxRepeatedAction) {
       return { allowed: false, reason: "Repeated-action limit reached; revise the strategy", signature: actionSignature };
     }
     if (toolName === "run_command") {
       const program = String((args as { program?: unknown })?.program ?? "");
       const programName = basename(program);
-      if (!permissive && !this.scope.allowedPrograms.includes(programName)) {
+      if (!this.scope.allowedPrograms.includes(programName)) {
         return { allowed: false, reason: `Program is outside the allowlist: ${program}`, signature: actionSignature };
       }
       const commandArgs = (args as { args?: unknown })?.args;
@@ -227,7 +178,7 @@ export class PolicyEngine {
           if (value.includes("\0") || (!isAbsolute(value) && value.split(/[\\/]/).includes(".."))) {
             return { allowed: false, reason: "Command argument contains an unsafe path", signature: actionSignature };
           }
-          if (isAbsolute(value) && !permissive && !isAllowedAbsolutePath(this.runtime, this.scope, value)) {
+          if (isAbsolute(value) && !isAllowedAbsolutePath(this.runtime, this.scope, value)) {
             return { allowed: false, reason: "Command argument points outside the workspace", signature: actionSignature };
           }
         }
@@ -295,10 +246,8 @@ export class PolicyEngine {
         };
       }
     }
-    // Removed per operator request: CTF attachment challenges often need to run
-    // file/strings/python/gdb in the workspace right after extracting. The sandbox
-    // still restricts writes; reads and commands over attachments are allowed.
-    // (attachments-only workspace command gate intentionally disabled)
+    // Attachment-only runs may inspect their isolated read-only input mount. The
+    // sandbox still confines writes to the per-run scratch directory.
     if (toolName === "http_request" || toolName === "web_collect_baseline") {
       if (this.scope.mode !== "controlled") {
         return { allowed: false, reason: "Network actions require scope.mode=controlled", signature: actionSignature };
@@ -336,8 +285,7 @@ export class PolicyEngine {
     if (toolName === "browser") {
       if (this.scope.mode !== "controlled") return { allowed: false, reason: "Browser actions require scope.mode=controlled", signature: actionSignature };
       const action = String((args as { action?: unknown })?.action ?? "");
-      // Per user request, most browser actions are enabled for CTF work. Only popup
-      // remains disabled (it bridges into host browser privileges).
+      // Popups remain disabled because they can bridge into host browser privileges.
       if (["popup"].includes(action)) return { allowed: false, reason: "This browser action is disabled by default", signature: actionSignature };
       if (!["create_session", "open_page", "navigate", "reload", "go_back", "capture_dom", "capture_network_summary", "assert_state", "click", "fill", "select", "check", "uncheck", "submit_form", "wait_for", "close_page", "close_session", "capture_screenshot", "upload", "download", "evaluate"].includes(action)) return { allowed: false, reason: "Unknown browser action", signature: actionSignature };
     }
@@ -379,27 +327,6 @@ export class PolicyEngine {
     if (toolName === "checkpoint") state.actionsSinceCheckpoint = 0;
   }
 
-  static evaluateArenaRequest(arena: ArenaConfig | undefined, method: string, targetUrl: string): PolicyDecision {
-    const actionSignature = signature("arena_request", { method, url: targetUrl });
-    if (!arena?.enabled) return { allowed: false, reason: "Arena integration is disabled", signature: actionSignature };
-    if (method !== "GET" && method !== "POST") {
-      return { allowed: false, reason: `Arena method is not allowed: ${method}`, signature: actionSignature };
-    }
-    try {
-      const base = new URL(arena.baseUrl);
-      const target = new URL(targetUrl);
-      if (target.protocol !== base.protocol || target.host !== base.host) {
-        return { allowed: false, reason: `Arena host is outside configured baseUrl: ${target.host}`, signature: actionSignature };
-      }
-      if (!target.pathname.startsWith("/api/skill/agent/arena/")) {
-        return { allowed: false, reason: `Arena path is outside the allowed API prefix: ${target.pathname}`, signature: actionSignature };
-      }
-      return { allowed: true, reason: "Allowed by configured Arena control-plane scope", signature: actionSignature };
-    } catch (error) {
-      return { allowed: false, reason: `Invalid Arena URL: ${String(error)}`, signature: actionSignature };
-    }
-  }
-
   static evaluateScopedTcpTarget(scope: ScopeConfig, host: string, port: number): PolicyDecision {
     const actionSignature = signature("scoped_tcp_target", { host, port });
     if (scope.mode !== "controlled") {
@@ -415,69 +342,4 @@ export class PolicyEngine {
     return { allowed: true, reason: "Allowed by configured scope", signature: actionSignature };
   }
 
-  static evaluateArenaAnnexRequest(
-    arena: ArenaConfig | undefined,
-    scope: ScopeConfig,
-    targetUrl: string,
-  ): PolicyDecision {
-    const actionSignature = signature("arena_annex_request", { url: targetUrl });
-    if (!arena?.enabled) return { allowed: false, reason: "Arena integration is disabled", signature: actionSignature };
-    try {
-      const base = new URL(arena.baseUrl);
-      const target = new URL(targetUrl);
-      if (target.protocol !== "http:" && target.protocol !== "https:") {
-        return { allowed: false, reason: `Arena annex protocol is not allowed: ${target.protocol}`, signature: actionSignature };
-      }
-      const sameArenaOrigin = target.protocol === base.protocol && target.host === base.host;
-      if (sameArenaOrigin) {
-        return { allowed: true, reason: "Allowed Arena-origin annex URL", signature: actionSignature };
-      }
-      if (scope.mode !== "controlled" || !scope.allowedHosts.some((allowed) => hostMatches(target.host, allowed))) {
-        return {
-          allowed: false,
-          reason: `Arena annex host is outside the authorized scope: ${target.host}`,
-          signature: actionSignature,
-        };
-      }
-      return { allowed: true, reason: "Allowed scoped Arena annex URL", signature: actionSignature };
-    } catch (error) {
-      return { allowed: false, reason: `Invalid Arena annex URL: ${String(error)}`, signature: actionSignature };
-    }
-  }
-
-  static evaluateDascRequest(
-    dasc: DascConfig | undefined,
-    scope: ScopeConfig,
-    method: string,
-    targetUrl: string,
-    requestCount = 0,
-  ): PolicyDecision {
-    const actionSignature = signature("dasc_request", { method, url: targetUrl });
-    if (!dasc?.enabled) return { allowed: false, reason: "DASC integration is disabled", signature: actionSignature };
-    if (scope.mode !== "controlled") {
-      return { allowed: false, reason: "DASC requests require scope.mode=controlled", signature: actionSignature };
-    }
-    if (requestCount >= dasc.maxRequests) {
-      return { allowed: false, reason: "DASC request budget exhausted", signature: actionSignature };
-    }
-    if (method !== "GET" && method !== "POST") {
-      return { allowed: false, reason: `DASC method is not allowed: ${method}`, signature: actionSignature };
-    }
-    try {
-      const base = new URL(dasc.baseUrl);
-      const target = new URL(targetUrl);
-      if (target.protocol !== base.protocol || target.host !== base.host) {
-        return { allowed: false, reason: `DASC host is outside configured baseUrl: ${target.host}`, signature: actionSignature };
-      }
-      if (!scope.allowedHosts.some((allowed) => hostMatches(target.host, allowed))) {
-        return { allowed: false, reason: `DASC host is outside the authorized scope: ${target.host}`, signature: actionSignature };
-      }
-      if (!target.pathname.startsWith("/slab-match/api/v1/agent/")) {
-        return { allowed: false, reason: `DASC path is outside the allowed API prefix: ${target.pathname}`, signature: actionSignature };
-      }
-      return { allowed: true, reason: "Allowed by configured DASC control-plane scope", signature: actionSignature };
-    } catch (error) {
-      return { allowed: false, reason: `Invalid DASC URL: ${String(error)}`, signature: actionSignature };
-    }
-  }
 }

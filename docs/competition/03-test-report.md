@@ -22,7 +22,7 @@
 npm run check
 结果：通过
 覆盖：typecheck、lint、Vitest 单元测试、后端构建
-测试：390 passed，1 skipped（现有可选浏览器测试）
+测试：359 passed，1 skipped（现有可选浏览器测试）
 
 npm --prefix frontend run build
 结果：通过

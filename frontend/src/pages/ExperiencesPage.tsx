@@ -32,7 +32,7 @@ export function ExperiencesPage() {
   return (
     <div className="page experiences-page">
       <div className="page-heading">
-        <div><div className="eyebrow">VALIDATED EXPERIENCE</div><h1>经验库</h1><p>管理经过外部平台验真的通用策略。</p></div>
+        <div><div className="eyebrow">VALIDATED EXPERIENCE</div><h1>经验库</h1><p>管理经过操作员或独立验证器确认的通用策略。</p></div>
         <div className="heading-actions"><span className="experience-count"><ShieldCheck size={16} aria-hidden="true" /><strong>{active}</strong> 条启用</span><IconButton className="icon-button bordered" label="刷新经验库" onClick={() => void query.refetch()} disabled={query.isFetching}><RefreshCw size={17} className={query.isFetching ? "spinning" : ""} /></IconButton></div>
       </div>
       {records.length > 0 && <div className="experience-toolbar"><label className="experience-search"><Search size={15} aria-hidden="true" /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索经验标题或策略" aria-label="搜索经验" />{search && <button type="button" aria-label="清空经验搜索" onClick={() => setSearch("")}><X size={14} /></button>}</label><select aria-label="筛选经验状态" value={status} onChange={(event) => setStatus(event.target.value as typeof status)}><option value="all">全部状态</option><option value="active">已启用</option><option value="disabled">已停用</option></select><select aria-label="筛选经验分类" value={category} onChange={(event) => setCategory(event.target.value)}><option value="all">全部分类</option>{categories.map((item) => <option key={item} value={item}>{item}</option>)}</select><span>{filtered.length} / {records.length}</span></div>}

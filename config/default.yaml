@@ -144,7 +144,7 @@ scope:
     - rax2
 
 profile:
-  id: general-ctf
+  id: general-security
   preferredExecutor: sandbox
   approvalPolicy: never
   requiredCapabilities:
@@ -194,22 +194,5 @@ server:
   port: 7318
   tokenEnv: XUANSHU_SERVER_TOKEN
 
-arena:
-  enabled: true
-  baseUrl: https://www.nssctf.cn
-  tokenEnv: NSSCTF_AGENT_TOKEN
-  timeoutMs: 15000
-  maxResponseBytes: 262144
-  allowedCategories:
-    - crypto
-    - misc
-  maxCategorySkips: 10
-
-questionBank:
-  enabled: true
-  # Set XUANSHU_QUESTION_BANK_ROOT to the local CyBench checkout.
-  rootEnv: XUANSHU_QUESTION_BANK_ROOT
-  listFiles:
-    - task_list_crypto.txt
-    - task_list_misc.txt
-  maxQuestions: 20
+# Optional local corpus processing is configured by the operator in a private
+# config. It is intentionally disabled in the public default.

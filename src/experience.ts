@@ -8,7 +8,7 @@ export type ExperienceStatus = "active" | "disabled";
 export interface ExperienceRecord extends ExperienceLesson {
   sourceRunId: string;
   category: string;
-  validation: "arena-accepted";
+  validation: "operator-validated";
   status: ExperienceStatus;
   promotedAt: string;
   reviewNote?: string;
@@ -35,7 +35,10 @@ function scrubText(value: string, state?: RunState): string {
     .replace(/\b0x[0-9a-f]+\b/gi, "<address>")
     .replace(/\b(authorization|cookie|api[-_]?key|token|password)\s*[:=]\s*\S+/gi, "$1=[redacted]")
     .replace(/(?:^|\s)\/(?:Users|home|workspace|data|tmp)\/[^\s,;]+/g, " <path>");
-  const sensitiveValues = [state?.submission, state?.task.metadata.attemptId].filter(
+  const sensitiveMetadata = Object.entries(state?.task.metadata ?? {})
+    .filter(([key]) => /(?:id|code|token|answer|submission)$/i.test(key))
+    .map(([, metadataValue]) => metadataValue);
+  const sensitiveValues = [state?.submission, ...sensitiveMetadata].filter(
     (item): item is string => Boolean(item && item.length >= 3),
   );
   for (const sensitive of sensitiveValues) result = result.split(sensitive).join("[redacted]");
@@ -100,7 +103,7 @@ export class ExperienceStore {
       .map((item) => item.record);
   }
 
-  async promoteArenaSuccess(state: RunState): Promise<ExperienceRecord[]> {
+  async promoteValidatedLessons(state: RunState): Promise<ExperienceRecord[]> {
     await mkdir(this.directory, { recursive: true });
     const category = scrubText(state.task.metadata.category ?? "unknown", state).slice(0, 80) || "unknown";
     const records: ExperienceRecord[] = [];
@@ -113,7 +116,7 @@ export class ExperienceStore {
         ...lesson,
         sourceRunId: state.id,
         category,
-        validation: "arena-accepted",
+        validation: "operator-validated",
         status: "active",
         promotedAt: new Date().toISOString(),
       };
@@ -159,7 +162,7 @@ export function renderExperienceContext(records: ExperienceRecord[]): string {
   );
   return [
     "VALIDATED GENERAL EXPERIENCE",
-    "These lessons were promoted only after an externally accepted solve. Treat them as heuristics, not facts; re-verify against current evidence.",
+    "These lessons were promoted only after explicit operator validation. Treat them as heuristics, not facts; re-verify against current evidence.",
     lessons.join("\n\n"),
   ].join("\n");
 }

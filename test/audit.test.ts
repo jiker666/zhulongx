@@ -32,8 +32,9 @@ describe("AuditChain", () => {
     roots.push(root);
     const path = join(root, "audit.jsonl");
     const audit = new AuditChain(path, "run-redacted");
+    const fakeModelKey = ["sk", "abcdefghijklmnopqrstuvwx"].join("-");
     await audit.append("decision.checkpoint", {
-      observation: "Authorization: Bearer audit-sensitive-value\nraw sk-abcdefghijklmnopqrstuvwx",
+      observation: `Authorization: Bearer audit-sensitive-value\nraw ${fakeModelKey}`,
       nested: { cookie: "session=audit-sensitive-cookie" },
     });
 

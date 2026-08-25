@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { startApiServer } from "../src/server.js";
-import { ArenaJobManager } from "../src/arena-jobs.js";
 import { ManualJobManager } from "../src/manual-jobs.js";
 import { QuestionBank } from "../src/question-bank.js";
 import { QuestionBankProgressStore } from "../src/question-bank-progress.js";
@@ -15,7 +14,6 @@ import { DurableWorkflowStore } from "../src/workflow.js";
 import { BoundedWorkflowWorker } from "../src/workflow-worker.js";
 import { DurableAgentStore } from "../src/agent-store.js";
 import { BoundedAgentWorker } from "../src/agent-worker.js";
-import type { ArenaClient } from "../src/arena.js";
 import type { RunState } from "../src/types.js";
 import { AuditChain } from "../src/audit.js";
 import { testConfig } from "./helpers.js";
@@ -25,7 +23,6 @@ const roots: string[] = [];
 afterEach(async () => {
   delete process.env.XUANSHU_TEST_SERVER_TOKEN;
   delete process.env.XUANSHU_TEST_API_KEY;
-  delete process.env.XUANSHU_TEST_ARENA_TOKEN;
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -157,21 +154,8 @@ describe("REST API", () => {
       const dashboard = await fetch(`${running.url}/`);
       expect(dashboard.status).toBe(200);
       const dashboardSource = await dashboard.text();
-      expect(dashboardSource).toContain("NSS 控制台");
-      expect(dashboardSource).toContain("已结算");
-      expect(dashboardSource).toContain("jobDisplayStatus");
-      expect(dashboardSource).toContain("id=\"continuous\"");
-      expect(dashboardSource).toContain("id=\"manual-form\"");
-      expect(dashboardSource).toContain("id=\"manual-files\"");
-      expect(dashboardSource).toContain("id=\"manual-writeup\"");
-      expect(dashboardSource).toContain("id=\"question-bank-start\"");
-      expect(dashboardSource).toContain("/v1/question-bank/jobs");
-      expect(dashboardSource).toContain("appendManualTaskResult");
-      expect(dashboardSource).toContain("manualCopyButton(task.flag,'FLAG')");
-      expect(dashboardSource).toContain("/v1/manual/uploads");
-      const scriptStart = dashboardSource.lastIndexOf("<script>") + "<script>".length;
-      const scriptEnd = dashboardSource.indexOf("</script>", scriptStart);
-      expect(() => new Function(dashboardSource.slice(scriptStart, scriptEnd))).not.toThrow();
+      expect(dashboardSource).toContain("玄枢控制面");
+      expect(dashboardSource).toContain("通用自主网络安全任务运行时");
 
       const unauthorized = await fetch(`${running.url}/v1/runs/missing`);
       expect(unauthorized.status).toBe(401);
@@ -278,8 +262,8 @@ describe("REST API", () => {
             status: "completed",
             phase: "done",
             task: { task: task.task, attachments: [], metadata: {} },
-            submission: "NSSCTF{server-result}",
-            summary: "# WP\n\nVerified deterministically.\nFLAG: NSSCTF{server-result}",
+            submission: "server-result",
+            summary: "# Report\n\nVerified deterministically.",
             turns: 1,
             toolCalls: 1,
           });
@@ -312,11 +296,11 @@ describe("REST API", () => {
           status: string;
           completed: number;
           writeup: boolean;
-          tasks: Array<{ flag?: string; writeup?: string }>;
+          tasks: Array<{ submission?: string; writeup?: string }>;
         } };
         expect(payload.job).toMatchObject({ status: "completed", completed: 2, writeup: true });
         expect(payload.job.tasks).toHaveLength(2);
-        expect(payload.job.tasks.every((task) => task.flag === "NSSCTF{server-result}" && task.writeup?.includes("# WP"))).toBe(true);
+        expect(payload.job.tasks.every((task) => task.submission === "server-result" && task.writeup?.includes("# Report"))).toBe(true);
       });
     } finally {
       await running.close();
@@ -413,137 +397,6 @@ describe("REST API", () => {
         body: JSON.stringify({ writeup: false }),
       });
       expect(repeated.status).toBe(400);
-    } finally {
-      await running.close();
-    }
-  });
-
-  it("starts and reports a bounded Arena job through the protected API", async () => {
-    const root = await mkdtemp(join(tmpdir(), "xuan-server-arena-"));
-    roots.push(root);
-    const config = testConfig(root);
-    config.scope.mode = "controlled";
-    config.scope.allowedHosts = ["*.nssctf.cn:*"];
-    await mkdir(config.scope.workspaceRoot, { recursive: true });
-    process.env.XUANSHU_TEST_API_KEY = "model-test-key";
-    process.env.XUANSHU_TEST_ARENA_TOKEN = "arena-test-token";
-    const now = new Date().toISOString();
-    const state: RunState = {
-      id: "arena-run",
-      status: "completed",
-      phase: "done",
-      task: { task: "test", attachments: [], metadata: { category: "web" } },
-      createdAt: now,
-      updatedAt: now,
-      findings: [],
-      lessons: [],
-      hypotheses: [],
-      strategyRevisions: [],
-      strategyRevisionRequired: false,
-      sandboxNamespace: "arena-run",
-      scratchRoot: join(root, "scratch", "runs", "arena-run"),
-      workspaceMode: "configured",
-      appliedExperienceIds: [],
-      turns: 4,
-      toolCalls: 7,
-      imageObservations: 0,
-      httpRequests: 1,
-      tcpSessions: 0,
-      actionsSinceCheckpoint: 0,
-      repeatedActions: {},
-    };
-    const arenaJobs = new ArenaJobManager(config, {
-      clientFactory: () => ({}) as ArenaClient,
-      readAgent: async () => ({ rating: 1000 }),
-      ensureSandbox: async () => ({ owned: false, close: async () => {} }),
-      writeReport: async () => join(root, "evaluation.json"),
-      solveOnce: async () => ({
-        attemptId: 7,
-        state,
-        evaluation: {
-          attemptId: 7,
-          category: "web",
-          outcome: "solved",
-          settled: true,
-          correct: true,
-          flagCandidateFound: true,
-          submissionAttempts: 1,
-          runCount: 1,
-          attachmentCount: 0,
-          reused: false,
-          run: { id: state.id, status: state.status, turns: state.turns, toolCalls: state.toolCalls },
-        },
-      }),
-    });
-    const running = await startApiServer(config, { arenaJobs });
-    try {
-      const status = await fetch(`${running.url}/v1/arena/status`);
-      expect(status.status).toBe(200);
-      expect(await status.json()).toMatchObject({ readiness: { ready: true } });
-
-      const started = await fetch(`${running.url}/v1/arena/jobs`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ maxAttempts: 1, autoSubmit: true, idleSeconds: 0, continuous: false }),
-      });
-      expect(started.status).toBe(202);
-      const startedBody = await started.json() as { job: { id: string; options: { continuous: boolean } } };
-      expect(startedBody.job.options.continuous).toBe(false);
-      await vi.waitFor(async () => {
-        const result = await fetch(`${running.url}/v1/arena/jobs/${startedBody.job.id}`);
-        expect(await result.json()).toMatchObject({ job: { status: "completed", summary: { solved: 1 } } });
-      });
-    } finally {
-      await running.close();
-    }
-  });
-
-  it("defaults Arena jobs to continuous mode and validates the stop contract", async () => {
-    const root = await mkdtemp(join(tmpdir(), "xuan-server-arena-continuous-"));
-    roots.push(root);
-    const config = testConfig(root);
-    config.scope.mode = "controlled";
-    config.scope.allowedHosts = ["*.nssctf.cn:*"];
-    await mkdir(config.scope.workspaceRoot, { recursive: true });
-    process.env.XUANSHU_TEST_API_KEY = "model-test-key";
-    process.env.XUANSHU_TEST_ARENA_TOKEN = "arena-test-token";
-    const arenaJobs = new ArenaJobManager(config, {
-      clientFactory: () => ({}) as ArenaClient,
-      readAgent: async () => ({ rating: 1000 }),
-      ensureSandbox: async () => ({ owned: false, close: async () => {} }),
-      writeReport: async () => join(root, "evaluation.json"),
-      solveOnce: async (_config, _client, options) => await new Promise((_resolve, reject) => {
-        options.signal?.addEventListener("abort", () => reject(options.signal?.reason), { once: true });
-      }),
-    });
-    const running = await startApiServer(config, { arenaJobs });
-    try {
-      const invalid = await fetch(`${running.url}/v1/arena/jobs`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ maxAttempts: 1, autoSubmit: true, idleSeconds: 0, continuous: "yes" }),
-      });
-      expect(invalid.status).toBe(400);
-
-      const started = await fetch(`${running.url}/v1/arena/jobs`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ maxAttempts: 1, autoSubmit: true, idleSeconds: 0 }),
-      });
-      expect(started.status).toBe(202);
-      const startedBody = await started.json() as { job: { id: string; options: { continuous: boolean } } };
-      expect(startedBody.job.options.continuous).toBe(true);
-
-      const stopped = await fetch(`${running.url}/v1/arena/jobs/${startedBody.job.id}/stop`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: "{}",
-      });
-      expect(stopped.status).toBe(202);
-      await vi.waitFor(async () => {
-        const result = await fetch(`${running.url}/v1/arena/jobs/${startedBody.job.id}`);
-        expect(await result.json()).toMatchObject({ job: { status: "aborted", options: { continuous: true } } });
-      });
     } finally {
       await running.close();
     }

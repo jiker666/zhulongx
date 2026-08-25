@@ -10,7 +10,6 @@ import { recoverInterruptedRuns } from "./run-recovery.js";
 import { XuanShuRuntime } from "./runtime.js";
 import { inferTrajectorySource } from "./session-trajectory.js";
 import { appendRunReview, listPersistedRuns, loadDecisionTrace, loadPersistedRun, prepareRunContinuation, readAuditRecords, truncateTraceData } from "./trace.js";
-import { ArenaJobManager } from "./arena-jobs.js";
 import { ManualJobManager, validateManualJobInput } from "./manual-jobs.js";
 import { ManualUploadError, ManualUploadStore } from "./manual-uploads.js";
 import { PermissionBroker, type PermissionDecision } from "./permissions.js";
@@ -129,7 +128,6 @@ function attachUploadedFiles(input: ReturnType<typeof validateManualJobInput>, p
 }
 
 export interface ApiServerDependencies {
-  arenaJobs?: ArenaJobManager;
   manualJobs?: ManualJobManager;
   manualUploads?: ManualUploadStore;
   questionBank?: QuestionBank;
@@ -303,7 +301,6 @@ export function createApiServer(config: AppConfig, dependencies: ApiServerDepend
     runManager: manager,
   });
   const experience = new ExperienceStore(config.runtime.artifactRoot);
-  const arenaJobs = dependencies.arenaJobs ?? new ArenaJobManager(config);
   const manualJobs = dependencies.manualJobs ?? new ManualJobManager({ runManager: manager });
   const manualUploads = dependencies.manualUploads ?? new ManualUploadStore(join(config.runtime.scratchRoot, "manual-uploads"));
   const questionBank = dependencies.questionBank ?? new QuestionBank(config.questionBank);
@@ -695,58 +692,6 @@ export function createApiServer(config: AppConfig, dependencies: ApiServerDepend
         else json(response, 200, { job });
         return;
       }
-      if (request.method === "GET" && url.pathname === "/v1/arena/status") {
-        const [readiness, wrongQuestions] = await Promise.all([
-          arenaJobs.readiness(),
-          arenaJobs.listWrongQuestions(),
-        ]);
-        json(response, 200, { readiness, jobs: arenaJobs.list(), wrongQuestions });
-        return;
-      }
-      if (request.method === "POST" && url.pathname === "/v1/arena/jobs") {
-        const input = await bodyJson(request) as Record<string, unknown>;
-        const maxAttempts = input.maxAttempts === undefined ? 1 : Number(input.maxAttempts);
-        const idleSeconds = input.idleSeconds === undefined ? 1 : Number(input.idleSeconds);
-        const autoSubmit = input.autoSubmit === undefined ? true : input.autoSubmit;
-        const continuous = input.continuous === undefined ? true : input.continuous;
-        if (typeof autoSubmit !== "boolean") {
-          json(response, 400, { error: "autoSubmit must be a boolean" });
-          return;
-        }
-        if (typeof continuous !== "boolean") {
-          json(response, 400, { error: "continuous must be a boolean" });
-          return;
-        }
-        try {
-          const job = arenaJobs.start({ maxAttempts, idleSeconds, autoSubmit, continuous });
-          json(response, 202, { job, statusUrl: `/v1/arena/jobs/${job.id}` });
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          json(response, message.includes("already active") ? 409 : 400, { error: message });
-        }
-        return;
-      }
-      const wrongQuestionMatch = url.pathname.match(/^\/v1\/arena\/wrong-questions\/(\d+)$/);
-      if (request.method === "GET" && wrongQuestionMatch?.[1]) {
-        const wrongQuestion = await arenaJobs.getWrongQuestion(Number(wrongQuestionMatch[1]));
-        if (!wrongQuestion) json(response, 404, { error: "Arena wrong question not found" });
-        else json(response, 200, { wrongQuestion });
-        return;
-      }
-      const arenaStopMatch = url.pathname.match(/^\/v1\/arena\/jobs\/([0-9a-f-]+)\/stop$/i);
-      if (request.method === "POST" && arenaStopMatch?.[1]) {
-        const job = arenaJobs.stop(arenaStopMatch[1]);
-        if (!job) json(response, 404, { error: "Arena job not found" });
-        else json(response, 202, { job });
-        return;
-      }
-      const arenaJobMatch = url.pathname.match(/^\/v1\/arena\/jobs\/([0-9a-f-]+)$/i);
-      if (request.method === "GET" && arenaJobMatch?.[1]) {
-        const job = arenaJobs.get(arenaJobMatch[1]);
-        if (!job) json(response, 404, { error: "Arena job not found" });
-        else json(response, 200, { job });
-        return;
-      }
       if (request.method === "GET" && url.pathname === "/v1/runs") {
         const persisted = await listPersistedRuns(config.runtime.artifactRoot);
         const known = new Set(persisted.map((run) => run.id));
@@ -852,7 +797,7 @@ export function createApiServer(config: AppConfig, dependencies: ApiServerDepend
       json(response, error instanceof RequestInputError ? 400 : 500, { error: error instanceof Error ? error.message : String(error) });
     }
   });
-  return { server, manager, arenaJobs, manualJobs, manualUploads, questionBank, permissionBroker, agentStore, agentWorker, memoryStore, workflowStore, workflowWorker, connectorBroker, evaluationLedger, knowledgeStore, adaptiveCampaigns, closeStreams: () => { for (const client of streamClients) client.end(); streamClients.clear(); } };
+  return { server, manager, manualJobs, manualUploads, questionBank, permissionBroker, agentStore, agentWorker, memoryStore, workflowStore, workflowWorker, connectorBroker, evaluationLedger, knowledgeStore, adaptiveCampaigns, closeStreams: () => { for (const client of streamClients) client.end(); streamClients.clear(); } };
 }
 
 export async function startApiServer(
@@ -864,7 +809,7 @@ export async function startApiServer(
     throw new Error(`Refusing non-loopback API without ${config.server.tokenEnv}`);
   }
   await recoverInterruptedRuns(config.runtime.artifactRoot);
-  const { server, arenaJobs, manualJobs, manualUploads, agentWorker, workflowWorker, adaptiveCampaigns, closeStreams } = createApiServer(config, dependencies);
+  const { server, manualJobs, manualUploads, agentWorker, workflowWorker, adaptiveCampaigns, closeStreams } = createApiServer(config, dependencies);
   await adaptiveCampaigns.resumePending();
   await new Promise<void>((resolveListen, reject) => {
     server.once("error", reject);
@@ -877,7 +822,6 @@ export async function startApiServer(
     close: async () => {
       closeStreams();
       await new Promise<void>((resolveClose, reject) => server.close((error) => (error ? reject(error) : resolveClose())));
-      await arenaJobs.close();
       await manualJobs.close();
       await manualUploads.close();
       await adaptiveCampaigns.close();

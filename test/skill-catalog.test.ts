@@ -42,7 +42,7 @@ describe("curated CTF skill catalog", () => {
       expect(rendered.length).toBeLessThan(2400);
       expect(rendered).toContain(skill.id);
       expect(rendered).toContain("not an authorization grant");
-      expect(rendered).not.toMatch(/https?:\/\/target|\/flag(?:\.txt)?|NSSCTF\{|WebFetch|allowed-tools|curl\s/i);
+      expect(rendered).not.toMatch(/https?:\/\/target|\/flag(?:\.txt)?|[A-Za-z][A-Za-z0-9_-]{1,63}\{[^{}]+\}|WebFetch|allowed-tools|curl\s/i);
     }
   });
 });

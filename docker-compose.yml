@@ -11,7 +11,6 @@ services:
     environment:
       OPENAI_API_KEY: ${OPENAI_API_KEY:?set OPENAI_API_KEY}
       XUANSHU_SERVER_TOKEN: ${XUANSHU_SERVER_TOKEN:?set XUANSHU_SERVER_TOKEN}
-      NSSCTF_AGENT_TOKEN: ${NSSCTF_AGENT_TOKEN:-}
     volumes:
       - ./workspace:/workspace/input:ro
       - xuanshu-work:/workspace/work

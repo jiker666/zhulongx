@@ -3,7 +3,6 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { AppShell } from "./components/AppShell";
 import { LoadingState } from "./components/ui";
 
-const ArenaPage = lazy(() => import("./pages/ArenaPage").then((module) => ({ default: module.ArenaPage })));
 const ExperiencesPage = lazy(() => import("./pages/ExperiencesPage").then((module) => ({ default: module.ExperiencesPage })));
 const NotFoundPage = lazy(() => import("./pages/NotFoundPage").then((module) => ({ default: module.NotFoundPage })));
 const OverviewPage = lazy(() => import("./pages/OverviewPage").then((module) => ({ default: module.OverviewPage })));
@@ -19,7 +18,6 @@ export function App() {
         <Route element={<AppShell />}>
           <Route index element={<Navigate to="/overview" replace />} />
           <Route path="overview" element={<OverviewPage />} />
-          <Route path="arena" element={<ArenaPage />} />
           <Route path="workbench" element={<WorkbenchPage />} />
           <Route path="campaigns" element={<CampaignPage />} />
           <Route path="runs" element={<RunsPage />} />

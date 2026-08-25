@@ -40,7 +40,7 @@
 
 ## 3. 工程验证
 
-本次整理后执行的默认工程门禁为 `npm run check`，结果为 typecheck、lint、测试和后端构建通过；测试记录为 390 passed、1 skipped（现有可选浏览器测试）。前端生产构建 `npm --prefix frontend run build` 通过。该结果说明当前代码在确定性回归与构建层面可交付，但不等同于真实模型或比赛平台上的成功率。具体测试范围见 [03-test-report.md](03-test-report.md)。
+本次整理后执行的默认工程门禁为 `npm run check`，结果为 typecheck、lint、测试和后端构建通过；测试记录为 359 passed、1 skipped（现有可选浏览器测试）。前端生产构建 `npm --prefix frontend run build` 通过。该结果说明当前代码在确定性回归与构建层面可交付，但不等同于真实模型或比赛平台上的成功率。具体测试范围见 [03-test-report.md](03-test-report.md)。
 
 ## 4. 创新性与价值
 

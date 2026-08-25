@@ -30,7 +30,7 @@ function completedState(id: string, questionId: string): RunState {
     ...({} as RunState),
     id,
     status: "completed",
-    submission: "NSSCTF{do-not-persist}",
+    submission: "sensitive-submission-do-not-persist",
     finishedAt: now,
     updatedAt: now,
     task: { task: "solve", attachments: [], metadata: { source: "question-bank", questionId } },
@@ -47,7 +47,7 @@ describe("QuestionBankProgressStore", () => {
     expect(await store.recordCompleted(current, completedState("run-1", current.id))).toBe(true);
     const persisted = await readFile(store.path, "utf8");
     expect(persisted).toContain(current.id);
-    expect(persisted).not.toContain("NSSCTF{do-not-persist}");
+    expect(persisted).not.toContain("sensitive-submission-do-not-persist");
     expect(JSON.parse(persisted)).toEqual({
       version: 1,
       records: [{ questionId: current.id, fingerprint: current.fingerprint, solvedAt: "2026-08-07T12:00:00.000Z", runId: "run-1" }],
@@ -75,6 +75,6 @@ describe("QuestionBankProgressStore", () => {
     expect(await store.syncCompletedRunArtifacts([current])).toBe(1);
     expect(await store.syncCompletedRunArtifacts([current])).toBe(0);
     expect(await store.pending([current])).toEqual([]);
-    expect(await readFile(store.path, "utf8")).not.toContain("NSSCTF{do-not-persist}");
+    expect(await readFile(store.path, "utf8")).not.toContain("sensitive-submission-do-not-persist");
   });
 });

@@ -584,8 +584,7 @@
   border-color: #85847f;
 }
 
-.command-metrics,
-.arena-metrics {
+.command-metrics {
   display: grid;
   grid-template-columns: repeat(6, 1fr);
   margin: 18px 0;
@@ -595,42 +594,36 @@
   border-radius: var(--radius);
 }
 
-.command-metrics > div,
-.arena-metrics > div {
+.command-metrics > div {
   min-width: 0;
   padding: 0 18px;
   border-right: 1px solid var(--border);
 }
 
-.command-metrics > div:last-child,
-.arena-metrics > div:last-child {
+.command-metrics > div:last-child {
   border-right: 0;
 }
 
-.command-metrics span,
-.arena-metrics span {
+.command-metrics span {
   display: block;
   color: var(--muted);
   font-size: 11px;
 }
 
-.command-metrics strong,
-.arena-metrics strong {
+.command-metrics strong {
   display: block;
   margin: 7px 0 4px;
   color: var(--text);
   font: 26px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
-.command-metrics strong em,
-.arena-metrics strong em {
+.command-metrics strong em {
   color: var(--subtle);
   font-size: 13px;
   font-style: normal;
 }
 
-.command-metrics small,
-.arena-metrics small {
+.command-metrics small {
   display: block;
   overflow: hidden;
   color: var(--subtle);
@@ -763,7 +756,7 @@
   color: var(--green);
 }
 
-/* Arena */
+/* Workbench controls */
 .heading-status {
   padding: 9px 11px;
   background: var(--surface);
@@ -799,17 +792,6 @@
 .large-status-dot.ready {
   background: var(--green);
   box-shadow: 0 0 0 4px rgb(79 125 103 / 10%);
-}
-
-.arena-control-band {
-  display: grid;
-  grid-template-columns: minmax(220px, 0.85fr) minmax(110px, 0.4fr) minmax(190px, 0.65fr) auto;
-  gap: 20px;
-  align-items: end;
-  padding: 18px 20px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
 }
 
 .control-group {
@@ -985,18 +967,6 @@
   white-space: nowrap;
 }
 
-.arena-metrics {
-  margin: 0 0 14px;
-}
-
-.arena-workspace-grid,
-.arena-secondary-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1.25fr) minmax(310px, 0.75fr);
-  gap: 14px;
-  margin-bottom: 14px;
-}
-
 .job-state-line {
   display: flex;
   align-items: center;
@@ -1017,33 +987,6 @@
   font-family: Inter, "PingFang SC", sans-serif;
 }
 
-.arena-activity-list {
-  position: relative;
-  max-height: 530px;
-  overflow: auto;
-}
-
-.arena-activity-list::before {
-  position: absolute;
-  top: 18px;
-  bottom: 18px;
-  left: 14px;
-  width: 1px;
-  content: "";
-  background: var(--border-strong);
-}
-
-.arena-activity-row {
-  position: relative;
-  display: grid;
-  grid-template-columns: 29px 50px minmax(0, 1fr) 20px;
-  gap: 9px;
-  align-items: center;
-  min-height: 55px;
-  padding: 7px 0;
-  border-bottom: 1px solid var(--border);
-}
-
 .activity-node {
   z-index: 1;
   display: grid;
@@ -1054,37 +997,6 @@
   background: var(--surface);
   border: 1px solid var(--border-strong);
   border-radius: 50%;
-}
-
-.arena-activity-row time {
-  color: var(--subtle);
-  font: 9px ui-monospace, SFMono-Regular, Menlo, monospace;
-}
-
-.arena-activity-row > span:nth-child(3) {
-  display: grid;
-  gap: 4px;
-  min-width: 0;
-}
-
-.arena-activity-row strong,
-.arena-activity-row small {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.arena-activity-row strong {
-  font-size: 11px;
-}
-
-.arena-activity-row small {
-  color: var(--muted);
-  font-size: 11px;
-}
-
-.arena-activity-row a {
-  color: var(--accent);
 }
 
 .attempt-list,
@@ -1651,7 +1563,7 @@
   gap: 5px;
 }
 
-.flag-result {
+.submission-result {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) 30px;
   gap: 8px;
@@ -1663,12 +1575,12 @@
   border-radius: 6px;
 }
 
-.flag-result > span {
+.submission-result > span {
   font-size: 9px;
   font-weight: 700;
 }
 
-.flag-result code {
+.submission-result code {
   overflow: hidden;
   color: #385c4b;
   font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -1676,7 +1588,7 @@
   white-space: nowrap;
 }
 
-.flag-result .icon-button {
+.submission-result .icon-button {
   width: 28px;
   min-width: 28px;
   height: 28px;
@@ -2088,23 +2000,13 @@
 }
 
 @media (max-width: 1120px) {
-  .command-metrics,
-  .arena-metrics {
+  .command-metrics {
     grid-template-columns: repeat(3, 1fr);
     gap: 17px 0;
   }
 
-  .command-metrics > div:nth-child(3),
-  .arena-metrics > div:nth-child(3) {
+  .command-metrics > div:nth-child(3) {
     border-right: 0;
-  }
-
-  .arena-control-band {
-    grid-template-columns: 1fr 130px 1fr;
-  }
-
-  .arena-control-band .control-actions {
-    grid-column: 1 / -1;
   }
 
   .workbench-grid {
@@ -2117,9 +2019,7 @@
 }
 
 @media (max-width: 900px) {
-  .overview-grid,
-  .arena-workspace-grid,
-  .arena-secondary-grid {
+  .overview-grid {
     grid-template-columns: 1fr;
   }
 
@@ -2183,30 +2083,17 @@
     grid-column: 1 / -1;
   }
 
-  .command-metrics,
-  .arena-metrics {
+  .command-metrics {
     grid-template-columns: repeat(2, 1fr);
   }
 
   .command-metrics > div,
-  .arena-metrics > div,
-  .command-metrics > div:nth-child(3),
-  .arena-metrics > div:nth-child(3) {
+  .command-metrics > div:nth-child(3) {
     border-right: 1px solid var(--border);
   }
 
-  .command-metrics > div:nth-child(even),
-  .arena-metrics > div:nth-child(even) {
+  .command-metrics > div:nth-child(even) {
     border-right: 0;
-  }
-
-  .arena-control-band {
-    grid-template-columns: 1fr 1fr;
-  }
-
-  .arena-control-band .toggle-control,
-  .arena-control-band .control-actions {
-    grid-column: 1 / -1;
   }
 
   .composer-settings {
@@ -2259,13 +2146,11 @@
     grid-template-columns: 1fr 1fr;
   }
 
-  .command-metrics,
-  .arena-metrics {
+  .command-metrics {
     gap: 14px 0;
   }
 
-  .command-metrics > div,
-  .arena-metrics > div {
+  .command-metrics > div {
     padding: 0 11px;
   }
 
@@ -2280,20 +2165,6 @@
   .heading-status {
     width: 100%;
     margin-top: 16px;
-  }
-
-  .arena-heading {
-    display: block;
-  }
-
-  .arena-control-band {
-    grid-template-columns: 1fr;
-    gap: 14px;
-  }
-
-  .arena-control-band .toggle-control,
-  .arena-control-band .control-actions {
-    grid-column: auto;
   }
 
   .control-actions .button {
@@ -2320,14 +2191,6 @@
 
   .panel-heading select {
     max-width: 150px;
-  }
-
-  .arena-activity-row {
-    grid-template-columns: 29px minmax(0, 1fr) 20px;
-  }
-
-  .arena-activity-row time {
-    display: none;
   }
 
   .attempt-row {

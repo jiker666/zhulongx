@@ -21,25 +21,8 @@ test("home redirects to overview and overview refreshes live state", async ({ pa
   const refresh = page.getByRole("button", { name: "刷新系统状态" });
   await expect(refresh).toBeEnabled();
   await expect.poll(() => apiRequests.some((url) => url.endsWith("/v1/runs"))).toBe(true);
-  const response = page.waitForResponse((item) => item.url().endsWith("/v1/arena/status") && item.request().method() === "GET");
   await refresh.click();
-  await response;
   await expect(refresh).toBeEnabled();
-  expect(errors.pageErrors).toEqual([]);
-  expect(errors.consoleErrors).toEqual([]);
-});
-
-test("competition workspaces expose arena and batch controls", async ({ page }) => {
-  const errors = captureBrowserErrors(page);
-  await page.goto("/arena");
-  await expect(page.getByRole("heading", { name: "擂台指挥" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "开始作业" })).toBeVisible();
-  await expect(page.getByText("作用域", { exact: true })).toBeVisible();
-  await expect(page.getByRole("checkbox", { name: /自动提交/ })).toBeEnabled();
-  await page.goto("/workbench");
-  await expect(page.getByRole("heading", { name: "任务工作台" })).toBeVisible();
-  await expect(page.getByRole("textbox", { name: "任务内容" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "提交解题" })).toBeDisabled();
   expect(errors.pageErrors).toEqual([]);
   expect(errors.consoleErrors).toEqual([]);
 });
@@ -76,7 +59,7 @@ test("runs page supports direct refresh and real detail navigation when data exi
   await expect(decisionItems.first()).toBeVisible();
   await decisionItems.first().click();
   await expect(page.getByText("DECISION INSPECTOR")).toBeVisible();
-  await expect(page.getByText("Source Event")).toBeVisible();
+  await expect(page.getByText("技术事件", { exact: true })).toBeVisible();
   await page.getByRole("tab").nth(1).click();
   await expect(page.locator("[data-testid=\"evidence-graph-node\"]").first()).toBeVisible();
   await page.getByRole("button", { name: "适应视图" }).click();
@@ -120,8 +103,8 @@ test("running detail receives live policy, raw event and graph updates without r
   const errors = captureBrowserErrors(page);
   await page.goto("/runs/44444444-4444-4444-8444-444444444444");
   await expect(page.locator('[data-realtime-state="live"]')).toBeVisible({ timeout: 10_000 });
-  await expect(page.getByText("Live evidence arrived")).toBeVisible({ timeout: 10_000 });
-  await expect(page.getByText("动作被策略阻断")).toBeVisible();
+  await expect(page.locator(".decision-item").filter({ hasText: "finding.recorded" })).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator(".decision-item.decision-policy").filter({ hasText: "blocked" })).toBeVisible();
   await page.getByRole("tab", { name: "证据图" }).click();
   await expect(page.locator('[data-testid="evidence-graph-node"][data-entity-id="evidence:live-evidence-1"]')).toBeVisible();
   await page.getByRole("tab", { name: "原始事件" }).click();

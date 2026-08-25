@@ -31,9 +31,6 @@ export interface RuntimeConfig {
   modelMaxRetryDelayMs: number;
   maxActionsWithoutCheckpoint: number;
   maxRepeatedAction: number;
-  // When true, PolicyEngine skips flow-control gates (checkpoint requirements,
-  // repeated-action limits) and path checks that would otherwise slow exploration.
-  policyPermissive: boolean;
   maxOutputBytes: number;
   maxImageBytes: number;
   maxImageObservations: number;
@@ -88,25 +85,6 @@ export interface ServerConfig {
   tokenEnv: string;
 }
 
-export interface ArenaConfig {
-  enabled: boolean;
-  baseUrl: string;
-  tokenEnv: string;
-  timeoutMs: number;
-  maxResponseBytes: number;
-  allowedCategories?: string[];
-  maxCategorySkips?: number;
-}
-
-export interface DascConfig {
-  enabled: boolean;
-  baseUrl: string;
-  accessKeyEnv: string;
-  timeoutMs: number;
-  maxResponseBytes: number;
-  maxRequests: number;
-}
-
 export interface QuestionBankConfig {
   enabled: boolean;
   root?: string;
@@ -128,8 +106,6 @@ export interface AppConfig {
   runtime: RuntimeConfig;
   scope: ScopeConfig;
   server: ServerConfig;
-  arena?: ArenaConfig;
-  dasc?: DascConfig;
   questionBank?: QuestionBankConfig;
   webReasoning?: WebReasoningConfig;
   browser?: import("./web-reasoning/browser/types.js").BrowserRuntimeConfig;

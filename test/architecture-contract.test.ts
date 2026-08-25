@@ -18,7 +18,7 @@ const LOWER_LAYERS = [
 ];
 
 const FORBIDDEN_HIGHER_LAYER_IMPORTS = new Set([
-  "arena-jobs", "cli", "dashboard", "manual-jobs", "run-manager", "runtime", "server",
+  "cli", "dashboard", "manual-jobs", "run-manager", "runtime", "server",
 ]);
 
 function localImports(source: string): string[] {

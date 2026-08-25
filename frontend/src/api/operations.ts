@@ -1,8 +1,5 @@
 import { apiURL, authorizedHeaders, request } from "./client";
 import type {
-  ArenaJobSnapshot,
-  ArenaStatusResponse,
-  ArenaWrongQuestionRecord,
   ManualJobSnapshot,
   ManualUploadSnapshot,
   QuestionBankSnapshot,
@@ -10,12 +7,6 @@ import type {
 } from "../types/api";
 
 const jsonHeaders = { "content-type": "application/json" };
-
-export const getArenaStatus = (signal?: AbortSignal) => request<ArenaStatusResponse>("/v1/arena/status", { signal });
-export const getArenaJob = (id: string, signal?: AbortSignal) => request<{ job: ArenaJobSnapshot }>(`/v1/arena/jobs/${encodeURIComponent(id)}`, { signal });
-export const startArenaJob = (input: { continuous: boolean; maxAttempts: number; autoSubmit: boolean; idleSeconds: number }, signal?: AbortSignal) => request<{ job: ArenaJobSnapshot }>("/v1/arena/jobs", { method: "POST", signal, headers: jsonHeaders, body: JSON.stringify(input) });
-export const stopArenaJob = (id: string, signal?: AbortSignal) => request<{ job: ArenaJobSnapshot }>(`/v1/arena/jobs/${encodeURIComponent(id)}/stop`, { method: "POST", signal, headers: jsonHeaders, body: "{}" });
-export const getWrongQuestion = (attemptId: number, signal?: AbortSignal) => request<{ wrongQuestion: ArenaWrongQuestionRecord }>(`/v1/arena/wrong-questions/${attemptId}`, { signal });
 
 export const getManualJobs = (signal?: AbortSignal) => request<{ jobs: ManualJobSnapshot[] }>("/v1/manual/jobs", { signal });
 export const startManualJob = (input: { tasks: string[]; concurrency: number; raceAgents: number; writeup: boolean; uploadId?: string }, signal?: AbortSignal) => request<{ job: ManualJobSnapshot }>("/v1/manual/jobs", { method: "POST", signal, headers: jsonHeaders, body: JSON.stringify(input) });

@@ -83,7 +83,7 @@ export function createModel(config: AppConfig["model"]): Model<SupportedModelApi
 }
 
 function defaultStreamFn(): StreamFn {
-  const proxyUrl = process.env.TSEC_PROXY?.trim();
+  const proxyUrl = process.env.XUANSHU_MODEL_PROXY?.trim();
   const proxy = proxyUrl ? new ProxyAgent(proxyUrl) : undefined;
   const modelFetch = proxy
     ? ((input: string | URL | Request, init?: RequestInit) => fetch(input, { ...(init ?? {}), dispatcher: proxy } as RequestInit))

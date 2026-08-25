@@ -175,8 +175,8 @@ describe("Web phase machine evidence-driven advance", () => {
     manager.addSupportingEvidence(hypothesis.id, "ev1");
     await driveUntil(state, reasoning, "EXPLOITATION");
 
-    state.submission = "flag{web}";
-    await driveUntil(state, reasoning, "FLAG_SEARCH");
+    state.submission = "web-result";
+    await driveUntil(state, reasoning, "RESULT_DISCOVERY");
     await driveUntil(state, reasoning, "VERIFICATION");
 
     // Only submission-specific verification evidence may complete VERIFICATION:
@@ -184,13 +184,13 @@ describe("Web phase machine evidence-driven advance", () => {
     // the exact candidate id of the current submission.
     state.evidence = [{
       id: "ev_verify",
-      summary: "Independently verified the submission by replaying the exploit and confirming the returned flag",
+      summary: "Independently verified the submission by replaying the authorized action and confirming the returned result",
       source: "verifier",
       lifecycle: "used",
       observationIds: [],
       hypothesisIds: [hypothesis.id],
       actionIds: [],
-      candidateIds: [candidateIdForSubmission("flag{web}")],
+      candidateIds: [candidateIdForSubmission("web-result")],
       verificationIds: ["verification_replay"],
       createdAt: T0,
       updatedAt: T0,
@@ -211,7 +211,7 @@ describe("Web phase machine evidence-driven advance", () => {
     manager.addSupportingEvidence(hypothesis.id, "ev1");
     await driveUntil(state, reasoning, "EXPLOITATION");
 
-    state.submission = "flag{web}";
+    state.submission = "web-result";
     await driveUntil(state, reasoning, "VERIFICATION");
 
     // A confirmed vulnerability hypothesis is not submission verification.
@@ -233,7 +233,7 @@ describe("Web phase machine evidence-driven advance", () => {
     manager.addSupportingEvidence(hypothesis.id, "ev1");
     await driveUntil(state, reasoning, "EXPLOITATION");
 
-    state.submission = "flag{old}";
+    state.submission = "old-result";
     await driveUntil(state, reasoning, "VERIFICATION");
 
     // Verification bound to the OLD candidate id.
@@ -245,7 +245,7 @@ describe("Web phase machine evidence-driven advance", () => {
       observationIds: [],
       hypothesisIds: [hypothesis.id],
       actionIds: [],
-      candidateIds: [candidateIdForSubmission("flag{old}")],
+      candidateIds: [candidateIdForSubmission("old-result")],
       verificationIds: ["verification_old"],
       createdAt: T0,
       updatedAt: T0,
@@ -254,7 +254,7 @@ describe("Web phase machine evidence-driven advance", () => {
     // A NEW submission must not inherit the old candidate's verification: switch the
     // submission FIRST, then drive, so only candidate-bound evidence for the new value
     // may complete it.
-    state.submission = "flag{new}";
+    state.submission = "new-result";
     await driveWebPhase(state, reasoning, undefined, T0);
     expect(state.webAgent?.phase).toBe("VERIFICATION");
     expect(state.webAgent?.phase).not.toBe("COMPLETE");
@@ -268,7 +268,7 @@ describe("Web phase machine evidence-driven advance", () => {
       observationIds: [],
       hypothesisIds: [hypothesis.id],
       actionIds: [],
-      candidateIds: [candidateIdForSubmission("flag{new}")],
+      candidateIds: [candidateIdForSubmission("new-result")],
       verificationIds: ["verification_new"],
       createdAt: T0,
       updatedAt: T0,

@@ -24,7 +24,7 @@ const PLAYBOOKS: Record<CtfSkillCategory, string[]> = {
     "When RSA still requires general integer factorization, use the allowlisted ecm program with explicit bounded curve stages. A Python or symbolic factorization timeout alone is not evidence that the instance is unsolvable.",
     "For lattice, finite-field, CRC, or constraint work, verify the negotiated capability once, then prefer fpylll, GP, Z3, or OR-Tools over an untested handwritten solver. Keep dimensions, bounds, and coefficient ordering explicit.",
     "Build a minimal solver with assertions. Re-encrypt, re-hash, or substitute recovered values back into every original equation before accepting plaintext.",
-    "Distinguish an encoded display value from the underlying secret and infer any wrapper only from direct evidence; never submit a re-encoding merely because it looks flag-like.",
+    "Distinguish an encoded display value from the underlying secret and infer any wrapper only from direct evidence; never submit a re-encoding merely because it looks answer-like.",
   ],
   reverse: [
     "Identify format, architecture, packing, imports, sections, strings, entry points, and anti-analysis signals before deep decompilation.",

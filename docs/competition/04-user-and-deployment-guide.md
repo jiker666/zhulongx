@@ -69,7 +69,7 @@ sandbox 只执行 operator allowlist 中的结构化程序，并使用独立 scr
 
 ## 5. 托管评测
 
-主办方托管模式应使用 `config/tsec-hosted.yaml` 与 [../tsec-hosted.md](../tsec-hosted.md) 的网关规则。模型 API 地址、模型 Key、平台 Token 和 benchmark 地址全部通过环境变量注入，不能写入镜像、仓库或运行日志。Docker 镜像的构建和上传不属于本次交付步骤；需要执行时应由团队在本地按主办方要求另行完成。
+主办方托管模式应以 `config/container.yaml` 为基础创建被 Git 忽略的私有配置 overlay，并按现场规则填写模型协议、网关地址、环境变量名、scope 与预算。模型 Key、平台 Token 和评测数据地址只通过运行环境注入，不能写入镜像、仓库或运行日志。Docker 镜像的构建和上传不属于本次交付步骤；需要执行时应由团队在本地按主办方要求另行完成。
 
 ## 6. 线上测试地址
 

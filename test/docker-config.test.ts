@@ -26,22 +26,6 @@ describe("Docker sandbox wiring", () => {
     expect(launcher).toContain("--pids-limit 256");
   });
 
-  it("provides a self-starting managed TSec image without embedding credentials", async () => {
-    const [dockerfile, entrypoint, config] = await Promise.all([
-      readFile("Dockerfile.tsec", "utf8"),
-      readFile("tools/tsec-hosted-entrypoint.sh", "utf8"),
-      readFile("config/tsec-hosted.yaml", "utf8"),
-    ]);
-
-    expect(dockerfile).toContain("playwright install --with-deps chromium");
-    expect(dockerfile).toContain("TSEC_SKIP_VPN=1");
-    expect(entrypoint).toContain("BAIDU_API_KEY BENCHMARK_TOKEN BENCHMARK_BASE_URL");
-    expect(entrypoint).toContain("tsec-solve-once --config");
-    expect(entrypoint).toContain("sandbox --config");
-    expect(config).toContain("http://agent-awd.baidu.com.tsecbench.gw/v1");
-    expect(`${dockerfile}\n${entrypoint}\n${config}`).not.toMatch(/^\s*apiKey\s*:/m);
-  });
-
   it("installs, declares, and smoke-checks the core Crypto/Misc profile", async () => {
     const [installer, manifestSource, requirements, verifier, dockerfile] = await Promise.all([
       readFile("tools/ctf/install-apt-core.sh", "utf8"),

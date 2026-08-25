@@ -6,9 +6,9 @@ const NEXT_PHASES: Record<WebPhase, WebPhase[]> = {
   ENUMERATION: ["FINGERPRINT", "VULNERABILITY_ANALYSIS", "FAILED"],
   FINGERPRINT: ["VULNERABILITY_ANALYSIS", "FAILED"],
   VULNERABILITY_ANALYSIS: ["EXPLOITATION", "RECON", "FAILED"],
-  EXPLOITATION: ["FLAG_SEARCH", "VULNERABILITY_ANALYSIS", "FAILED"],
-  FLAG_SEARCH: ["VERIFICATION", "EXPLOITATION", "FAILED"],
-  VERIFICATION: ["COMPLETE", "FLAG_SEARCH", "FAILED"],
+  EXPLOITATION: ["RESULT_DISCOVERY", "VULNERABILITY_ANALYSIS", "FAILED"],
+  RESULT_DISCOVERY: ["VERIFICATION", "EXPLOITATION", "FAILED"],
+  VERIFICATION: ["COMPLETE", "RESULT_DISCOVERY", "FAILED"],
   COMPLETE: [],
   FAILED: [],
 };
@@ -130,7 +130,7 @@ export function roleForPhase(phase: WebPhase): WebAgentState["activeRole"] {
       return "vulnerability";
     case "EXPLOITATION":
       return "exploit";
-    case "FLAG_SEARCH":
+    case "RESULT_DISCOVERY":
       return "exploit";
     case "VERIFICATION":
       return "verification";

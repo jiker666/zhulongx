@@ -50,7 +50,7 @@ npm --prefix frontend ci --ignore-scripts
 
 - 配置文件由 operator 管理，定义 `scope`、允许主机、程序 allowlist、预算与模型接入信息。
 - API Key 只通过环境变量读取，禁止提交到 `.env`、配置样例、运行产物或审计链。
-- 托管评测网关的地址转换和运行约束见 [../tsec-hosted.md](../tsec-hosted.md)。
+- 托管评测的网关地址、额外请求头和运行约束由主办方提供的私有配置 overlay 管理，不进入公共仓库。
 - per-run scope override 只能收窄已有权限，不能添加主机、程序、路径或把 `observe` 提升为 `controlled`。
 
 ## 5. 本地开发与验证

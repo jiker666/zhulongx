@@ -3,7 +3,7 @@
   "version": "0.2.2",
   "private": true,
   "type": "module",
-  "description": "面向网络安全实战的自主决策智能体",
+  "description": "具备自主规划、执行、验证与审计能力的通用网络安全智能体运行时",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -16,7 +16,8 @@
   "keywords": [
     "agent",
     "cybersecurity",
-    "ctf",
+    "security-automation",
+    "policy-engine",
     "sandbox",
     "typescript"
   ],
@@ -27,18 +28,17 @@
     "xuan-shu": "dist/cli.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "npm run clean && tsc -p tsconfig.build.json",
     "check": "npm run typecheck && npm run lint && npm test && npm run build",
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "dev": "tsx src/cli.ts",
     "lint": "eslint \"src/**/*.ts\" \"test/**/*.ts\"",
     "doctor": "tsx src/cli.ts doctor",
     "sandbox": "tsx src/cli.ts sandbox",
     "sandbox-health": "tsx src/cli.ts sandbox-health",
     "serve": "tsx src/cli.ts serve",
-    "nss": "tsx src/cli.ts serve --config config/nss-wanqing.yaml",
     "start": "node dist/cli.js",
     "test": "vitest run test frontend/src/features/decision-stream/projection.test.ts frontend/src/features/evidence-graph/projection.test.ts frontend/src/features/realtime/merge.test.ts frontend/src/features/policy/projection.test.ts",
-    "test:benchmark": "vitest run test/web-benchmark.test.ts",
     "test:browser": "vitest run test/browser-runtime.test.ts test/browser-live.test.ts",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit -p tsconfig.json"

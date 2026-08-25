@@ -22,12 +22,12 @@ const phaseLabels: Record<string, string> = {
 };
 
 function getTaskTitle(task: string, taskType: string): string {
-  if (taskType.startsWith("Web CTF")) return "Web CTF 靶场挑战";
-  if (taskType.startsWith("Reverse")) return "Reverse 逆向分析挑战";
-  if (taskType.startsWith("Pwn")) return "Pwn 二进制利用挑战";
-  if (taskType.startsWith("Crypto")) return "Crypto 密码学挑战";
-  if (taskType.startsWith("Forensics")) return "Forensics 取证分析挑战";
-  if (taskType.startsWith("Misc")) return "Misc 综合挑战";
+  if (taskType.startsWith("Web")) return "Web / API 安全任务";
+  if (taskType.startsWith("Reverse")) return "Reverse 逆向分析任务";
+  if (taskType.startsWith("Pwn")) return "Pwn 二进制分析任务";
+  if (taskType.startsWith("Crypto")) return "Crypto 密码分析任务";
+  if (taskType.startsWith("Forensics")) return "Forensics 取证分析任务";
+  if (taskType.startsWith("Misc")) return "Misc 综合分析任务";
   const firstLine = task.split(/\r?\n/)[0]?.trim();
   if (!firstLine) return "未命名安全任务";
   return firstLine.length > 68 ? `${firstLine.slice(0, 68)}…` : firstLine;
@@ -40,14 +40,14 @@ function getTarget(task: string): string | undefined {
 
 export function getTaskType(run: RunSummary): string {
   const category = run.category?.trim().toLowerCase();
-  if (category === "web" || category === "web ctf" || category?.includes("web")) return "Web CTF";
+  if (category === "web" || category === "web/api" || category?.includes("web")) return "Web / API";
   if (category?.includes("reverse")) return "Reverse 逆向";
   if (category?.includes("pwn") || category?.includes("binary")) return "Pwn 二进制";
   if (category?.includes("crypto")) return "Crypto 密码学";
   if (category?.includes("forensic")) return "Forensics 取证";
   if (category?.includes("misc")) return "Misc 杂项";
   const task = run.task.toLowerCase();
-  if (/web\s*ctf|ctf\s*web|https?:\/\//.test(task)) return "Web CTF";
+  if (/web\s*(?:ctf|api)|(?:ctf|api)\s*web|https?:\/\//.test(task)) return "Web / API";
   if (/reverse|逆向/.test(task)) return "Reverse 逆向";
   if (/pwn|二进制|栈溢出/.test(task)) return "Pwn 二进制";
   if (/crypto|密码|加密/.test(task)) return "Crypto 密码学";
@@ -77,7 +77,7 @@ export function RunCard({ run }: { run: RunSummary }) {
 
       <div className="run-card-identity">
         <span className="run-card-label">RUN / {shortId(run.id)}</span>
-        <span className="run-card-category"><span>题型</span>{taskType}</span>
+        <span className="run-card-category"><span>类别</span>{taskType}</span>
       </div>
       <h2 title={run.task}>{getTaskTitle(run.task, taskType)}</h2>
 

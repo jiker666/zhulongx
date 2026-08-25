@@ -40,7 +40,7 @@ describe("QuestionBank", () => {
     expect(JSON.stringify(questions)).not.toContain("hidden");
     const task = questionToTaskRequest(questions[0]!);
     expect(task.metadata).toMatchObject({ source: "question-bank", questionId: "benchmark/crypto/Example", category: "crypto" });
-    expect(task.task).toContain("finish the task with the exact final answer");
+    expect(task.task).toContain("finish the task with the exact final result");
   });
 
   it("reports missing operator configuration without exposing a local path", async () => {

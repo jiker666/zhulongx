@@ -1602,7 +1602,6 @@ export function createToolSet(context: ToolContext): ToolSet {
         state.independentlyVerified = input.independentlyVerified;
         if (input.submission) {
           state.submission = input.submission.trim();
-          if (!/FLAG\s*[:：=]/i.test(state.summary)) state.summary = `${state.summary}\nFLAG: ${state.submission}`;
         }
         state.stopReason = input.status === "completed" ? "Agent declared task complete" : "Agent reported a blocker";
         state.phase = "done";

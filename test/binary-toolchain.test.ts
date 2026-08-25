@@ -18,11 +18,10 @@ const REQUIRED_PROGRAMS = [
 
 describe("RE/PWN binary toolchain", () => {
   it("pins and verifies Radare2 and JADX before installing them", async () => {
-    const [radare, jadx, sandboxDockerfile, tsecDockerfile] = await Promise.all([
+    const [radare, jadx, sandboxDockerfile] = await Promise.all([
       readFile("tools/ctf/install-radare2.sh", "utf8"),
       readFile("tools/ctf/install-jadx.sh", "utf8"),
       readFile("Dockerfile.ctf-sandbox", "utf8"),
-      readFile("Dockerfile.tsec", "utf8"),
     ]);
 
     expect(radare).toContain("RADARE2_VERSION=6.2.0");
@@ -32,10 +31,8 @@ describe("RE/PWN binary toolchain", () => {
     expect(jadx).toContain("JADX_VERSION=1.5.5");
     expect(jadx).toContain("skylot/jadx/releases/download/v${JADX_VERSION}");
     expect(jadx).toContain("sha256sum --check --status");
-    for (const dockerfile of [sandboxDockerfile, tsecDockerfile]) {
-      expect(dockerfile).toContain("install-radare2.sh");
-      expect(dockerfile).toContain("install-jadx.sh");
-    }
+    expect(sandboxDockerfile).toContain("install-radare2.sh");
+    expect(sandboxDockerfile).toContain("install-jadx.sh");
   });
 
   it("declares only reviewed binary tools through the manifest and operator configs", async () => {
@@ -64,12 +61,6 @@ describe("RE/PWN binary toolchain", () => {
     for (const path of [
       "config/default.yaml",
       "config/container.yaml",
-      "config/arena.yaml",
-      "config/arena-container.yaml",
-      "config/nss-wanqing.yaml",
-      "config/tsec.yaml",
-      "config/tsec-baidu-local.yaml",
-      "config/tsec-hosted.yaml",
     ]) {
       const config = parse(await readFile(path, "utf8")) as { scope: { allowedPrograms: string[] } };
       expect(config.scope.allowedPrograms, path).toEqual(expect.arrayContaining(REQUIRED_PROGRAMS));
@@ -85,9 +76,8 @@ describe("RE/PWN binary toolchain", () => {
 
     expect(guide).toContain("structured `run_command`");
     expect(guide).toContain("network-isolated");
-    expect(prompt).toContain("Use r2 for native disassembly/cross-references");
-    expect(prompt).toContain("Use pwntools/pwn only for reproducible local harnesses");
-    expect(prompt).toContain("extract_archive and search_artifact");
+    expect(prompt).toContain("PolicyEngine");
+    expect(prompt).toContain("attachments");
     expect(verifier).toContain("gdb-multiarch --version");
     expect(verifier).toContain("jadx --version");
   });

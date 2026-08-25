@@ -76,7 +76,7 @@ describe("ManualJobManager", () => {
     expect(runManager.start).toHaveBeenCalledWith(expect.any(Object), { workspaceMode: "attachments-only" });
   });
 
-  it("returns exact flags and bounded writeups without changing the task preview", async () => {
+  it("returns structured submissions and bounded reports without inferring results from prose", async () => {
     const requests: TaskRequest[] = [];
     let nextRun = 0;
     const states = new Map<string, RunState>();
@@ -86,10 +86,10 @@ describe("ManualJobManager", () => {
         requests.push(task);
         const result = fakeState(id, task);
         if (nextRun === 1) {
-          result.submission = "NSSCTF{exact-result}";
-          result.summary = `# WP\n\n${"evidence ".repeat(3000)}`;
+          result.submission = "exact-result";
+          result.summary = `# Report\n\n${"evidence ".repeat(3000)}`;
         } else {
-          result.summary = "# WP\n\nRecovered from deterministic evidence.\nFLAG: `fallback-result`";
+          result.summary = "# Report\n\nRecovered from deterministic evidence.\nRESULT: `prose-only-result`";
         }
         states.set(id, result);
         return id;
@@ -98,17 +98,18 @@ describe("ManualJobManager", () => {
       stop: vi.fn(() => true),
     };
     const manager = new ManualJobManager({ runManager });
-    const started = manager.start({ tasks: ["first challenge", "second challenge"], concurrency: 2, writeup: true });
+    const started = manager.start({ tasks: ["first task", "second task"], concurrency: 2, writeup: true });
 
     await vi.waitFor(() => expect(manager.get(started.id)?.status).toBe("completed"));
     const snapshot = manager.get(started.id);
     expect(snapshot).toMatchObject({ writeup: true, tasks: [
-      { task: "first challenge", flag: "NSSCTF{exact-result}" },
-      { task: "second challenge", flag: "fallback-result" },
+      { task: "first task", submission: "exact-result" },
+      { task: "second task" },
     ] });
+    expect(snapshot?.tasks[1]?.submission).toBeUndefined();
     expect(snapshot?.tasks[0]?.writeup?.length).toBeLessThanOrEqual(16 * 1024);
     expect(snapshot?.tasks[0]?.writeup).toContain("[truncated]");
-    expect(requests.every((request) => request.task.includes("Markdown solution writeup"))).toBe(true);
+    expect(requests.every((request) => request.task.includes("Markdown task report"))).toBe(true);
     expect(requests.every((request) => request.task.includes("finish_task"))).toBe(true);
   });
 
@@ -131,9 +132,9 @@ describe("ManualJobManager", () => {
     const started = manager.start({ tasks: ["no wp"], concurrency: 1, writeup: false });
 
     await vi.waitFor(() => expect(manager.get(started.id)?.status).toBe("completed"));
-    expect(request?.task).toContain("set submission to the exact final answer only");
-    expect(request?.task).not.toContain("Markdown solution writeup");
-    expect(manager.get(started.id)).toMatchObject({ writeup: false, tasks: [{ flag: "answer-only" }] });
+    expect(request?.task).toContain("set submission to the exact final result only");
+    expect(request?.task).not.toContain("Markdown task report");
+    expect(manager.get(started.id)).toMatchObject({ writeup: false, tasks: [{ submission: "answer-only" }] });
     expect(manager.get(started.id)?.tasks[0]?.writeup).toBeUndefined();
   });
 
@@ -180,7 +181,7 @@ describe("ManualJobManager", () => {
           runOptions?.sharedEvidence?.publish(id, {
             kind: "fact",
             claim: "Second agent observed a candidate in deterministic output",
-            evidence: ["command output contained winner-flag"],
+            evidence: ["command output contained verified-result"],
             confidence: 0.9,
           });
         }
@@ -190,8 +191,8 @@ describe("ManualJobManager", () => {
         resolvers.set(id, resolve);
         if (id === "run-race-2") {
           const state = fakeState(id, requests[1] as TaskRequest, "completed");
-          state.submission = "winner-flag";
-          state.verification = ["command output contained winner-flag"];
+          state.submission = "verified-result";
+          state.verification = ["command output contained verified-result"];
           state.independentlyVerified = true;
           setTimeout(() => resolve(state), 5);
         }
@@ -210,7 +211,7 @@ describe("ManualJobManager", () => {
     expect(snapshot).toMatchObject({ raceAgents: 2, completed: 1, failed: 0 });
     expect(snapshot?.tasks[0]).toMatchObject({
       status: "completed",
-      flag: "winner-flag",
+      submission: "verified-result",
       race: { agentCount: 2, winnerAgent: 1, cancelledAgents: 1, sharedEvidenceEntries: 1 },
     });
     expect(runManager.start).toHaveBeenCalledTimes(2);
@@ -229,7 +230,7 @@ describe("ManualJobManager", () => {
       start: vi.fn((task: TaskRequest) => {
         const id = `run-unverified-${++nextRun}`;
         const state = fakeState(id, task, "completed");
-        state.submission = "guessed-flag";
+        state.submission = "unverified-result";
         states.set(id, state);
         return id;
       }),
@@ -240,7 +241,7 @@ describe("ManualJobManager", () => {
     const started = manager.start({ tasks: ["unverified race"], concurrency: 1, raceAgents: 2, skipBlocked: true });
 
     await vi.waitFor(() => expect(manager.get(started.id)?.status).toBe("completed"));
-    expect(manager.get(started.id)?.tasks[0]).toMatchObject({ status: "skipped", flag: "guessed-flag" });
+    expect(manager.get(started.id)?.tasks[0]).toMatchObject({ status: "skipped", submission: "unverified-result" });
     expect(runManager.stop).not.toHaveBeenCalled();
   });
 

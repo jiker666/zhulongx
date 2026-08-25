@@ -2,15 +2,6 @@
 import { access, mkdir, readFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { resolve } from "node:path";
-import { ArenaClient, summarizeArenaAttempt } from "./arena.js";
-import {
-  buildArenaEvaluationReport,
-  compactAttemptResult,
-  solveArenaOnce,
-  writeArenaEvaluationReport,
-  type ArenaAttemptEvaluation,
-} from "./arena-evaluation.js";
-import { ArenaWrongQuestionStore } from "./arena-wrong-questions.js";
 import { loadConfig, loadScopeFile, mergeScope } from "./config.js";
 import { loadDotEnv } from "./env.js";
 import { AuditChain } from "./audit.js";
@@ -25,11 +16,6 @@ import { QuestionBankProgressStore } from "./question-bank-progress.js";
 import { ManualJobManager } from "./manual-jobs.js";
 import { RunManager } from "./run-manager.js";
 import type { AppConfig } from "./types.js";
-import { createTSecClient, solveTSecOnce, tsecReadiness } from "./tsec.js";
-import { DascClient } from "./dasc.js";
-
-const MAX_CLI_ATTEMPT_HISTORY = 200;
-const MAX_CLI_SEEN_ATTEMPTS = 1000;
 
 interface ParsedArgs {
   command: string;
@@ -37,13 +23,6 @@ interface ParsedArgs {
   task?: string;
   taskFile?: string;
   scope?: string;
-  attemptId?: number;
-  exerciseId?: number;
-  noticeId?: number;
-  flag?: string;
-  autoSubmit?: boolean;
-  maxAttempts?: number;
-  idleSeconds?: number;
   idsPath?: string;
   endpoint?: string;
   appId?: string;
@@ -53,7 +32,6 @@ interface ParsedArgs {
   concurrency?: number;
   raceAgents?: number;
   writeup?: boolean;
-  challengeCode?: string;
   attachments: string[];
 }
 
@@ -67,25 +45,6 @@ Usage:
   xuan-shu serve [--config path]
   xuan-shu sandbox [--config path]
   xuan-shu sandbox-health [--config path]
-  xuan-shu arena-current [--config path]
-  xuan-shu arena-next [--config path]
-  xuan-shu arena-attempt --attempt-id id [--config path]
-  xuan-shu arena-submit --attempt-id id --flag "..." [--config path]
-  xuan-shu arena-abandon --attempt-id id [--config path]
-  xuan-shu arena-solve-once [--no-auto-submit] [--config path]
-  xuan-shu arena-loop [--max-attempts n] [--idle-seconds n] [--config path]  # continuous unless bounded
-  xuan-shu arena-evaluate [--max-attempts 20] [--idle-seconds n] [--config path]
-  xuan-shu dasc-match-info [--config path]
-  xuan-shu dasc-overview [--config path]
-  xuan-shu dasc-exercise-list [--config path]
-  xuan-shu dasc-exercise --exercise-id id [--config path]
-  xuan-shu dasc-build-env --exercise-id id [--config path]
-  xuan-shu dasc-recover-env --exercise-id id [--config path]
-  xuan-shu dasc-submit --exercise-id id --flag "..." [--config path]
-  xuan-shu dasc-notice-list [--config path]
-  xuan-shu dasc-notice --notice-id id [--config path]
-  xuan-shu tsec-solve-once [--challenge-code code] [--config path]
-  xuan-shu tsec-doctor [--config path]
   xuan-shu resource-export --endpoint URL [--ids task_ids.json] [--output report.json] [--config path]
   xuan-shu question-bank-list [--config path]
   xuan-shu question-bank-solve [--concurrency n] [--race-agents n] [--no-writeup] [--config path]
@@ -98,20 +57,12 @@ function parseArgs(argv: string[]): ParsedArgs {
     const arg = argv[index];
     const value = argv[index + 1];
     if (!arg) continue;
-    if (arg === "--auto-submit") {
-      result.autoSubmit = true;
-      continue;
-    }
-    if (arg === "--no-auto-submit") {
-      result.autoSubmit = false;
-      continue;
-    }
     if (arg === "--no-writeup") {
       result.writeup = false;
       continue;
     }
     if (
-      ["--config", "--task", "--task-file", "--scope", "--attach", "--attempt-id", "--exercise-id", "--notice-id", "--flag", "--max-attempts", "--idle-seconds", "--ids", "--endpoint", "--app-id", "--auth-key", "--model", "--output", "--concurrency", "--race-agents", "--challenge-code"].includes(
+      ["--config", "--task", "--task-file", "--scope", "--attach", "--ids", "--endpoint", "--app-id", "--auth-key", "--model", "--output", "--concurrency", "--race-agents"].includes(
         arg,
       )
     ) {
@@ -121,32 +72,6 @@ function parseArgs(argv: string[]): ParsedArgs {
       if (arg === "--task-file") result.taskFile = value;
       if (arg === "--scope") result.scope = value;
       if (arg === "--attach") result.attachments.push(value);
-      if (arg === "--attempt-id") {
-        const attemptId = Number(value);
-        if (!Number.isInteger(attemptId) || attemptId <= 0) throw new Error("--attempt-id must be a positive integer");
-        result.attemptId = attemptId;
-      }
-      if (arg === "--exercise-id") {
-        const exerciseId = Number(value);
-        if (!Number.isInteger(exerciseId) || exerciseId <= 0) throw new Error("--exercise-id must be a positive integer");
-        result.exerciseId = exerciseId;
-      }
-      if (arg === "--notice-id") {
-        const noticeId = Number(value);
-        if (!Number.isInteger(noticeId) || noticeId <= 0) throw new Error("--notice-id must be a positive integer");
-        result.noticeId = noticeId;
-      }
-      if (arg === "--flag") result.flag = value;
-      if (arg === "--max-attempts") {
-        const maxAttempts = Number(value);
-        if (!Number.isInteger(maxAttempts) || maxAttempts <= 0) throw new Error("--max-attempts must be a positive integer");
-        result.maxAttempts = maxAttempts;
-      }
-      if (arg === "--idle-seconds") {
-        const idleSeconds = Number(value);
-        if (!Number.isFinite(idleSeconds) || idleSeconds < 0) throw new Error("--idle-seconds must be a non-negative number");
-        result.idleSeconds = idleSeconds;
-      }
       if (arg === "--ids") result.idsPath = value;
       if (arg === "--endpoint") result.endpoint = value;
       if (arg === "--app-id") result.appId = value;
@@ -163,7 +88,6 @@ function parseArgs(argv: string[]): ParsedArgs {
         if (!Number.isInteger(raceAgents) || raceAgents < 1 || raceAgents > 8) throw new Error("--race-agents must be an integer between 1 and 8");
         result.raceAgents = raceAgents;
       }
-      if (arg === "--challenge-code") result.challengeCode = value;
       index += 1;
       continue;
     }
@@ -178,7 +102,7 @@ function printJson(value: unknown): void {
 
 async function delay(seconds: number): Promise<void> {
   if (seconds <= 0) return;
-  await new Promise((resolveDelay) => setTimeout(resolveDelay, seconds * 1000));
+  await new Promise<void>((resolveDelay) => setTimeout(resolveDelay, seconds * 1000));
 }
 
 async function doctor(configPath?: string): Promise<number> {
@@ -204,15 +128,6 @@ async function doctor(configPath?: string): Promise<number> {
     ok: Boolean(process.env[config.model.apiKeyEnv]),
     detail: process.env[config.model.apiKeyEnv] ? `${config.model.apiKeyEnv} is set` : `${config.model.apiKeyEnv} is not set`,
   });
-  if (config.dasc?.enabled) {
-    checks.push({
-      check: "DASC AccessKey",
-      ok: Boolean(process.env[config.dasc.accessKeyEnv]),
-      detail: process.env[config.dasc.accessKeyEnv]
-        ? `${config.dasc.accessKeyEnv} is set`
-        : `${config.dasc.accessKeyEnv} is not set`,
-    });
-  }
   try {
     const health = await new SandboxClient(config.runtime.sandbox.socketPath, config.runtime.sandbox.connectTimeoutMs).health();
     const missing = config.scope.allowedPrograms.filter((program) => !health.allowedPrograms.includes(program));
@@ -236,193 +151,6 @@ async function doctor(configPath?: string): Promise<number> {
   }
   for (const check of checks) console.log(`${check.ok ? "OK  " : "FAIL"} ${check.check}: ${check.detail}`);
   return checks.every((check) => check.ok) ? 0 : 1;
-}
-
-function requireArenaCredentials(config: AppConfig): void {
-  if (!config.arena?.enabled) throw new Error("Arena integration is disabled in the selected config");
-  if (!process.env[config.arena.tokenEnv]) {
-    throw new Error(`Missing NSSCTF Arena token in environment variable ${config.arena.tokenEnv}`);
-  }
-  if (!process.env[config.model.apiKeyEnv]) {
-    throw new Error(`Missing model credential in environment variable ${config.model.apiKeyEnv}`);
-  }
-}
-
-function createDascClient(config: AppConfig): DascClient {
-  if (!config.dasc?.enabled) throw new Error("DASC integration is disabled in the selected config");
-  if (!process.env[config.dasc.accessKeyEnv]) {
-    throw new Error(`Missing DASC AccessKey in environment variable ${config.dasc.accessKeyEnv}`);
-  }
-  return new DascClient(config.dasc, config.scope);
-}
-
-async function ensureSandbox(config: AppConfig): Promise<{ close: () => Promise<void>; owned: boolean }> {
-  const client = new SandboxClient(config.runtime.sandbox.socketPath, config.runtime.sandbox.connectTimeoutMs);
-  try {
-    await client.health();
-    return { close: async () => {}, owned: false };
-  } catch {
-    const running = await startSandboxServer({
-      socketPath: config.runtime.sandbox.socketPath,
-      workspaceRoot: config.scope.workspaceRoot,
-      scratchRoot: config.runtime.scratchRoot,
-      allowedPrograms: config.scope.allowedPrograms,
-      ...(config.scope.pythonModules ? { pythonModules: config.scope.pythonModules } : {}),
-      defaultTimeoutMs: config.runtime.commandTimeoutMs,
-      maxOutputBytes: config.runtime.maxOutputBytes,
-      network: process.env.XUANSHU_SANDBOX_NETWORK ?? "external",
-      ...(config.scope.extraPaths ? { extraPaths: config.scope.extraPaths } : {}),
-      ...(config.runtime.policyPermissive ? { permissivePaths: true } : {}),
-    });
-    return { close: running.close, owned: true };
-  }
-}
-
-function evaluationEventLogger() {
-  return (event: { type: string; data: unknown }) => {
-    if (["tool.started", "policy.decision", "run.settled"].includes(event.type)) {
-      console.error(`[${event.type}] ${JSON.stringify(event.data)}`);
-    }
-  };
-}
-
-export function isRetryableInfrastructureError(message: string): boolean {
-  return /(?:\b429\b|too\s*many\s*requests|rate\s*limit|\b5\d\d\b|econnreset|econnrefused|etimedout|fetch failed|socket hang up|connection\s+error|(?:upstream|service)\s+(?:service\s+)?temporarily\s+unavailable|service\s+unavailable|container unavailable)/i.test(
-    message,
-  );
-}
-
-async function runArenaEvaluation(
-  config: AppConfig,
-  targetAttempts: number | null,
-  autoSubmit: boolean,
-  idleSeconds: number,
-): Promise<number> {
-  requireArenaCredentials(config);
-  if (targetAttempts !== null && (!Number.isInteger(targetAttempts) || targetAttempts <= 0)) {
-    throw new Error("targetAttempts must be a positive integer or null for continuous mode");
-  }
-  const sandbox = await ensureSandbox(config);
-  const client = new ArenaClient(config.arena);
-  const startedAt = new Date().toISOString();
-  const attempts: ArenaAttemptEvaluation[] = [];
-  const seen = new Set<number>();
-  const seenOrder: number[] = [];
-  const wrongQuestions = new ArenaWrongQuestionStore(config);
-  let settledAttempts = 0;
-  let startAgent;
-  let endAgent;
-  let infrastructureError: string | undefined;
-  let infrastructureRetries = 0;
-  let categorySkips = 0;
-  try {
-    const current = await client.current();
-    startAgent = current.agent;
-    const rememberAttempt = (attemptId: number) => {
-      seen.add(attemptId);
-      seenOrder.push(attemptId);
-      if (seenOrder.length > MAX_CLI_SEEN_ATTEMPTS) {
-        const expired = seenOrder.shift();
-        if (expired !== undefined) seen.delete(expired);
-      }
-    };
-    while (targetAttempts === null || settledAttempts < targetAttempts) {
-      let solved;
-      try {
-        solved = await solveArenaOnce(config, client, {
-          autoSubmit,
-          seenAttemptIds: seen,
-          onEvent: evaluationEventLogger(),
-        });
-      } catch (error) {
-        infrastructureError = error instanceof Error ? error.message : String(error);
-        if (isRetryableInfrastructureError(infrastructureError)) {
-          const waitSeconds = Math.min(60 * 2 ** infrastructureRetries, 300);
-          infrastructureRetries += 1;
-          console.error(
-            `[arena-evaluate] transient infrastructure error; retrying the active attempt in ${waitSeconds}s: ${infrastructureError}`,
-          );
-          await delay(waitSeconds);
-          continue;
-        }
-        console.error(`[arena-evaluate] stopped before settling the next attempt: ${infrastructureError}`);
-        break;
-      }
-      attempts.push(solved.evaluation);
-      if (attempts.length > MAX_CLI_ATTEMPT_HISTORY) attempts.shift();
-      printJson(compactAttemptResult(solved.evaluation));
-      if (solved.evaluation.outcome === "skipped") {
-        categorySkips += 1;
-        rememberAttempt(solved.attemptId);
-        if (categorySkips >= (config.arena?.maxCategorySkips ?? 10) && targetAttempts !== null) {
-          infrastructureError = "Arena category-skip budget exhausted before an allowed category was available";
-          break;
-        }
-        if (categorySkips >= (config.arena?.maxCategorySkips ?? 10)) categorySkips = 0;
-        await delay(idleSeconds);
-        continue;
-      }
-      if (!solved.evaluation.settled) {
-        infrastructureError = solved.evaluation.reason ?? "Attempt was not settled";
-        if (isRetryableInfrastructureError(infrastructureError)) {
-          const waitSeconds = Math.min(60 * 2 ** infrastructureRetries, 300);
-          infrastructureRetries += 1;
-          console.error(
-            `[arena-evaluate] transient model/runtime error; retrying attempt ${solved.attemptId} in ${waitSeconds}s`,
-          );
-          await delay(waitSeconds);
-          continue;
-        }
-        break;
-      }
-      rememberAttempt(solved.attemptId);
-      settledAttempts += 1;
-      infrastructureRetries = 0;
-      categorySkips = 0;
-      infrastructureError = undefined;
-      if (["wrong", "blocked", "abandoned"].includes(solved.evaluation.outcome)) {
-        try {
-          await wrongQuestions.record(solved.state, solved.evaluation);
-        } catch (error) {
-          console.error(`[arena-evaluate] unable to archive wrong question ${solved.attemptId}: ${error instanceof Error ? error.message : String(error)}`);
-        }
-      }
-      await delay(idleSeconds);
-    }
-    try {
-      endAgent = (await client.current()).agent;
-    } catch (error) {
-      infrastructureError ??= error instanceof Error ? error.message : String(error);
-    }
-    const report = buildArenaEvaluationReport({
-      startedAt,
-      targetAttempts,
-      config,
-      attempts,
-      ...(startAgent === undefined ? {} : { startAgent }),
-      ...(endAgent === undefined ? {} : { endAgent }),
-      ...(infrastructureError === undefined ? {} : { infrastructureError }),
-    });
-    const reportPath = await writeArenaEvaluationReport(config, report);
-    printJson({
-      evaluation: {
-        targetAttempts: report.targetAttempts,
-        evaluatedAttempts: report.evaluatedAttempts,
-        correct: report.correct,
-        incorrect: report.incorrect,
-        accuracy: report.accuracy,
-        accuracyPercent: report.accuracyPercent,
-        completed: report.completed,
-        infrastructureError: report.infrastructureError,
-      },
-      reportPath,
-      model: report.model,
-      agent: report.endAgent ?? report.startAgent,
-    });
-    return report.completed ? 0 : 2;
-  } finally {
-    if (sandbox.owned) await sandbox.close();
-  }
 }
 
 async function runResourceExport(config: AppConfig, args: ParsedArgs): Promise<number> {
@@ -573,109 +301,6 @@ async function main(): Promise<void> {
     process.exitCode = await runQuestionBankSolve(config, args);
     return;
   }
-  if (args.command === "arena-current") {
-    const data = await new ArenaClient(config.arena).current();
-    printJson(data);
-    return;
-  }
-  if (args.command === "arena-next") {
-    const data = await new ArenaClient(config.arena).next();
-    printJson({ summary: summarizeArenaAttempt(data), data });
-    return;
-  }
-  if (args.command === "arena-attempt") {
-    if (!args.attemptId) throw new Error("arena-attempt requires --attempt-id");
-    const data = await new ArenaClient(config.arena).attempt(args.attemptId);
-    printJson(data);
-    return;
-  }
-  if (args.command === "arena-submit") {
-    if (!args.attemptId) throw new Error("arena-submit requires --attempt-id");
-    if (!args.flag) throw new Error("arena-submit requires --flag");
-    const data = await new ArenaClient(config.arena).submit(args.attemptId, args.flag);
-    printJson({ submitted: true, response: data });
-    return;
-  }
-  if (args.command === "arena-abandon") {
-    if (!args.attemptId) throw new Error("arena-abandon requires --attempt-id");
-    const data = await new ArenaClient(config.arena).abandon(args.attemptId);
-    printJson({ abandoned: true, response: data });
-    return;
-  }
-  if (args.command === "arena-solve-once") {
-    process.exitCode = await runArenaEvaluation(config, 1, args.autoSubmit ?? true, 0);
-    return;
-  }
-  if (args.command === "arena-loop") {
-    const maxAttempts = args.maxAttempts ?? null;
-    const idleSeconds = args.idleSeconds ?? 10;
-    process.exitCode = await runArenaEvaluation(config, maxAttempts, args.autoSubmit ?? true, idleSeconds);
-    return;
-  }
-  if (args.command === "arena-evaluate") {
-    const targetAttempts = args.maxAttempts ?? 20;
-    const idleSeconds = args.idleSeconds ?? 1;
-    process.exitCode = await runArenaEvaluation(config, targetAttempts, args.autoSubmit ?? true, idleSeconds);
-    return;
-  }
-  if (args.command.startsWith("dasc-")) {
-    const client = createDascClient(config);
-    if (args.command === "dasc-match-info") {
-      printJson(await client.matchInfo());
-      return;
-    }
-    if (args.command === "dasc-overview") {
-      printJson(await client.overview());
-      return;
-    }
-    if (args.command === "dasc-exercise-list") {
-      printJson(await client.exerciseList());
-      return;
-    }
-    if (args.command === "dasc-exercise") {
-      if (!args.exerciseId) throw new Error("dasc-exercise requires --exercise-id");
-      printJson(await client.exercise(args.exerciseId));
-      return;
-    }
-    if (args.command === "dasc-build-env") {
-      if (!args.exerciseId) throw new Error("dasc-build-env requires --exercise-id");
-      printJson(await client.buildExerciseEnv(args.exerciseId));
-      return;
-    }
-    if (args.command === "dasc-recover-env") {
-      if (!args.exerciseId) throw new Error("dasc-recover-env requires --exercise-id");
-      printJson(await client.recoverExerciseEnv(args.exerciseId));
-      return;
-    }
-    if (args.command === "dasc-submit") {
-      if (!args.exerciseId) throw new Error("dasc-submit requires --exercise-id");
-      if (!args.flag) throw new Error("dasc-submit requires --flag");
-      printJson({ submitted: true, response: await client.answer(args.exerciseId, args.flag) });
-      return;
-    }
-    if (args.command === "dasc-notice-list") {
-      printJson(await client.noticeList());
-      return;
-    }
-    if (args.command === "dasc-notice") {
-      if (!args.noticeId) throw new Error("dasc-notice requires --notice-id");
-      printJson(await client.notice(args.noticeId));
-      return;
-    }
-    throw new Error(`Unknown DASC command: ${args.command}`);
-  }
-  if (args.command === "tsec-solve-once") {
-    const result = await solveTSecOnce(config, createTSecClient(), args.challengeCode);
-    printJson(result);
-    process.exitCode = result.outcome === "solved" ? 0 : 2;
-    return;
-  }
-  if (args.command === "tsec-doctor") {
-    const checks = await tsecReadiness(config);
-    printJson(checks);
-    process.exitCode = Object.values(checks).every((check) => (check as { ok: boolean }).ok) ? 0 : 2;
-    return;
-  }
   if (args.command === "resource-export") {
     process.exitCode = await runResourceExport(config, args);
     return;
@@ -698,7 +323,7 @@ async function main(): Promise<void> {
       maxOutputBytes: config.runtime.maxOutputBytes,
       network: process.env.XUANSHU_SANDBOX_NETWORK ?? "external",
       ...(config.scope.extraPaths ? { extraPaths: config.scope.extraPaths } : {}),
-      ...(config.runtime.policyPermissive ? { permissivePaths: true } : {}),
+      ...(config.scope.readOnlyPaths ? { readOnlyPaths: config.scope.readOnlyPaths } : {}),
     });
     console.log(`CTF sandbox listening at ${running.endpoint}`);
     console.log(`workspace=${config.scope.workspaceRoot} scratch=${config.runtime.scratchRoot}`);

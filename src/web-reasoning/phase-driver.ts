@@ -93,9 +93,9 @@ export function suggestNextWebPhase(state: WebReasoningState, run: RunState): Ph
       if (hasSupportedHypothesis(state)) return { target: "EXPLOITATION", reason: "A hypothesis is supported by evidence; move to bounded exploitation", confidence: 0.9 };
       break;
     case "EXPLOITATION":
-      if (hasCandidate(run, state)) return { target: "FLAG_SEARCH", reason: "A candidate was produced; search for the flag or final artifact", confidence: 0.8 };
+      if (hasCandidate(run, state)) return { target: "RESULT_DISCOVERY", reason: "A candidate was produced; identify the exact final result", confidence: 0.8 };
       break;
-    case "FLAG_SEARCH":
+    case "RESULT_DISCOVERY":
       if (run.submission) return { target: "VERIFICATION", reason: "A submission exists; verify it against collected evidence", confidence: 0.8 };
       break;
     case "VERIFICATION":
@@ -104,8 +104,8 @@ export function suggestNextWebPhase(state: WebReasoningState, run: RunState): Ph
   }
 
   if (current === "EXPLOITATION" && !hasSupportedHypothesis(state)) return { target: "VULNERABILITY_ANALYSIS", reason: "No hypothesis remains supported; return to analysis", confidence: 0.9 };
-  if (current === "FLAG_SEARCH" && !hasCandidate(run, state)) return { target: "EXPLOITATION", reason: "No candidate exists; resume exploitation", confidence: 0.9 };
-  if (current === "VERIFICATION" && !run.submission) return { target: "FLAG_SEARCH", reason: "No submission exists; resume flag search", confidence: 0.9 };
+  if (current === "RESULT_DISCOVERY" && !hasCandidate(run, state)) return { target: "EXPLOITATION", reason: "No candidate exists; resume exploitation", confidence: 0.9 };
+  if (current === "VERIFICATION" && !run.submission) return { target: "RESULT_DISCOVERY", reason: "No submission exists; resume result discovery", confidence: 0.9 };
   return undefined;
 }
 

@@ -7,7 +7,7 @@ export const WEB_PHASES = [
   "FINGERPRINT",
   "VULNERABILITY_ANALYSIS",
   "EXPLOITATION",
-  "FLAG_SEARCH",
+  "RESULT_DISCOVERY",
   "VERIFICATION",
   "COMPLETE",
   "FAILED",
@@ -53,4 +53,3 @@ export interface WebOrchestratorContext {
   run: RunState;
   recentEvents?: RunEvent[];
 }
-

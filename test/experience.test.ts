@@ -12,7 +12,7 @@ afterEach(async () => {
 });
 
 describe("validated experience store", () => {
-  it("promotes only scrubbed Arena-success lessons and supports reviewer disabling", async () => {
+  it("promotes scrubbed operator-validated lessons and supports reviewer disabling", async () => {
     const root = await mkdtemp(join(tmpdir(), "xuan-experience-"));
     roots.push(root);
     const store = new ExperienceStore(join(root, "runs"));
@@ -21,17 +21,17 @@ describe("validated experience store", () => {
       id: "11111111-1111-4111-8111-111111111111",
       status: "completed",
       phase: "done",
-      task: { task: "challenge", attachments: [], metadata: { source: "nssctf-agent-arena", attemptId: "2715", category: "Pwn" } },
+      task: { task: "authorized case", attachments: [], metadata: { source: "operator-evaluation", caseId: "case-2715", category: "Pwn" } },
       createdAt: now,
       updatedAt: now,
       findings: [],
       lessons: [{
         id: "lesson-general-pwn",
-        title: "Never retain NSSCTF{secret-value} or attempt 2715",
+        title: "Never retain fixture{secret-value} or case case-2715",
         applicableWhen: ["A native binary has a controlled return address"],
         strategy: ["Verify the offset, then replace 0x401229 with an evidence-derived target"],
         verification: ["Reproduce locally and confirm remote output independently"],
-        pitfalls: ["Do not reuse NSSCTF{secret-value}"],
+        pitfalls: ["Do not reuse fixture{secret-value}"],
         tools: ["/usr/bin/objdump", "python3"],
       }],
       hypotheses: [],
@@ -41,7 +41,7 @@ describe("validated experience store", () => {
       scratchRoot: join(root, "scratch"),
       workspaceMode: "configured",
       appliedExperienceIds: [],
-      submission: "NSSCTF{secret-value}",
+      submission: "fixture{secret-value}",
       turns: 1,
       toolCalls: 1,
       imageObservations: 0,
@@ -51,12 +51,12 @@ describe("validated experience store", () => {
       repeatedActions: {},
     } satisfies RunState;
 
-    const [promoted] = await store.promoteArenaSuccess(state);
-    expect(promoted?.title).not.toContain("2715");
+    const [promoted] = await store.promoteValidatedLessons(state);
+    expect(promoted?.title).not.toContain("case-2715");
     expect(promoted?.title).not.toContain("secret-value");
     expect(promoted?.strategy.join(" ")).not.toContain("0x401229");
     expect(promoted?.tools).toEqual(["objdump", "python3"]);
-    expect(renderExperienceContext(await store.relevant("Pwn"))).toContain("externally accepted");
+    expect(renderExperienceContext(await store.relevant("Pwn"))).toContain("operator validation");
     expect(await store.relevant("Crypto")).toEqual([]);
 
     await store.update(promoted!.id, { status: "disabled", reviewNote: "Needs correction" });

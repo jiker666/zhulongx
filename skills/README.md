@@ -39,9 +39,4 @@
 3. 只将通用技术族和类别 pivot 信号人工归一化到 `src/skill-catalog.ts`。
 4. 更新 `THIRD_PARTY_NOTICES.md`，运行 `npm run check` 后再合并。
 
-`DaoYiSec/SecSkills` 目前只作为公开项目发现索引；其 CTF 条目仍指向上述 `ljagiello/ctf-skills`。`ctf-super-hub` 是包含混合许可证内容的二次集合，`VulnClaw` 与 `cybersec-toolkit` 则是独立运行时/工具链，因此未直接并入本项目。
-## Arena integration skill
-
-The user-supplied `nssctf-agent-arena` skill is included under `skills/nssctf-agent-arena/`. It is a bounded process reference: Arena execution continues to use the built-in `ArenaClient`, `PolicyEngine`, scope, budgets, and audit chain. Direct Bash, curl, WebFetch, or arbitrary HTTP permissions from the archive are not inherited.
-
-The imported `tokeii0-ctfskill-ctf-web-skill` package is stored under `skills/tokeii0-ctfskill-ctf-web-skill/` as reference material for the `ctf-web` category. Its payload and tool examples are not executable permissions and remain subject to the same project boundaries.
+`DaoYiSec/SecSkills` 目前只作为公开项目发现索引；其 CTF 条目仍指向上述 `ljagiello/ctf-skills`。`ctf-super-hub` 是包含混合许可证内容的二次集合，`VulnClaw` 与 `cybersec-toolkit` 则是独立运行时/工具链，因此未直接并入本项目。许可证不明确、绑定平台或包含现成 payload/答案模板的完整 skill 包不会随仓库分发。
