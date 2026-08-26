@@ -73,6 +73,8 @@ mkdir -p workspace
 
 在 `.env` 中设置模型密钥。默认配置读取 `OPENAI_API_KEY`，也可以复制 `config/default.yaml`，修改 `model.api`、`model.baseUrl` 和 `model.apiKeyEnv` 来使用 operator 自有网关。
 
+前端的“模型设置”页面可以为当前 API 进程临时配置 OpenAI 兼容端点（包括万擎/Ark 风格的 `ep-*` 部署 ID 和可选 `X-App-Key` 请求头）。密钥不会写入浏览器存储、配置文件或运行产物；详细说明见 [模型设置](docs/model-settings.md)。
+
 如需本地命令分析，在独立终端启动加固的 Docker sandbox：
 
 ```bash

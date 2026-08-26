@@ -2,13 +2,13 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { readFile } from "node:fs/promises";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import type { AddressInfo } from "node:net";
-import type { AppConfig, TaskRequest } from "./types.js";
+import type { AppConfig, ModelConfig, TaskRequest } from "./types.js";
 import { AuditChain } from "./audit.js";
 import { dashboardHtml } from "./dashboard.js";
 import { ExperienceStore, type ExperienceUpdate } from "./experience.js";
 import { RunManager } from "./run-manager.js";
 import { recoverInterruptedRuns } from "./run-recovery.js";
-import { XuanShuRuntime, writeJson } from "./runtime.js";
+import { XuanShuRuntime, writeJson, type RuntimeModelSessionConfig } from "./runtime.js";
 import { inferTrajectorySource } from "./session-trajectory.js";
 import { appendRunReview, listPersistedRuns, loadDecisionTrace, loadPersistedRun, prepareRunContinuation, readAuditRecords, truncateTraceData } from "./trace.js";
 import { ManualJobManager, validateManualJobInput } from "./manual-jobs.js";
@@ -151,6 +151,40 @@ export interface ApiServerDependencies {
 function inputRecord(value: unknown, label = "request body"): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new RequestInputError(`${label} must be an object`);
   return value as Record<string, unknown>;
+}
+
+function modelSessionInput(value: unknown): RuntimeModelSessionConfig {
+  const input = inputRecord(value);
+  const apiKey = typeof input.apiKey === "string" ? input.apiKey.trim() : "";
+  if (!apiKey || apiKey.length > 1_000) throw new RequestInputError("apiKey is required and must be at most 1000 characters");
+  const baseUrl = typeof input.baseUrl === "string" ? input.baseUrl.trim().replace(/\/$/, "") : "";
+  let parsedBaseUrl: URL;
+  try { parsedBaseUrl = new URL(baseUrl); } catch { throw new RequestInputError("baseUrl must be a valid URL"); }
+  if (!["http:", "https:"].includes(parsedBaseUrl.protocol) || parsedBaseUrl.username || parsedBaseUrl.password) {
+    throw new RequestInputError("baseUrl must use http or https without embedded credentials");
+  }
+  const api = input.api === undefined ? "openai-completions" : String(input.api);
+  if (!["openai-completions", "openai-responses", "anthropic-messages"].includes(api)) throw new RequestInputError("api is invalid");
+  const modelId = typeof input.modelId === "string" ? input.modelId.trim() : "";
+  if (!modelId || modelId.length > 200) throw new RequestInputError("modelId is required and must be at most 200 characters");
+  const name = typeof input.name === "string" && input.name.trim() ? input.name.trim().slice(0, 200) : modelId;
+  const provider = typeof input.provider === "string" && input.provider.trim() ? input.provider.trim().slice(0, 100) : "custom-openai-compatible";
+  const appKey = typeof input.appKey === "string" ? input.appKey.trim() : "";
+  if (appKey.length > 1_000) throw new RequestInputError("appKey must be at most 1000 characters");
+  const appKeyHeader = typeof input.appKeyHeader === "string" && input.appKeyHeader.trim() ? input.appKeyHeader.trim() : "X-App-Key";
+  if (!/^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/.test(appKeyHeader)) throw new RequestInputError("appKeyHeader is invalid");
+  const model: ModelConfig = {
+    provider,
+    id: modelId,
+    name,
+    api: api as ModelConfig["api"],
+    baseUrl,
+    apiKeyEnv: "XUANSHU_SESSION_MODEL_KEY",
+    reasoning: api === "openai-responses",
+    contextWindow: 128_000,
+    maxTokens: 8_192,
+  };
+  return { model, apiKey, ...(appKey ? { headers: { [appKeyHeader]: appKey } } : {}) };
 }
 
 function boundedLimit(value: string | null, fallback: number, maximum: number): number {
@@ -578,6 +612,25 @@ export function createApiServer(config: AppConfig, dependencies: ApiServerDepend
         const resolution = permissionBroker.resolve(permissionMatch[1], input.decision as PermissionDecision);
         if (!resolution) json(response, 404, { error: "permission request not found" });
         else json(response, 200, { resolution });
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/v1/settings/model") {
+        json(response, 200, { model: runtime.modelStatus() });
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/v1/settings/model") {
+        try {
+          const input = modelSessionInput(await bodyJson(request));
+          runtime.configureModel(input);
+          json(response, 200, { model: runtime.modelStatus() });
+        } catch (error) {
+          json(response, 400, { error: error instanceof Error ? error.message : String(error) });
+        }
+        return;
+      }
+      if (request.method === "DELETE" && url.pathname === "/v1/settings/model") {
+        runtime.clearConfiguredModel();
+        json(response, 200, { model: runtime.modelStatus() });
         return;
       }
       if (request.method === "POST" && url.pathname === "/v1/question-bank/jobs") {

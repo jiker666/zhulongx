@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { BookOpenCheck, Bot, FlaskConical, GitBranch, Gauge, History, KeyRound, Library, ShieldCheck, X } from "lucide-react";
+import { BookOpenCheck, Bot, FlaskConical, GitBranch, Gauge, History, KeyRound, Library, Settings2, ShieldCheck, X } from "lucide-react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { getServerToken, setServerToken } from "../api/client";
 import { IconButton } from "./ui";
@@ -13,6 +13,7 @@ const navigation = [
   { to: "/experiences", label: "经验库", detail: "验真策略", icon: Library },
   { to: "/evaluations", label: "评测实验室", detail: "复核指标", icon: FlaskConical },
   { to: "/runtime", label: "运行时", detail: "Agent 与 Workflow", icon: Bot },
+  { to: "/settings/model", label: "模型设置", detail: "临时连接配置", icon: Settings2 },
 ];
 
 export function AppShell() {

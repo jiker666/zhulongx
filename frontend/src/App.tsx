@@ -13,6 +13,7 @@ const CampaignPage = lazy(() => import("./pages/CampaignPage").then((module) => 
 const CampaignDetailPage = lazy(() => import("./pages/CampaignDetailPage").then((module) => ({ default: module.CampaignDetailPage })));
 const EvaluationLabPage = lazy(() => import("./pages/EvaluationLabPage").then((module) => ({ default: module.EvaluationLabPage })));
 const RuntimePage = lazy(() => import("./pages/RuntimePage").then((module) => ({ default: module.RuntimePage })));
+const ModelSettingsPage = lazy(() => import("./pages/ModelSettingsPage").then((module) => ({ default: module.ModelSettingsPage })));
 
 export function App() {
   return (
@@ -29,6 +30,7 @@ export function App() {
           <Route path="experiences" element={<ExperiencesPage />} />
           <Route path="evaluations" element={<EvaluationLabPage />} />
           <Route path="runtime" element={<RuntimePage />} />
+          <Route path="settings/model" element={<ModelSettingsPage />} />
           <Route path="*" element={<NotFoundPage />} />
         </Route>
       </Routes>

@@ -358,6 +358,8 @@ export interface ProviderError {
 export interface RuntimeOverrides {
   streamFn?: StreamFn;
   model?: Model<string>;
+  modelApiKey?: string;
+  modelHeaders?: Record<string, string>;
   onEvent?: (event: RunEvent) => void | Promise<void>;
   externalTools?: import("./external-tools.js").ExternalToolRegistration[];
   permissionGate?: import("./permissions.js").PermissionGate;

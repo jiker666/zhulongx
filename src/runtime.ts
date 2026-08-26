@@ -35,13 +35,31 @@ const sharedModelRequestGates = new WeakMap<AppConfig, ModelRequestGate>();
 
 export { ModelRequestGate } from "./model-rate-limit.js";
 
-export function createModel(config: AppConfig["model"]): Model<SupportedModelApi> {
+export interface RuntimeModelSessionConfig {
+  model: AppConfig["model"];
+  apiKey: string;
+  headers?: Record<string, string>;
+}
+
+export interface RuntimeModelStatus {
+  configured: boolean;
+  source: "session" | "environment" | "missing";
+  provider: string;
+  id: string;
+  name: string;
+  api: SupportedModelApi;
+  baseUrl: string;
+  appKeyHeaderConfigured: boolean;
+}
+
+export function createModel(config: AppConfig["model"], extraHeaders: Record<string, string> = {}): Model<SupportedModelApi> {
   const headers = Object.fromEntries(
     Object.entries(config.headersFromEnv ?? {}).flatMap(([header, envName]) => {
       const value = process.env[envName];
       return value ? [[header, value]] : [];
     }),
   );
+  const mergedHeaders = { ...headers, ...extraHeaders };
   return {
     id: config.id,
     name: config.name,
@@ -53,7 +71,7 @@ export function createModel(config: AppConfig["model"]): Model<SupportedModelApi
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: config.contextWindow,
     maxTokens: config.maxTokens,
-    ...(Object.keys(headers).length > 0 ? { headers } : {}),
+    ...(Object.keys(mergedHeaders).length > 0 ? { headers: mergedHeaders } : {}),
     ...(config.api === "openai-responses"
       ? { thinkingLevelMap: { xhigh: "xhigh", max: "max" } }
       : {}),
@@ -200,9 +218,38 @@ export class XuanShuRuntime {
     this.modelRequestGate = sharedGate;
   }
 
+  configureModel(input: RuntimeModelSessionConfig): void {
+    this.overrides.model = createModel(input.model, input.headers);
+    this.overrides.modelApiKey = input.apiKey;
+    if (input.headers) this.overrides.modelHeaders = input.headers;
+    else delete this.overrides.modelHeaders;
+  }
+
+  clearConfiguredModel(): void {
+    delete this.overrides.model;
+    delete this.overrides.modelApiKey;
+    delete this.overrides.modelHeaders;
+  }
+
+  modelStatus(): RuntimeModelStatus {
+    const model = this.overrides.model ?? createModel(this.config.model, this.overrides.modelHeaders);
+    const session = Boolean(this.overrides.modelApiKey);
+    const environment = Boolean(process.env[this.config.model.apiKeyEnv]);
+    return {
+      configured: session || environment,
+      source: session ? "session" : environment ? "environment" : "missing",
+      provider: model.provider,
+      id: model.id,
+      name: model.name,
+      api: model.api as SupportedModelApi,
+      baseUrl: model.baseUrl,
+      appKeyHeaderConfigured: Boolean(this.overrides.modelHeaders && Object.keys(this.overrides.modelHeaders).length > 0),
+    };
+  }
+
   async generateWriteup(state: RunState, transcript: unknown[], signal?: AbortSignal): Promise<string> {
-    const model = this.overrides.model ?? createModel(this.config.model);
-    const apiKey = process.env[this.config.model.apiKeyEnv];
+    const model = this.overrides.model ?? createModel(this.config.model, this.overrides.modelHeaders);
+    const apiKey = this.overrides.modelApiKey ?? process.env[this.config.model.apiKeyEnv];
     const providerStreamFn = this.overrides.streamFn ?? defaultStreamFn();
     const streamFn: StreamFn = (turnModel, context, streamOptions) => lazyStream(turnModel, async () => {
       const reservation = await this.modelRequestGate.wait({
@@ -284,6 +331,7 @@ export class XuanShuRuntime {
       workspaceRoot: workspaceMode === "attachments-only" ? isolatedInputRoot : configuredScope.workspaceRoot,
       allowedPrograms: availablePrograms,
     };
+    const model = this.overrides.model ?? createModel(this.config.model, this.overrides.modelHeaders);
     const audit = new AuditChain(join(runDirectory, "audit.jsonl"), id);
     const webClassification = detectWebTask(task);
     const experience = await new ExperienceStore(this.config.runtime.artifactRoot).relevant(
@@ -348,10 +396,10 @@ export class XuanShuRuntime {
         unavailablePrograms,
       },
       model: {
-        provider: this.config.model.provider,
-        id: this.config.model.id,
-        api: this.config.model.api,
-        baseUrl: this.config.model.baseUrl,
+        provider: model.provider,
+        id: model.id,
+        api: model.api,
+        baseUrl: model.baseUrl,
       },
       budgets: runtimeConfig,
       appliedExperience: experience.map((record) => ({ id: record.id, title: record.title, category: record.category })),
@@ -395,7 +443,6 @@ export class XuanShuRuntime {
       });
     }
     profileState.tools = toolSet.tools.map((tool) => tool.name);
-    const model = this.overrides.model ?? createModel(this.config.model);
     const providerStreamFn = this.overrides.streamFn ?? defaultStreamFn();
     let modelRequestNumber = 0;
     let activeModelRequestId: string | undefined;
@@ -431,7 +478,7 @@ export class XuanShuRuntime {
       }
       return await providerStreamFn(turnModel, context, streamOptions);
     });
-    const apiKey = process.env[this.config.model.apiKeyEnv];
+    const apiKey = this.overrides.modelApiKey ?? process.env[this.config.model.apiKeyEnv];
     const recoveryThinkingLevel = lengthRecoveryThinkingLevel(runtimeConfig.thinkingLevel);
     let lengthRecoveryAttempts = 0;
     let lastContextCutId: string | undefined;
@@ -442,9 +489,9 @@ export class XuanShuRuntime {
       transformContext: async (messages) => {
         try {
           const projection = projectModelMessages(messages, {
-            contextWindow: this.config.model.contextWindow,
+            contextWindow: model.contextWindow,
             compactAtRatio: 0.75,
-            keepRecentTokens: Math.max(2_000, Math.floor(this.config.model.contextWindow * 0.25)),
+            keepRecentTokens: Math.max(2_000, Math.floor(model.contextWindow * 0.25)),
             maxSummaryChars: 12_000,
           });
           if (projection.cut && projection.cut.id !== lastContextCutId) {
@@ -640,7 +687,7 @@ export class XuanShuRuntime {
     try {
       if (options.signal?.aborted) throw options.signal.reason ?? new Error("Run stopped by operator");
       if (!this.overrides.streamFn && !apiKey) {
-        throw new Error(`Missing model credential in environment variable ${this.config.model.apiKeyEnv}`);
+        throw new Error(this.overrides.modelApiKey ? "Missing model credential for the active model session" : `Missing model credential in environment variable ${this.config.model.apiKeyEnv}`);
       }
       const reasoningContext = webReasoning.enabled
         ? await webReasoning.beforeTurn(runtimeConfig.maxTurns - state.turns, runtimeConfig.maxToolCalls - state.toolCalls, toolSet.tools.map((tool) => tool.name))

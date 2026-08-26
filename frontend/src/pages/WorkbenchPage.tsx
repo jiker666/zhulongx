@@ -93,6 +93,7 @@ export function WorkbenchPage() {
   const [raceAgents, setRaceAgents] = useState(1);
   const [writeup, setWriteup] = useState(true);
   const [formError, setFormError] = useState("");
+  const [dragActive, setDragActive] = useState(false);
 
   const jobs = useQuery({ queryKey: ["manual-jobs"], queryFn: ({ signal }) => getManualJobs(signal), refetchInterval: (query) => (query.state.data?.jobs.some((job) => activeStatuses.has(job.status)) ? 2_000 : 8_000) });
   const bank = useQuery({ queryKey: ["question-bank"], queryFn: ({ signal }) => getQuestionBank(signal), refetchInterval: 8_000 });
@@ -141,9 +142,17 @@ export function WorkbenchPage() {
         <form className="surface-panel task-composer" onSubmit={submit}>
           <div className="panel-heading"><div><span className="section-label">TASK INTAKE</span><h2>提交安全任务</h2></div><span className={`task-count ${parsedTasks.length > 20 ? "over-limit" : ""}`}>{parsedTasks.length}/20</span></div>
           <textarea value={taskText} onChange={(event) => setTaskText(event.target.value)} placeholder="输入开放式安全任务；多项任务之间用单独一行 --- 分隔" aria-label="任务内容" />
-          <div className="attachment-zone">
+          <div
+            className={`attachment-zone${dragActive ? " drag-active" : ""}`}
+            onDragEnter={(event) => { event.preventDefault(); setDragActive(true); }}
+            onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; setDragActive(true); }}
+            onDragLeave={(event) => { const related = event.relatedTarget; if (!(related instanceof Node) || !event.currentTarget.contains(related)) setDragActive(false); }}
+            onDrop={(event) => { event.preventDefault(); setDragActive(false); setFiles((current) => mergeFiles(current, [...event.dataTransfer.files])); }}
+            role="group"
+            aria-label="拖拽附件到此处"
+          >
             <div><Paperclip size={17} aria-hidden="true" /><span><strong>任务附件</strong><small>{files.length ? `${files.length} 个文件 · ${formatBytes(totalFileBytes)}` : "文本、压缩包、接口文档、图片或二进制材料"}</small></span></div>
-            <label className="button secondary file-button"><Upload size={15} aria-hidden="true" />添加文件<input ref={fileInput} type="file" multiple onChange={(event) => { setFiles((current) => mergeFiles(current, [...event.target.files ?? []])); event.target.value = ""; }} /></label>
+            <span className="attachment-drop-hint">拖拽文件到这里，或</span><label className="button secondary file-button"><Upload size={15} aria-hidden="true" />添加文件<input ref={fileInput} type="file" multiple onChange={(event) => { setFiles((current) => mergeFiles(current, [...event.target.files ?? []])); event.target.value = ""; }} /></label>
           </div>
           {files.length > 0 && <div className="file-chip-list">{files.map((file, index) => <span key={`${file.name}-${file.size}-${index}`}>{file.name}<small>{formatBytes(file.size)}</small><button type="button" aria-label={`移除 ${file.name}`} title={`移除 ${file.name}`} onClick={() => setFiles((items) => items.filter((_, itemIndex) => itemIndex !== index))}><X size={13} /></button></span>)}</div>}
           <div className="composer-settings">
