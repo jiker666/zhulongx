@@ -800,7 +800,10 @@ export function createApiServer(config: AppConfig, dependencies: ApiServerDepend
           json(response, 200, { writeup: state.writeup, state });
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          json(response, 400, { error: message.slice(0, 600) });
+          state.writeupError = message.slice(0, 600);
+          await new AuditChain(join(config.runtime.artifactRoot, id, "audit.jsonl"), id).append("writeup.failed", { error: state.writeupError, source: "operator_request" }, { source: "orchestrator", actor: "writeup-generator" });
+          await writeJson(join(config.runtime.artifactRoot, id, "state.json"), state);
+          json(response, 400, { error: state.writeupError, state });
         } finally { request.off("aborted", abort); }
         return;
       }
