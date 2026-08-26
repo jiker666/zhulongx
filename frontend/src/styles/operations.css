@@ -1822,8 +1822,16 @@
 
 .writeup-toolbar {
   display: flex;
+  align-items: center;
+  gap: 7px;
   justify-content: flex-end;
   padding: 0 8px;
+}
+
+.writeup-toolbar .compact-action {
+  min-height: 28px;
+  padding: 5px 8px;
+  font-size: 10px;
 }
 
 .writeup-result pre {

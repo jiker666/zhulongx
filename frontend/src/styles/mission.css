@@ -197,7 +197,9 @@
 .submission-empty { display: flex; align-items: center; gap: 9px; padding: 13px 15px; color: var(--muted); background: var(--surface-soft); border: 1px dashed var(--border-strong); border-radius: 5px; font-size: 12px; }
 .submission-empty svg { color: var(--subtle); }
 .submission-empty small { margin-left: auto; color: var(--subtle); font-size: 10px; }
-.conclusion-summary { padding: 11px 13px; background: var(--surface-soft); border-left: 2px solid var(--color-context); }
+.conclusion-summary { min-width: 0; padding: 11px 13px; background: var(--surface-soft); border-left: 2px solid var(--color-context); }
+.conclusion-summary-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.conclusion-summary-heading .compact-action { min-height: 28px; padding: 5px 8px; font-size: 10px; }
 .conclusion-summary p { margin: 5px 0 0; color: #4d4943; font-size: 13px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
 .conclusion-proof { justify-content: flex-start; padding-top: 3px; color: var(--subtle); font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; }
 .conclusion-proof strong { color: var(--text); font-weight: 600; }

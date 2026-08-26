@@ -41,6 +41,16 @@ function missionTitle(value: unknown): string {
   return value.split(/\r?\n/)[0]?.trim() || "运行详情";
 }
 
+function downloadMarkdown(content: string, filename: string): void {
+  const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
 function MissionControl({ status, state, records, realtimeState }: { status: string; state: RunState | undefined; records: DecisionRecord[]; realtimeState: RunConnectionState }) {
   const runStarted = records.find((record) => record.sourceEventType === "run.started");
   const model = runStarted?.technicalDetails?.model;
@@ -94,7 +104,7 @@ function FinalConclusion({ state, events }: { state?: RunState; events: Array<{ 
     <section className={`final-conclusion-panel ${submission ? "has-submission" : "no-submission"}`} aria-label="最终结论">
       <div className="final-conclusion-heading"><div><span className="section-label">FINAL CONCLUSION</span><h2>运行总结结论</h2></div><div className="final-heading-status"><span className={`final-status final-status-${status}`}>{statusText}</span>{submission && flagLike && <span className="final-flag-status"><Flag size={12} aria-hidden="true" />FLAG FOUND</span>}</div></div>
       {submission ? <div className="submission-spotlight"><div className="submission-label"><Flag size={17} aria-hidden="true" /><span>{flagLike ? "FLAG" : "FINAL SUBMISSION"}</span><small>来自 finish_task 的真实提交</small></div><div className="submission-value"><span className="submission-value-kicker">{flagLike ? "最终 Flag" : "最终答案"}</span><code title={submission}>{submission}</code></div></div> : <div className="submission-empty"><Flag size={16} aria-hidden="true" /><span>未提交最终答案或 Flag</span><small>运行状态不会从工具日志中推测答案。</small></div>}
-      <div className="conclusion-summary"><span className="observatory-kicker">SUMMARY / 结论摘要</span><p>{summary || "运行尚未写入总结结论。"}</p></div>
+      <div className="conclusion-summary"><div className="conclusion-summary-heading"><span className="observatory-kicker">SUMMARY / 结论摘要</span>{summary && <Button className="button secondary compact-action" type="button" onClick={() => downloadMarkdown(summary, `xuan-shu-${state?.id ?? "run"}-wp.md`)}><Download size={14} aria-hidden="true" />下载 WP</Button>}</div><p>{summary || "运行尚未写入总结结论。"}</p></div>
       <div className="conclusion-proof"><span>{state?.independentlyVerified ? "✓ INDEPENDENTLY VERIFIED" : "VERIFICATION STATUS"}</span><strong>{state?.independentlyVerified ? "已独立验证" : state?.verification?.length ? `${state.verification.length} 条验证记录` : "未提供独立验证"}</strong></div>
     </section>
   );

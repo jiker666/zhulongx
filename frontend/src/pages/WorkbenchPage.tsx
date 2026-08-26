@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, CircleStop, Copy, Database, ExternalLink, FileText, Paperclip, Play, Send, Upload, Users, X } from "lucide-react";
+import { Check, CircleStop, Copy, Database, Download, ExternalLink, FileText, Paperclip, Play, Send, Upload, Users, X } from "lucide-react";
 import { Link } from "react-router-dom";
 import { getManualJobs, getQuestionBank, startManualJob, startQuestionBankJob, stopManualJob, uploadManualFiles } from "../api/operations";
 import { Badge, Button, EmptyState, ErrorState, IconButton, LoadingState } from "../components/ui";
@@ -44,6 +44,20 @@ function mergeFiles(current: File[], selected: File[]): File[] {
   });
 }
 
+function safeFilePart(value: string): string {
+  return value.trim().replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64) || "task";
+}
+
+function downloadWriteup(writeup: string, jobId: string, taskIndex: number): void {
+  const blob = new Blob([writeup], { type: "text/markdown;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `xuan-shu-${safeFilePart(jobId)}-task-${String(taskIndex + 1).padStart(2, "0")}-wp.md`;
+  anchor.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
 function JobResult({ job, onStop, stopping }: { job: ManualJobSnapshot; onStop: (id: string) => void; stopping: boolean }) {
   const [copied, setCopied] = useState<string>();
   const settled = job.tasks.filter((task) => terminalTaskStatuses.has(task.status)).length;
@@ -60,7 +74,7 @@ function JobResult({ job, onStop, stopping }: { job: ManualJobSnapshot; onStop: 
       <div className="manual-task-list">
         {job.tasks.map((task) => {
           const key = `${job.id}-${task.index}`;
-          return <div className="manual-task-row" key={key}><span className="manual-task-index">{String(task.index + 1).padStart(2, "0")}</span><span className="manual-task-copy"><strong>{task.task}</strong><small>{task.race ? `${task.race.agentCount} Agent 竞速${task.race.winnerAgent === undefined ? "" : ` · Agent ${task.race.winnerAgent + 1} 胜出`}` : task.run ? `${task.run.turns} 回合 · ${task.run.toolCalls} 工具调用` : "等待运行"}</small>{task.error && <em>{task.error}</em>}{task.submission && <span className="submission-result"><span>结果</span><code>{task.submission}</code><IconButton className="icon-button" label="复制结果" onClick={() => void copy(task.submission!, `${key}-submission`)}>{copied === `${key}-submission` ? <Check size={15} /> : <Copy size={15} />}</IconButton></span>}{task.writeup && <details className="writeup-result"><summary><FileText size={14} />任务报告</summary><div className="writeup-toolbar"><IconButton className="icon-button bordered" label="复制任务报告" onClick={() => void copy(task.writeup!, `${key}-report`)}>{copied === `${key}-report` ? <Check size={15} /> : <Copy size={15} />}</IconButton></div><pre>{task.writeup}</pre></details>}</span><span className="manual-task-actions"><Badge tone={taskTone(task.status)}>{taskStatusLabels[task.status]}</Badge>{task.runId && <Link className="icon-link" to={`/runs/${task.runId}`} title="查看运行轨迹" aria-label="查看运行轨迹"><ExternalLink size={15} /></Link>}</span></div>;
+          return <div className="manual-task-row" key={key}><span className="manual-task-index">{String(task.index + 1).padStart(2, "0")}</span><span className="manual-task-copy"><strong>{task.task}</strong><small>{task.race ? `${task.race.agentCount} Agent 竞速${task.race.winnerAgent === undefined ? "" : ` · Agent ${task.race.winnerAgent + 1} 胜出`}` : task.run ? `${task.run.turns} 回合 · ${task.run.toolCalls} 工具调用` : "等待运行"}</small>{task.error && <em>{task.error}</em>}{task.submission && <span className="submission-result"><span>结果</span><code>{task.submission}</code><IconButton className="icon-button" label="复制结果" onClick={() => void copy(task.submission!, `${key}-submission`)}>{copied === `${key}-submission` ? <Check size={15} /> : <Copy size={15} />}</IconButton></span>}{task.writeup && <details className="writeup-result"><summary><FileText size={14} />任务报告</summary><div className="writeup-toolbar"><IconButton className="icon-button bordered" label="复制任务报告" onClick={() => void copy(task.writeup!, `${key}-report`)}>{copied === `${key}-report` ? <Check size={15} /> : <Copy size={15} />}</IconButton><Button className="button secondary compact-action" type="button" onClick={() => downloadWriteup(task.writeup!, job.id, task.index)}><Download size={14} aria-hidden="true" />下载 WP</Button></div><pre>{task.writeup}</pre></details>}</span><span className="manual-task-actions"><Badge tone={taskTone(task.status)}>{taskStatusLabels[task.status]}</Badge>{task.runId && <Link className="icon-link" to={`/runs/${task.runId}`} title="查看运行轨迹" aria-label="查看运行轨迹"><ExternalLink size={15} /></Link>}</span></div>;
         })}
       </div>
     </article>
