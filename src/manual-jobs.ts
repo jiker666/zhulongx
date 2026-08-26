@@ -159,7 +159,10 @@ function taskWithOutputContract(
       : []),
     ...(writeup
       ? [
-          "- Set summary to a concise Markdown task report no longer than 12000 characters.",
+          "- Set summary to a concise submission-style Markdown task report (writeup) no longer than 12000 characters.",
+          "- Use this structure: YAML front matter (title, ctf, date, category, difficulty, points, flag_format, author), # title, ## Summary, ## Solution, and ## Flag.",
+          "- Keep Solution to 1-3 short steps and include one complete runnable solving script from the provided challenge data to printing the final flag whenever the artifacts support it.",
+          "- Show the exact final flag in a fenced code block under ## Flag, matching submission; never invent commands, evidence, or a flag.",
           "- The report must cover the approach, key evidence, essential commands or scripts, verification, and exact final result.",
           "- Do not include hidden reasoning, model keys, authorization headers, cookies, credentials, or unrelated environment/configuration values.",
         ]

@@ -15,6 +15,7 @@ import { useRunRealtimeStream } from "../features/realtime/runStream";
 import type { RunConnectionState } from "../features/realtime/types";
 import { PolicyDetails } from "../features/policy/PolicyDetails";
 import { DecisionObservatory } from "../features/decision-observatory/DecisionObservatory";
+import { renderRunWriteup } from "../features/writeup/format";
 import type { RunState, TrajectorySource } from "../types/api";
 
 const phaseLabels: Record<string, string> = { intake: "接收", planning: "规划", exploration: "探索", analysis: "分析", verification: "验证", reporting: "报告", done: "完成" };
@@ -104,7 +105,7 @@ function FinalConclusion({ state, events }: { state?: RunState; events: Array<{ 
     <section className={`final-conclusion-panel ${submission ? "has-submission" : "no-submission"}`} aria-label="最终结论">
       <div className="final-conclusion-heading"><div><span className="section-label">FINAL CONCLUSION</span><h2>运行总结结论</h2></div><div className="final-heading-status"><span className={`final-status final-status-${status}`}>{statusText}</span>{submission && flagLike && <span className="final-flag-status"><Flag size={12} aria-hidden="true" />FLAG FOUND</span>}</div></div>
       {submission ? <div className="submission-spotlight"><div className="submission-label"><Flag size={17} aria-hidden="true" /><span>{flagLike ? "FLAG" : "FINAL SUBMISSION"}</span><small>来自 finish_task 的真实提交</small></div><div className="submission-value"><span className="submission-value-kicker">{flagLike ? "最终 Flag" : "最终答案"}</span><code title={submission}>{submission}</code></div></div> : <div className="submission-empty"><Flag size={16} aria-hidden="true" /><span>未提交最终答案或 Flag</span><small>运行状态不会从工具日志中推测答案。</small></div>}
-      <div className="conclusion-summary"><div className="conclusion-summary-heading"><span className="observatory-kicker">SUMMARY / 结论摘要</span>{summary && <Button className="button secondary compact-action" type="button" onClick={() => downloadMarkdown(summary, `xuan-shu-${state?.id ?? "run"}-wp.md`)}><Download size={14} aria-hidden="true" />下载 WP</Button>}</div><p>{summary || "运行尚未写入总结结论。"}</p></div>
+      <div className="conclusion-summary"><div className="conclusion-summary-heading"><span className="observatory-kicker">SUMMARY / 结论摘要</span>{summary && state && <Button className="button secondary compact-action" type="button" onClick={() => downloadMarkdown(renderRunWriteup(state, summary), `xuan-shu-${state.id}-wp.md`)}><Download size={14} aria-hidden="true" />下载 WP</Button>}</div><p>{summary || "运行尚未写入总结结论。"}</p></div>
       <div className="conclusion-proof"><span>{state?.independentlyVerified ? "✓ INDEPENDENTLY VERIFIED" : "VERIFICATION STATUS"}</span><strong>{state?.independentlyVerified ? "已独立验证" : state?.verification?.length ? `${state.verification.length} 条验证记录` : "未提供独立验证"}</strong></div>
     </section>
   );
