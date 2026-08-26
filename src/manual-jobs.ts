@@ -163,6 +163,7 @@ function taskWithOutputContract(
           "- Use this structure: YAML front matter (title, ctf, date, category, difficulty, points, flag_format, author), # title, ## Summary, ## Solution, and ## Flag.",
           "- Keep Solution to 1-3 short steps and include one complete runnable solving script from the provided challenge data to printing the final flag whenever the artifacts support it.",
           "- Show the exact final flag in a fenced code block under ## Flag, matching submission; never invent commands, evidence, or a flag.",
+          "- Preserve concrete public observations and solver constants in the report; the platform may run a dedicated writeup generation pass after settlement.",
           "- The report must cover the approach, key evidence, essential commands or scripts, verification, and exact final result.",
           "- Do not include hidden reasoning, model keys, authorization headers, cookies, credentials, or unrelated environment/configuration values.",
         ]
@@ -372,6 +373,7 @@ export class ManualJobManager {
               try {
                 const runId = this.dependencies.runManager.start(request, {
                   workspaceMode: "attachments-only",
+                  ...(job.writeup ? {} : { writeup: false }),
                   sharedEvidence,
                 });
                 runIds.push(runId);
@@ -425,7 +427,7 @@ export class ManualJobManager {
               task.snapshot.runAttempts = attempts;
               let activeRunId: string | undefined;
               try {
-                const runId = this.dependencies.runManager.start(taskWithOutputContract(preparedRequest, job.writeup), { workspaceMode: "attachments-only" });
+                const runId = this.dependencies.runManager.start(taskWithOutputContract(preparedRequest, job.writeup), { workspaceMode: "attachments-only", ...(job.writeup ? {} : { writeup: false }) });
                 activeRunId = runId;
                 task.snapshot.runId = runId;
                 task.runIds.add(runId);
@@ -474,7 +476,7 @@ export class ManualJobManager {
             const submission = extractSubmission(state);
             if (submission) task.snapshot.submission = submission;
             if (job.writeup) {
-              const writeup = boundedWriteup(state.summary);
+              const writeup = boundedWriteup(state.writeup ?? state.summary);
               if (writeup) task.snapshot.writeup = writeup;
             }
             if (valid) {

@@ -20,7 +20,7 @@ export class RunManager {
 
   constructor(private readonly runtime: XuanShuRuntime) {}
 
-  start(request: TaskRequest, options: Pick<RunOptions, "workspaceMode" | "sharedEvidence" | "allowedToolEffects" | "contextSections" | "lineage"> = {}): string {
+  start(request: TaskRequest, options: Pick<RunOptions, "workspaceMode" | "sharedEvidence" | "allowedToolEffects" | "contextSections" | "lineage" | "writeup"> = {}): string {
     const id = randomUUID();
     const handle: RunHandle = {
       id,
@@ -37,6 +37,7 @@ export class RunManager {
         ...(options.allowedToolEffects ? { allowedToolEffects: options.allowedToolEffects } : {}),
         ...(options.contextSections ? { contextSections: options.contextSections } : {}),
         ...(options.lineage ? { lineage: options.lineage } : {}),
+        writeup: options.writeup !== false,
         signal: handle.controller.signal,
         onEvent: (event) => {
           handle.events.push(event);

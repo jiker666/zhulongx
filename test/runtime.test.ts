@@ -56,6 +56,27 @@ describe("XuanShuRuntime", () => {
     expect(await verifyAuditChain(join(runDirectory, "audit.jsonl"))).toMatchObject({ valid: true });
   });
 
+  it("generates and persists a dedicated writeup after a verified completion", async () => {
+    const root = await mkdtemp(join(tmpdir(), "xuan-runtime-writeup-"));
+    roots.push(root);
+    const config = testConfig(root);
+    await mkdir(config.scope.workspaceRoot, { recursive: true });
+    const faux = registerFauxProvider();
+    registrations.push(faux);
+    const markdown = ["---", "title: \"Demo\"", "ctf: \"Demo\"", "date: 2026-08-26", "category: crypto", "difficulty: easy", "points: 1", "flag_format: \"flag{...}\"", "author: \"Team\"", "---", "", "# Demo", "", "## Summary", "", "Solved the challenge.", "", "## Solution", "", "### Step 1: Solve", "", "```python", "print(\"flag{writer}\")", "```", "", "## Flag", "", "```", "flag{writer}", "```"].join("\n");
+    faux.setResponses([
+      fauxAssistantMessage(fauxToolCall("finish_task", { status: "completed", summary: "The challenge was solved from deterministic evidence.", submission: "flag{writer}", evidence: ["verified"], remainingRisks: [], nextSteps: [], confidence: 1, verification: ["independent replay"], independentlyVerified: true }, { id: "finish-writeup" }), { stopReason: "toolUse" }),
+      fauxAssistantMessage(markdown, { stopReason: "stop" }),
+    ]);
+    const runtime = new XuanShuRuntime(config, { streamFn: streamSimple, model: faux.getModel() });
+    const state = await runtime.run({ task: "Demo challenge", metadata: { category: "crypto" } }, { writeup: true });
+    expect(state.status).toBe("completed");
+    expect(state.writeup).toContain("## Solution");
+    expect(state.writeup).toContain("```python");
+    expect(JSON.parse(await readFile(join(config.runtime.artifactRoot, state.id, "state.json"), "utf8")).writeup).toContain("flag{writer}");
+    expect(await readAuditRecords(join(config.runtime.artifactRoot, state.id, "audit.jsonl"))).toContainEqual(expect.objectContaining({ type: "writeup.generated" }));
+  });
+
   it("shares bounded race evidence through policy-controlled audited tools", async () => {
     const root = await mkdtemp(join(tmpdir(), "xuan-runtime-shared-evidence-"));
     roots.push(root);

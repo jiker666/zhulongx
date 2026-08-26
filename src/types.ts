@@ -273,6 +273,8 @@ export interface RunState {
   verification?: string[];
   independentlyVerified?: boolean;
   summary?: string;
+  writeup?: string;
+  writeupError?: string;
   stopReason?: string;
   turns: number;
   toolCalls: number;

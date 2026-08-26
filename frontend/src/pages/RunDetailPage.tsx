@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, CheckCircle2, Download, Flag, GitFork, HelpCircle, History, Pause, Play, RefreshCw, RotateCcw, Search, ShieldAlert, SkipBack, SkipForward, X } from "lucide-react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { continueRun, getRun, getRunTrace, reviewRunEvent } from "../api/runs";
+import { continueRun, generateRunWriteup, getRun, getRunTrace, reviewRunEvent } from "../api/runs";
 import { Badge, Button, Card, EmptyState, ErrorState, LoadingState } from "../components/ui";
 import { formatConfidence, formatDateTime, formatTimestamp, kindLabels, safeJson } from "../features/decision-stream/formatters";
 import { projectTrace } from "../features/decision-stream/projection";
@@ -93,19 +93,45 @@ function CurrentAction({ status, decision, total }: { status: string; decision?:
 }
 
 function FinalConclusion({ state, events }: { state?: RunState; events: Array<{ type: string; data: unknown }> }) {
+  const [generatingWriteup, setGeneratingWriteup] = useState(false);
+  const [generatedInSession, setGeneratedInSession] = useState(false);
+  const [generationError, setGenerationError] = useState<string>();
   const outcomeEvent = [...events].reverse().find((event) => event.type === "run.settled" || event.type === "run.finished_by_agent");
   const outcomeData = outcomeEvent?.data && typeof outcomeEvent.data === "object" ? outcomeEvent.data as Record<string, unknown> : {};
   const submission = state?.submission ?? (typeof outcomeData.submission === "string" ? outcomeData.submission : undefined);
   const summary = state?.summary ?? (typeof outcomeData.summary === "string" ? outcomeData.summary : undefined);
+  const writeupError = state?.writeupError;
   const category = state?.task.metadata.category ?? "";
   const flagLike = /ctf|flag|challenge/i.test(category) || Boolean(submission && /flag\{|[A-Za-z0-9_:-]+\{[^}]+\}/i.test(submission));
   const status = state?.status ?? "unknown";
   const statusText = status === "completed" ? "COMPLETED" : status === "blocked" ? "BLOCKED" : status === "failed" ? "FAILED" : status === "aborted" ? "ABORTED" : "IN PROGRESS";
+  const downloadWriteup = async () => {
+    if (!state) return;
+    setGeneratingWriteup(true);
+    setGenerationError(undefined);
+    try {
+      let content = state.writeup?.trim();
+      if (!content) {
+        try {
+          content = (await generateRunWriteup(state.id)).writeup;
+          setGeneratedInSession(true);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          setGenerationError(message.slice(0, 600));
+          content = renderRunWriteup(state, summary);
+        }
+      }
+      if (content) downloadMarkdown(content, `xuan-shu-${state.id}-wp.md`);
+    } finally {
+      setGeneratingWriteup(false);
+    }
+  };
+  const hasWriteup = Boolean(state?.writeup?.trim()) || generatedInSession;
   return (
     <section className={`final-conclusion-panel ${submission ? "has-submission" : "no-submission"}`} aria-label="最终结论">
       <div className="final-conclusion-heading"><div><span className="section-label">FINAL CONCLUSION</span><h2>运行总结结论</h2></div><div className="final-heading-status"><span className={`final-status final-status-${status}`}>{statusText}</span>{submission && flagLike && <span className="final-flag-status"><Flag size={12} aria-hidden="true" />FLAG FOUND</span>}</div></div>
       {submission ? <div className="submission-spotlight"><div className="submission-label"><Flag size={17} aria-hidden="true" /><span>{flagLike ? "FLAG" : "FINAL SUBMISSION"}</span><small>来自 finish_task 的真实提交</small></div><div className="submission-value"><span className="submission-value-kicker">{flagLike ? "最终 Flag" : "最终答案"}</span><code title={submission}>{submission}</code></div></div> : <div className="submission-empty"><Flag size={16} aria-hidden="true" /><span>未提交最终答案或 Flag</span><small>运行状态不会从工具日志中推测答案。</small></div>}
-      <div className="conclusion-summary"><div className="conclusion-summary-heading"><span className="observatory-kicker">SUMMARY / 结论摘要</span>{summary && state && <Button className="button secondary compact-action" type="button" onClick={() => downloadMarkdown(renderRunWriteup(state, summary), `xuan-shu-${state.id}-wp.md`)}><Download size={14} aria-hidden="true" />下载 WP</Button>}</div><p>{summary || "运行尚未写入总结结论。"}</p></div>
+      <div className="conclusion-summary"><div className="conclusion-summary-heading"><span className="observatory-kicker">SUMMARY / 结论摘要</span>{summary && state && <Button className="button secondary compact-action" type="button" onClick={() => void downloadWriteup()} disabled={generatingWriteup}><Download size={14} aria-hidden="true" />{generatingWriteup ? "正在生成 WP" : hasWriteup ? "下载 WP" : "AI 生成并下载 WP"}</Button>}</div><p>{summary || "运行尚未写入总结结论。"}</p>{(writeupError || generationError) && <small className="writeup-generation-note">WP 自动生成失败，当前下载内容为结构化兼容报告：{generationError ?? writeupError}</small>}</div>
       <div className="conclusion-proof"><span>{state?.independentlyVerified ? "✓ INDEPENDENTLY VERIFIED" : "VERIFICATION STATUS"}</span><strong>{state?.independentlyVerified ? "已独立验证" : state?.verification?.length ? `${state.verification.length} 条验证记录` : "未提供独立验证"}</strong></div>
     </section>
   );

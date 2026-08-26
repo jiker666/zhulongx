@@ -27,6 +27,7 @@ import { toolDescriptorMap, type ToolEffect } from "./tool-catalog.js";
 import type { AppConfig, NormalizedTask, RunEvent, RunLineage, RunState, RuntimeOverrides, TaskRequest } from "./types.js";
 import { createWebReasoningController } from "./web-reasoning/controller.js";
 import { detectWebTask } from "./web-reasoning/task-detector.js";
+import { generateWriteup as generateWriteupDocument } from "./writeup-generator.js";
 
 type SupportedModelApi = "anthropic-messages" | "openai-completions" | "openai-responses";
 const MAX_LENGTH_RECOVERY_ATTEMPTS = 2;
@@ -170,7 +171,7 @@ async function stageAttachmentsOnly(
   }
 }
 
-async function writeJson(path: string, value: unknown): Promise<void> {
+export async function writeJson(path: string, value: unknown): Promise<void> {
   await writeFile(path, `${JSON.stringify(sanitizeSecrets(value), null, 2)}\n`, "utf8");
 }
 
@@ -183,6 +184,7 @@ export interface RunOptions {
   allowedToolEffects?: ToolEffect[];
   contextSections?: Array<{ name: string; content: string }>;
   lineage?: RunLineage & { context: string };
+  writeup?: boolean;
 }
 
 export class XuanShuRuntime {
@@ -196,6 +198,35 @@ export class XuanShuRuntime {
     const sharedGate = sharedModelRequestGates.get(config) ?? new ModelRequestGate();
     sharedModelRequestGates.set(config, sharedGate);
     this.modelRequestGate = sharedGate;
+  }
+
+  async generateWriteup(state: RunState, transcript: unknown[], signal?: AbortSignal): Promise<string> {
+    const model = this.overrides.model ?? createModel(this.config.model);
+    const apiKey = process.env[this.config.model.apiKeyEnv];
+    const providerStreamFn = this.overrides.streamFn ?? defaultStreamFn();
+    const streamFn: StreamFn = (turnModel, context, streamOptions) => lazyStream(turnModel, async () => {
+      const reservation = await this.modelRequestGate.wait({
+        minimumIntervalMs: this.config.runtime.modelMinIntervalMs,
+        requestsPerMinute: this.config.runtime.modelRequestsPerMinute,
+        tokensPerMinute: this.config.runtime.modelTokensPerMinute,
+        estimatedTokens: estimateModelRequestTokens(turnModel, context, streamOptions),
+      }, streamOptions?.signal);
+      void reservation;
+      return await providerStreamFn(turnModel, context, streamOptions);
+    });
+    const result = await generateWriteupDocument({
+      runId: state.id,
+      task: state.task as NormalizedTask,
+      state,
+      transcript,
+      model,
+      streamFn,
+      ...(apiKey ? { apiKey } : {}),
+      maxRetryDelayMs: this.config.runtime.modelMaxRetryDelayMs,
+      ...(signal ? { signal } : {}),
+      timeoutMs: this.config.runtime.finalizationReserveMs,
+    });
+    return result.markdown;
   }
 
   async run(request: TaskRequest, options: RunOptions = {}): Promise<RunState> {
@@ -668,6 +699,32 @@ export class XuanShuRuntime {
       state.updatedAt = new Date().toISOString();
       state.finishedAt = state.updatedAt;
       const transcript = agent.state.messages.map(publicMessage);
+      if (options.writeup === true && state.summary?.trim()) {
+        await audit.append("writeup.generation_requested", {
+          status: state.status,
+          submissionPresent: Boolean(state.submission),
+          transcriptMessages: transcript.length,
+        }, { source: "orchestrator", actor: "writeup-generator" });
+        try {
+          const generated = await generateWriteupDocument({
+            runId: id,
+            task,
+            state,
+            transcript,
+            model,
+            streamFn,
+            ...(apiKey ? { apiKey } : {}),
+            maxRetryDelayMs: runtimeConfig.modelMaxRetryDelayMs,
+            timeoutMs: runtimeConfig.finalizationReserveMs,
+          });
+          state.writeup = generated.markdown;
+          delete state.writeupError;
+          await audit.append("writeup.generated", { attempts: generated.attempts, characters: generated.markdown.length }, { source: "orchestrator", actor: "writeup-generator" });
+        } catch (error) {
+          state.writeupError = (error instanceof Error ? error.message : String(error)).slice(0, 600);
+          await audit.append("writeup.failed", { error: state.writeupError }, { source: "orchestrator", actor: "writeup-generator" });
+        }
+      }
       await writeJson(join(runDirectory, "state.json"), state);
       await writeJson(join(runDirectory, "findings.json"), state.findings);
       await writeJson(join(runDirectory, "transcript.json"), transcript);

@@ -3,11 +3,12 @@ import { readFile } from "node:fs/promises";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import type { AddressInfo } from "node:net";
 import type { AppConfig, TaskRequest } from "./types.js";
+import { AuditChain } from "./audit.js";
 import { dashboardHtml } from "./dashboard.js";
 import { ExperienceStore, type ExperienceUpdate } from "./experience.js";
 import { RunManager } from "./run-manager.js";
 import { recoverInterruptedRuns } from "./run-recovery.js";
-import { XuanShuRuntime } from "./runtime.js";
+import { XuanShuRuntime, writeJson } from "./runtime.js";
 import { inferTrajectorySource } from "./session-trajectory.js";
 import { appendRunReview, listPersistedRuns, loadDecisionTrace, loadPersistedRun, prepareRunContinuation, readAuditRecords, truncateTraceData } from "./trace.js";
 import { ManualJobManager, validateManualJobInput } from "./manual-jobs.js";
@@ -283,11 +284,12 @@ export function createApiServer(config: AppConfig, dependencies: ApiServerDepend
   const memoryStore = dependencies.memoryStore ?? new MemoryStore(orchestrationRoot);
   const connectorBroker = dependencies.connectorBroker ?? new ConnectorBroker(config.connectors ?? []);
   const targetConnectorId = config.profile?.preferredExecutor === "connector" ? config.profile.executorTargetId : undefined;
-  const manager = new RunManager(new XuanShuRuntime(config, {
+  const runtime = new XuanShuRuntime(config, {
     permissionGate: permissionBroker,
     memoryStore,
     ...(targetConnectorId ? { executorFactory: () => new ConnectorExecutor(targetConnectorId, connectorBroker) } : {}),
-  }));
+  });
+  const manager = new RunManager(runtime);
   const agentStore = dependencies.agentStore ?? new DurableAgentStore(orchestrationRoot);
   const agentWorker = dependencies.agentWorker ?? new BoundedAgentWorker(agentStore, runManagerAgentTaskRunner(manager));
   agentWorker.start();
@@ -766,6 +768,40 @@ export function createApiServer(config: AppConfig, dependencies: ApiServerDepend
           ...(typeof input.correction === "string" ? { correction: input.correction } : {}),
         };
         json(response, 201, await appendRunReview(config.runtime.artifactRoot, reviewMatch[1], reviewInput));
+        return;
+      }
+      const writeupMatch = url.pathname.match(/^\/v1\/runs\/([0-9a-f-]+)\/writeup$/i);
+      if (request.method === "POST" && writeupMatch?.[1]) {
+        const id = writeupMatch[1];
+        const active = manager.get(id);
+        const state = active?.state ?? await loadPersistedRun(config.runtime.artifactRoot, id);
+        if (!state) { json(response, 404, { error: "run not found" }); return; }
+        if (!["completed", "blocked", "failed", "aborted"].includes(state.status)) { json(response, 409, { error: "run must be terminal before generating a writeup" }); return; }
+        if (state.writeup?.trim()) { json(response, 200, { writeup: state.writeup, state }); return; }
+        await new AuditChain(join(config.runtime.artifactRoot, id, "audit.jsonl"), id).append("writeup.generation_requested", {
+          status: state.status,
+          submissionPresent: Boolean(state.submission),
+          source: "operator_request",
+        }, { source: "orchestrator", actor: "writeup-generator" });
+        const controller = new AbortController();
+        const abort = () => controller.abort(new Error("Writeup generation connection closed"));
+        request.once("aborted", abort);
+        try {
+          let transcript: unknown[] = [];
+          try {
+            const value = JSON.parse(await readFile(join(config.runtime.artifactRoot, id, "transcript.json"), "utf8"));
+            if (Array.isArray(value)) transcript = value;
+          } catch { /* A missing transcript still permits a bounded structured writeup. */ }
+          const generatedWriteup = await runtime.generateWriteup(state, transcript, controller.signal);
+          state.writeup = generatedWriteup;
+          delete state.writeupError;
+          await new AuditChain(join(config.runtime.artifactRoot, id, "audit.jsonl"), id).append("writeup.generated", { characters: generatedWriteup.length, source: "operator_request" }, { source: "orchestrator", actor: "writeup-generator" });
+          await writeJson(join(config.runtime.artifactRoot, id, "state.json"), state);
+          json(response, 200, { writeup: state.writeup, state });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          json(response, 400, { error: message.slice(0, 600) });
+        } finally { request.off("aborted", abort); }
         return;
       }
       if (request.method === "GET" && url.pathname === "/v1/experiences") {

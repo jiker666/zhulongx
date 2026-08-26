@@ -171,6 +171,7 @@ export function renderWriteup(input: WriteupInput): string {
 }
 
 export function renderRunWriteup(state: RunState, report = state.summary): string {
+  if (state.writeup?.trim()) return state.writeup.trim();
   const verification = state.verification?.filter((item) => item.trim()).slice(0, 8) ?? [];
   const reportWithVerification = verification.length > 0 && !/\bverification\b|验证/i.test(report ?? "")
     ? `${report ?? ""}\n\n### Verification\n${verification.map((item) => `- ${item}`).join("\n")}`
@@ -180,5 +181,6 @@ export function renderRunWriteup(state: RunState, report = state.summary): strin
 
 export function renderTaskWriteup(task: ManualTaskSnapshot): string | undefined {
   if (!task.writeup?.trim()) return undefined;
+  if (/^---\s*\n[\s\S]*?\n---\s*\n/m.test(task.writeup)) return task.writeup.trim();
   return renderWriteup({ task: task.task, report: task.writeup, submission: task.submission });
 }
