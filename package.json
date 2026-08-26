@@ -38,7 +38,7 @@
     "sandbox-health": "tsx src/cli.ts sandbox-health",
     "serve": "tsx src/cli.ts serve",
     "start": "node dist/cli.js",
-    "test": "vitest run test frontend/src/features/decision-stream/projection.test.ts frontend/src/features/evidence-graph/projection.test.ts frontend/src/features/realtime/merge.test.ts frontend/src/features/policy/projection.test.ts",
+    "test": "vitest run test frontend/src/features/decision-stream/projection.test.ts frontend/src/features/evidence-graph/projection.test.ts frontend/src/features/realtime/merge.test.ts frontend/src/features/policy/projection.test.ts frontend/src/features/decision-observatory/projection.test.ts",
     "test:browser": "vitest run test/browser-runtime.test.ts test/browser-live.test.ts",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit -p tsconfig.json"

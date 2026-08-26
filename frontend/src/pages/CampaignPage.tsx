@@ -47,7 +47,7 @@ function CampaignCard({ campaign, onStop, stopping }: { campaign: AdaptiveCampai
   return (
     <article className="surface-panel campaign-card">
       <div className="campaign-card-heading">
-        <div><span className="section-label">CAMPAIGN / {campaign.id.slice(0, 8)}</span><h2>{campaign.name}</h2><p>{formatDateTime(campaign.createdAt)} · {campaign.raceAgents} 条独立探索 lane · 最多 {campaign.concurrency} 个并行 worker</p></div>
+        <div><span className="section-label">CAMPAIGN / {campaign.id.slice(0, 8)}</span><h2><Link to={`/campaigns/${campaign.id}`}>{campaign.name}</Link></h2><p>{formatDateTime(campaign.createdAt)} · {campaign.raceAgents} 条独立探索 lane · 最多 {campaign.concurrency} 个并行 worker</p></div>
         <div className="campaign-card-actions"><Badge tone={campaign.status === "completed" ? "success" : campaign.status === "running" ? "running" : campaign.status === "failed" ? "danger" : "neutral"}>{statusLabels[campaign.status] ?? campaign.status}</Badge>{activeStatuses.has(campaign.status) && <Button className="button danger-button compact-action" loading={stopping} onClick={() => onStop(campaign.id)}><CircleStop size={14} aria-hidden="true" />停止</Button>}</div>
       </div>
       <div className="campaign-progress-copy"><span><strong>{settled}</strong> / {campaign.items.length} 个调查任务已结算</span><span>当前层级：{campaign.tiers[campaign.currentTier]?.label ?? `Tier ${campaign.currentTier}`}</span></div>

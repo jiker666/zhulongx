@@ -901,6 +901,7 @@ a {
 @media (max-width: 760px) {
   .app-shell {
     display: block;
+    overflow-x: clip;
   }
 
   .sidebar {
@@ -931,6 +932,8 @@ a {
     align-items: center;
     justify-content: flex-end;
     gap: 4px;
+    min-width: 0;
+    max-width: 100%;
   }
 
   .nav-link {

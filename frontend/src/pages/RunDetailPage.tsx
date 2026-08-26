@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, CheckCircle2, Download, GitFork, HelpCircle, History, RefreshCw, RotateCcw, Search, ShieldAlert } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Download, Flag, GitFork, HelpCircle, History, Pause, Play, RefreshCw, RotateCcw, Search, ShieldAlert, SkipBack, SkipForward, X } from "lucide-react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { continueRun, getRun, getRunTrace, reviewRunEvent } from "../api/runs";
 import { Badge, Button, Card, EmptyState, ErrorState, LoadingState } from "../components/ui";
@@ -14,6 +14,7 @@ import type { EvidenceGraphNode } from "../features/evidence-graph/types";
 import { useRunRealtimeStream } from "../features/realtime/runStream";
 import type { RunConnectionState } from "../features/realtime/types";
 import { PolicyDetails } from "../features/policy/PolicyDetails";
+import { DecisionObservatory } from "../features/decision-observatory/DecisionObservatory";
 import type { RunState, TrajectorySource } from "../types/api";
 
 const phaseLabels: Record<string, string> = { intake: "接收", planning: "规划", exploration: "探索", analysis: "分析", verification: "验证", reporting: "报告", done: "完成" };
@@ -76,6 +77,25 @@ function CurrentAction({ status, decision, total }: { status: string; decision?:
         <p>{decision?.explanation.why ?? "任务启动后，每个动作都会在这里用通俗语言解释。"}</p>
         {decision && <small>来源：{sourceLabels[decision.source]} · 事件 #{decision.sequence} · 共 {total} 步</small>}
       </div>
+    </section>
+  );
+}
+
+function FinalConclusion({ state, events }: { state?: RunState; events: Array<{ type: string; data: unknown }> }) {
+  const outcomeEvent = [...events].reverse().find((event) => event.type === "run.settled" || event.type === "run.finished_by_agent");
+  const outcomeData = outcomeEvent?.data && typeof outcomeEvent.data === "object" ? outcomeEvent.data as Record<string, unknown> : {};
+  const submission = state?.submission ?? (typeof outcomeData.submission === "string" ? outcomeData.submission : undefined);
+  const summary = state?.summary ?? (typeof outcomeData.summary === "string" ? outcomeData.summary : undefined);
+  const category = state?.task.metadata.category ?? "";
+  const flagLike = /ctf|flag|challenge/i.test(category) || Boolean(submission && /flag\{|[A-Za-z0-9_:-]+\{[^}]+\}/i.test(submission));
+  const status = state?.status ?? "unknown";
+  const statusText = status === "completed" ? "COMPLETED" : status === "blocked" ? "BLOCKED" : status === "failed" ? "FAILED" : status === "aborted" ? "ABORTED" : "IN PROGRESS";
+  return (
+    <section className={`final-conclusion-panel ${submission ? "has-submission" : "no-submission"}`} aria-label="最终结论">
+      <div className="final-conclusion-heading"><div><span className="section-label">FINAL CONCLUSION</span><h2>运行总结结论</h2></div><div className="final-heading-status"><span className={`final-status final-status-${status}`}>{statusText}</span>{submission && flagLike && <span className="final-flag-status"><Flag size={12} aria-hidden="true" />FLAG FOUND</span>}</div></div>
+      {submission ? <div className="submission-spotlight"><div className="submission-label"><Flag size={17} aria-hidden="true" /><span>{flagLike ? "FLAG" : "FINAL SUBMISSION"}</span><small>来自 finish_task 的真实提交</small></div><div className="submission-value"><span className="submission-value-kicker">{flagLike ? "最终 Flag" : "最终答案"}</span><code title={submission}>{submission}</code></div></div> : <div className="submission-empty"><Flag size={16} aria-hidden="true" /><span>未提交最终答案或 Flag</span><small>运行状态不会从工具日志中推测答案。</small></div>}
+      <div className="conclusion-summary"><span className="observatory-kicker">SUMMARY / 结论摘要</span><p>{summary || "运行尚未写入总结结论。"}</p></div>
+      <div className="conclusion-proof"><span>{state?.independentlyVerified ? "✓ INDEPENDENTLY VERIFIED" : "VERIFICATION STATUS"}</span><strong>{state?.independentlyVerified ? "已独立验证" : state?.verification?.length ? `${state.verification.length} 条验证记录` : "未提供独立验证"}</strong></div>
     </section>
   );
 }
@@ -178,30 +198,81 @@ function GraphInspector({ node, decisions, onViewDecision }: { node?: EvidenceGr
   return <aside className="inspector-panel graph-inspector"><div className="section-label">GRAPH INSPECTOR</div><h2>{node.label}</h2><dl className="inspector-facts"><div><dt>节点类型</dt><dd>{node.kind}</dd></div><div><dt>节点状态</dt><dd>{node.state}</dd></div><div><dt>真实 ID</dt><dd className="mono">{node.subtitle ?? node.id}</dd></div>{node.confidence !== undefined && <div><dt>Confidence</dt><dd>{formatConfidence(node.confidence)}</dd></div>}<div><dt>来源</dt><dd>{node.sourceIds.length ? node.sourceIds.join(", ") : "—"}</dd></div></dl>{linked.length > 0 && <div className="linked-decisions"><strong>关联决策 {linked.length} 条</strong>{linked.map((decision) => <Button key={decision.id} className="button secondary" onClick={() => onViewDecision(decision.id)}>{decision.title}</Button>)}</div>}{node.metadata && <div className="technical-details"><details><summary>查看 Metadata</summary><pre>{safeJson(node.metadata)}</pre></details></div>}</aside>;
 }
 
+function BranchCompare({ current, parent, currentEvents, parentEvents }: { current?: RunState; parent?: RunState; currentEvents: Array<{ type: string; data: unknown }>; parentEvents: Array<{ type: string; data: unknown }> }) {
+  if (!current?.lineage) return null;
+  const names = (items: Array<{ id?: string; title?: string; statement?: string; objective?: string; toolName?: string }>) => items.map((item) => item.id ?? item.title ?? item.statement ?? item.objective ?? item.toolName ?? "unknown").filter(Boolean);
+  const currentHypotheses = names(current.webReasoning?.hypotheses?.length ? current.webReasoning.hypotheses : current.hypotheses);
+  const parentHypotheses = names(parent?.webReasoning?.hypotheses?.length ? parent.webReasoning.hypotheses : parent?.hypotheses ?? []);
+  const currentActions = (current.webReasoning?.actions ?? []).map((item) => item.id ?? item.toolName ?? item.objective);
+  const parentActions = (parent?.webReasoning?.actions ?? []).map((item) => item.id ?? item.toolName ?? item.objective);
+  const currentEvidence = (current.evidence ?? []).map((item) => item.id);
+  const parentEvidence = (parent?.evidence ?? []).map((item) => item.id);
+  const currentFindings = (current.findings ?? []).map((item) => item.id);
+  const parentFindings = (parent?.findings ?? []).map((item) => item.id);
+  const policyBlocks = (events: Array<{ type: string; data: unknown }>) => events.filter((event) => event.type === "policy.decision" && event.data && typeof event.data === "object" && (event.data as Record<string, unknown>).allowed === false).length;
+  const added = (left: string[], right: string[]) => left.filter((item) => !right.includes(item));
+  const metrics = [
+    ["Outcome", parent?.status ?? "Unavailable", current.status],
+    ["Tool Calls", parent?.toolCalls ?? "—", current.toolCalls],
+    ["Strategy Revisions", parent?.strategyRevisions?.length ?? "—", current.strategyRevisions?.length ?? 0],
+    ["Evidence", parent?.evidence?.length ?? "—", current.evidence?.length ?? 0],
+    ["Findings", parent?.findings?.length ?? "—", current.findings?.length ?? 0],
+    ["Policy Blocks", policyBlocks(parentEvents), policyBlocks(currentEvents)],
+  ];
+  const differences = [
+    ["HYPOTHESES", added(currentHypotheses, parentHypotheses)],
+    ["ACTIONS", added(currentActions, parentActions)],
+    ["EVIDENCE", added(currentEvidence, parentEvidence)],
+    ["FINDINGS", added(currentFindings, parentFindings)],
+  ] as const;
+  return <section className="branch-compare-panel"><div className="branch-compare-heading"><div><span className="section-label">RUN LINEAGE / COUNTERFACTUAL COMPARE</span><h2>Decision Tree</h2></div><span className="mono">Fork @ #{current.lineage.boundarySequence}</span></div><div className="lineage-graph"><span className="lineage-run">PARENT RUN <b>{current.lineage.parentRunId.slice(0, 8)}</b></span><span className="lineage-fork">#{current.lineage.boundarySequence}</span><span className="lineage-run current">CURRENT RUN <b>{current.id.slice(0, 8)}</b></span></div><div className="branch-compare-table"><div className="branch-compare-row branch-compare-head"><span>METRIC</span><span>PARENT</span><span>BRANCH</span></div>{metrics.map(([label, parentValue, currentValue]) => <div className="branch-compare-row" key={String(label)}><span>{label}</span><strong>{parentValue}</strong><strong>{currentValue}</strong></div>)}</div><div className="branch-difference-grid">{differences.map(([label, items]) => <div className="branch-difference" key={label}><span className="observatory-kicker">DIFFERENT {label}</span>{items.length ? <ul>{items.slice(0, 8).map((item) => <li key={item}>{item}</li>)}</ul> : <small>无新增差异</small>}</div>)}</div></section>;
+}
+
 export function RunDetailPage() {
   const { runId = "" } = useParams();
   const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState<"trajectory" | "graph" | "raw">("trajectory");
+  const [graphMode, setGraphMode] = useState<"evidence" | "attack" | "browser">("evidence");
   const [sourceFilter, setSourceFilter] = useState<"all" | TrajectorySource>("all");
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<string>();
   const [selectedGraphId, setSelectedGraphId] = useState<string>();
   const [replayEnabled, setReplayEnabled] = useState(false);
   const [replaySequence, setReplaySequence] = useState(1);
+  const [replayPlaying, setReplayPlaying] = useState(false);
+  const [replaySpeed, setReplaySpeed] = useState(1);
+  const [branchBoundary, setBranchBoundary] = useState<number>();
+  const [branchInstruction, setBranchInstruction] = useState("");
   const [visibleLimit, setVisibleLimit] = useState(160);
   const [realtimeState, setRealtimeState] = useState<RunConnectionState>("connecting");
   const run = useQuery({ queryKey: ["run", runId], queryFn: ({ signal }) => getRun(runId, signal), enabled: Boolean(runId), refetchInterval: (query) => activeStatuses.has(query.state.data?.status ?? "") && realtimeState !== "live" ? 5_000 : false });
   useRunRealtimeStream(runId, activeStatuses.has(run.data?.status ?? ""), setRealtimeState);
   const trace = useQuery({ queryKey: ["trace", runId], queryFn: ({ signal }) => getRunTrace(runId, signal), enabled: Boolean(runId), refetchInterval: () => activeStatuses.has(run.data?.status ?? "") && realtimeState !== "live" ? 10_000 : false });
+  const parentRun = useQuery({ queryKey: ["parent-run", run.data?.state?.lineage?.parentRunId], queryFn: ({ signal }) => getRun(run.data?.state?.lineage?.parentRunId ?? "", signal), enabled: Boolean(run.data?.state?.lineage?.parentRunId) });
+  const parentTrace = useQuery({ queryKey: ["parent-trace", run.data?.state?.lineage?.parentRunId], queryFn: ({ signal }) => getRunTrace(run.data?.state?.lineage?.parentRunId ?? "", signal), enabled: Boolean(run.data?.state?.lineage?.parentRunId) });
   const rawEvents = trace.data?.rawEvents ?? trace.data?.timeline.map((event) => ({ sequence: event.sequence, timestamp: event.timestamp, type: event.sourceEventType ?? event.kind, source: event.source, actor: event.actor, correlationId: event.correlationId, parentSequence: event.parentSequence, data: event.data })) ?? [];
   const decisions = useMemo(() => projectTrace(rawEvents), [rawEvents]);
   const maxSequence = decisions.at(-1)?.sequence ?? 1;
   useEffect(() => { setSelectedId((current) => current && decisions.some((decision) => decision.id === current) ? current : decisions.at(-1)?.id); }, [decisions]);
   useEffect(() => { if (!replayEnabled) setReplaySequence(maxSequence); }, [maxSequence, replayEnabled]);
+  useEffect(() => {
+    if (!replayEnabled || !replayPlaying) return;
+    const timer = window.setInterval(() => setReplaySequence((current) => {
+      if (current >= maxSequence) { setReplayPlaying(false); return maxSequence; }
+      return Math.min(maxSequence, current + 1);
+    }), Math.max(120, 700 / replaySpeed));
+    return () => window.clearInterval(timer);
+  }, [maxSequence, replayEnabled, replayPlaying, replaySpeed]);
   const state = (run.data?.state ?? trace.data?.state) as RunState | undefined;
   const graph = useMemo(() => layoutEvidenceGraph(projectEvidenceGraph({ state: state ?? ({ id: runId, status: "running", phase: "intake", task: { task: "", metadata: {}, attachments: [] }, createdAt: "", updatedAt: "", findings: [], lessons: [], hypotheses: [], strategyRevisions: [], turns: 0, toolCalls: 0, httpRequests: 0, tcpSessions: 0 } as RunState), rawEvents })), [rawEvents, runId, state]);
+  const displayedGraph = useMemo(() => {
+    if (graphMode === "evidence") return graph;
+    const nodes = graph.nodes.filter((node) => graphMode === "attack" ? node.id.startsWith("web:") : node.id.startsWith("browser:"));
+    const nodeIds = new Set(nodes.map((node) => node.id));
+    return layoutEvidenceGraph({ nodes, edges: graph.edges.filter((edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target)) });
+  }, [graph, graphMode]);
   const continuation = useMutation({
-    mutationFn: ({ mode, boundarySequence }: { mode: "fork" | "resume"; boundarySequence?: number }) => continueRun(runId, mode, boundarySequence === undefined ? {} : { boundarySequence }),
+    mutationFn: ({ mode, boundarySequence, instruction }: { mode: "fork" | "resume"; boundarySequence?: number; instruction?: string }) => continueRun(runId, mode, { ...(boundarySequence === undefined ? {} : { boundarySequence }), ...(instruction?.trim() ? { instruction: instruction.trim() } : {}) }),
     onSuccess: (result) => void navigate(`/runs/${result.id}`),
   });
   if (run.isPending) return <LoadingState label="正在读取任务概览…" />;
@@ -212,9 +283,23 @@ export function RunDetailPage() {
   const hiddenDecisionCount = visibleDecisions.length - renderedDecisions.length;
   const selected = decisions.find((decision) => decision.id === selectedId);
   const currentDecision = decisions.filter((decision) => !replayEnabled || decision.sequence <= replaySequence).at(-1);
-  const selectedGraphNode = graph.nodes.find((node) => node.id === selectedGraphId);
+  const observatoryEvents = replayEnabled ? rawEvents.filter((event) => event.sequence <= replaySequence) : rawEvents;
+  const selectedGraphNode = displayedGraph.nodes.find((node) => node.id === selectedGraphId);
   const manualRefresh = async () => { await Promise.all([run.refetch(), trace.refetch()]); };
   const selectDecision = (id: string) => { setSelectedId(id); setActiveTab("trajectory"); };
+  const locateSequence = (sequence: number) => {
+    const decision = decisions.find((item) => item.sequence === sequence) ?? decisions.find((item) => item.sequence >= sequence);
+    if (decision) selectDecision(decision.id);
+  };
+  const openBranchLab = (sequence: number) => { setBranchBoundary(sequence); setBranchInstruction(""); };
+  const createBranch = () => { if (branchBoundary === undefined) return; continuation.mutate({ mode: "fork", boundarySequence: branchBoundary, instruction: branchInstruction }); setBranchBoundary(undefined); };
+  const jumpReplay = (direction: "back" | "forward", type?: string) => {
+    const candidates = decisions.filter((decision) => type ? decision.sourceEventType === type : true).map((decision) => decision.sequence);
+    const current = replayEnabled ? replaySequence : maxSequence;
+    const next = direction === "back" ? [...candidates].reverse().find((sequence) => sequence < current) : candidates.find((sequence) => sequence > current);
+    setReplayEnabled(true);
+    if (next !== undefined) setReplaySequence(next); else setReplaySequence(direction === "back" ? 1 : maxSequence);
+  };
   const selectGraph = (id: string) => { setSelectedGraphId(id); setActiveTab("graph"); };
   const exportAudit = () => { if (!trace.data) return; const blob = new Blob([JSON.stringify({ exportedAt: new Date().toISOString(), run: run.data, trace: trace.data }, null, 2)], { type: "application/json" }); const url = URL.createObjectURL(blob); const anchor = document.createElement("a"); anchor.href = url; anchor.download = `xuan-shu-audit-${runId}.json`; anchor.click(); window.setTimeout(() => URL.revokeObjectURL(url), 0); };
   return (
@@ -231,13 +316,16 @@ export function RunDetailPage() {
       {continuation.error && <div className="inline-error" role="alert">{continuation.error.message}</div>}
       <MissionControl status={run.data?.status ?? "unknown"} state={state} records={decisions} realtimeState={realtimeState} />
       <CurrentAction status={run.data?.status ?? "unknown"} decision={currentDecision} total={decisions.length} />
+      <FinalConclusion state={state} events={rawEvents} />
+      <DecisionObservatory state={state} events={observatoryEvents} onLocate={locateSequence} />
+      <BranchCompare current={state} parent={parentRun.data?.state} currentEvents={rawEvents} parentEvents={parentTrace.data?.rawEvents ?? []} />
       {trace.data && <div className={`audit-integrity ${trace.data.integrity.valid ? "valid" : "invalid"}`}>{trace.data.integrity.valid ? <CheckCircle2 size={15} aria-hidden="true" /> : <AlertTriangle size={15} aria-hidden="true" />}<span><strong>{trace.data.integrity.valid ? "审计链完整" : "审计链异常"}</strong><small>{trace.data.integrity.records} 条只追加记录{trace.data.integrity.error ? ` · ${trace.data.integrity.error}` : " · 顺序与哈希校验通过"}</small></span></div>}
       <div className="view-tabs primary-tabs" role="tablist" aria-label="Run detail view">
         <button role="tab" aria-selected={activeTab === "trajectory"} className={activeTab === "trajectory" ? "active" : ""} onClick={() => setActiveTab("trajectory")}>行动轨迹</button>
         <button role="tab" aria-selected={activeTab === "graph"} className={activeTab === "graph" ? "active" : ""} onClick={() => setActiveTab("graph")}>证据图</button>
         <button role="tab" aria-selected={activeTab === "raw"} className={activeTab === "raw" ? "active" : ""} onClick={() => setActiveTab("raw")}>原始事件</button>
       </div>
-      {trace.isPending ? <LoadingState label="正在校验审计链并构建行动轨迹…" /> : trace.isError ? <ErrorState message={trace.error.message} onRetry={() => void trace.refetch()} /> : activeTab === "graph" ? <div className="graph-layout"><section><EvidenceGraphView graph={graph} selectedId={selectedGraphId} onSelect={setSelectedGraphId} /></section><GraphInspector node={selectedGraphNode} decisions={decisions} onViewDecision={selectDecision} /></div> : (
+      {trace.isPending ? <LoadingState label="正在校验审计链并构建行动轨迹…" /> : trace.isError ? <ErrorState message={trace.error.message} onRetry={() => void trace.refetch()} /> : activeTab === "graph" ? <div className="graph-layout"><section><div className="graph-mode-switch" role="tablist" aria-label="图谱模式"><button type="button" className={graphMode === "evidence" ? "active" : ""} onClick={() => setGraphMode("evidence")}>EVIDENCE</button><button type="button" className={graphMode === "attack" ? "active" : ""} onClick={() => setGraphMode("attack")}>ATTACK SURFACE</button><button type="button" className={graphMode === "browser" ? "active" : ""} onClick={() => setGraphMode("browser")}>BROWSER STATE</button></div><EvidenceGraphView graph={displayedGraph} selectedId={selectedGraphId} onSelect={setSelectedGraphId} /></section><GraphInspector node={selectedGraphNode} decisions={decisions} onViewDecision={selectDecision} /></div> : (
         <div className="decision-layout">
           <section className="decision-main">
             {activeTab === "trajectory" && <>
@@ -246,14 +334,15 @@ export function RunDetailPage() {
                 <label className="trajectory-search"><Search size={15} aria-hidden="true" /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索动作、原因或事件" aria-label="搜索行动轨迹" /></label>
                 <label className="replay-toggle"><input type="checkbox" checked={replayEnabled} onChange={(event) => { setReplayEnabled(event.target.checked); setReplaySequence(maxSequence); }} /><History size={15} aria-hidden="true" />历史回放</label>
               </div>
-              {replayEnabled && <div className="replay-control"><span>起点</span><input type="range" min={1} max={maxSequence} value={Math.min(replaySequence, maxSequence)} onChange={(event) => setReplaySequence(Number(event.target.value))} aria-label="回放事件序号" /><strong>回放至 #{replaySequence}</strong></div>}
+              {replayEnabled && <div className="replay-control replay-flight-recorder"><div className="replay-buttons"><button type="button" onClick={() => setReplayPlaying((value) => !value)} aria-label={replayPlaying ? "暂停回放" : "播放回放"}>{replayPlaying ? <Pause size={14} /> : <Play size={14} />}</button><button type="button" onClick={() => jumpReplay("back")} aria-label="上一个事件"><SkipBack size={14} /></button><button type="button" onClick={() => jumpReplay("forward")} aria-label="下一个事件"><SkipForward size={14} /></button></div><span>MISSION FLIGHT RECORDER</span><input type="range" min={1} max={maxSequence} value={Math.min(replaySequence, maxSequence)} onChange={(event) => { setReplayPlaying(false); setReplaySequence(Number(event.target.value)); }} aria-label="回放事件序号" /><strong>#{replaySequence} / {maxSequence}</strong><select value={replaySpeed} onChange={(event) => setReplaySpeed(Number(event.target.value))} aria-label="回放速度"><option value={0.5}>0.5x</option><option value={1}>1x</option><option value={2}>2x</option></select><div className="replay-jumps"><button type="button" onClick={() => jumpReplay("forward", "decision.checkpoint")}>Next Checkpoint</button><button type="button" onClick={() => jumpReplay("forward", "strategy.revised")}>Next Revision</button><button type="button" onClick={() => jumpReplay("forward", "finding.recorded")}>Next Finding</button><button type="button" onClick={() => jumpReplay("forward", "policy.decision")}>Next Policy</button></div></div>}
               {visibleDecisions.length ? <div className="decision-stream">{hiddenDecisionCount > 0 && <button className="load-earlier-events" onClick={() => setVisibleLimit((value) => value + 160)}><History size={14} aria-hidden="true" />加载更早的 {Math.min(160, hiddenDecisionCount)} 条记录</button>}{renderedDecisions.map((decision) => <DecisionItem key={decision.id} decision={decision} selected={decision.id === selectedId} onSelect={() => setSelectedId(decision.id)} />)}</div> : <EmptyState title="没有匹配的行动记录" description="调整来源、搜索词或回放位置后重试。" />}
             </>}
             {activeTab === "raw" && (rawEvents.length ? <div className="raw-stream">{rawEvents.map((event) => <button className="raw-event" key={`${event.sequence}-${event.timestamp}`} onClick={() => selectDecision(`${event.type}:${event.sequence}`)}><span>#{event.sequence}</span><strong>{event.type}</strong><small>{event.source ? sourceLabels[event.source] : "系统"}{event.actor ? ` · ${event.actor}` : ""}</small><time>{formatDateTime(event.timestamp)}</time><pre>{safeJson(event.data)}</pre></button>)}</div> : <EmptyState title="暂无原始事件" description="该运行尚未产生可展示的审计事件。" />)}
           </section>
-          <DecisionInspector runId={runId} decision={selected} graphNodes={graph.nodes} reviews={trace.data?.reviews ?? []} onViewGraph={selectGraph} onFork={(sequence) => continuation.mutate({ mode: "fork", boundarySequence: sequence })} forking={continuation.isPending} />
+          <DecisionInspector runId={runId} decision={selected} graphNodes={graph.nodes} reviews={trace.data?.reviews ?? []} onViewGraph={selectGraph} onFork={openBranchLab} forking={continuation.isPending} />
         </div>
       )}
+      {branchBoundary !== undefined && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setBranchBoundary(undefined); }}><section className="branch-dialog" role="dialog" aria-modal="true" aria-labelledby="branch-dialog-title"><div className="dialog-header"><div><div className="eyebrow">COUNTERFACTUAL BRANCH LAB</div><h2 id="branch-dialog-title">从事件 #{branchBoundary} 创建替代路线</h2></div><button type="button" className="icon-button" aria-label="关闭分支实验" onClick={() => setBranchBoundary(undefined)}><X size={17} /></button></div><p>父运行在该边界之前保持不变；新运行只继承公开、脱敏的历史轨迹。</p><label className="field-label" htmlFor="branch-instruction">Alternative Instruction</label><textarea id="branch-instruction" value={branchInstruction} onChange={(event) => setBranchInstruction(event.target.value)} maxLength={4000} placeholder="例如：优先分析已有浏览器网络证据，再决定是否主动请求。" /><div className="branch-dialog-footer"><span>Inherited evidence: {state?.evidence?.length ?? 0}</span><Button className="button" loading={continuation.isPending} onClick={createBranch}><GitFork size={15} />创建分支</Button></div></section></div>}
     </div>
   );
 }

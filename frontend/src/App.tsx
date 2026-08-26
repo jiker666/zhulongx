@@ -10,6 +10,9 @@ const RunDetailPage = lazy(() => import("./pages/RunDetailPage").then((module) =
 const RunsPage = lazy(() => import("./pages/RunsPage").then((module) => ({ default: module.RunsPage })));
 const WorkbenchPage = lazy(() => import("./pages/WorkbenchPage").then((module) => ({ default: module.WorkbenchPage })));
 const CampaignPage = lazy(() => import("./pages/CampaignPage").then((module) => ({ default: module.CampaignPage })));
+const CampaignDetailPage = lazy(() => import("./pages/CampaignDetailPage").then((module) => ({ default: module.CampaignDetailPage })));
+const EvaluationLabPage = lazy(() => import("./pages/EvaluationLabPage").then((module) => ({ default: module.EvaluationLabPage })));
+const RuntimePage = lazy(() => import("./pages/RuntimePage").then((module) => ({ default: module.RuntimePage })));
 
 export function App() {
   return (
@@ -20,9 +23,12 @@ export function App() {
           <Route path="overview" element={<OverviewPage />} />
           <Route path="workbench" element={<WorkbenchPage />} />
           <Route path="campaigns" element={<CampaignPage />} />
+          <Route path="campaigns/:campaignId" element={<CampaignDetailPage />} />
           <Route path="runs" element={<RunsPage />} />
           <Route path="runs/:runId" element={<RunDetailPage />} />
           <Route path="experiences" element={<ExperiencesPage />} />
+          <Route path="evaluations" element={<EvaluationLabPage />} />
+          <Route path="runtime" element={<RuntimePage />} />
           <Route path="*" element={<NotFoundPage />} />
         </Route>
       </Routes>

@@ -15,6 +15,7 @@ export const stopManualJob = (id: string, signal?: AbortSignal) => request<{ job
 export const getQuestionBank = (signal?: AbortSignal) => request<{ questionBank: QuestionBankSnapshot }>("/v1/question-bank", { signal });
 export const startQuestionBankJob = (writeup: boolean, signal?: AbortSignal) => request<{ job: ManualJobSnapshot }>("/v1/question-bank/jobs", { method: "POST", signal, headers: jsonHeaders, body: JSON.stringify({ writeup }) });
 export const getCampaigns = (signal?: AbortSignal) => request<{ campaigns: AdaptiveCampaignSnapshot[] }>("/v1/campaigns", { signal });
+export const getCampaign = (id: string, signal?: AbortSignal) => request<{ campaign: AdaptiveCampaignSnapshot }>(`/v1/campaigns/${encodeURIComponent(id)}`, { signal });
 export const startCampaign = (input: { name?: string; tasks: string[]; concurrency: number; raceAgents: number }, signal?: AbortSignal) => request<{ campaign: AdaptiveCampaignSnapshot }>("/v1/campaigns", { method: "POST", signal, headers: jsonHeaders, body: JSON.stringify(input) });
 export const stopCampaign = (id: string, signal?: AbortSignal) => request<{ campaign: AdaptiveCampaignSnapshot }>(`/v1/campaigns/${encodeURIComponent(id)}/stop`, { method: "POST", signal, headers: jsonHeaders, body: "{}" });
 
