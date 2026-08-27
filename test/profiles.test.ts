@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { defaultAgentProfile, filterProfileTools, resolveAgentProfile, validateProfileCapabilities } from "../src/profiles.js";
+import { defaultAgentProfile, filterProfileTools, narrowToolsForCategory, resolveAgentProfile, validateProfileCapabilities } from "../src/profiles.js";
 import { testConfig } from "./helpers.js";
 
 describe("agent profiles", () => {
@@ -24,5 +24,16 @@ describe("agent profiles", () => {
     const profile = resolveAgentProfile(config);
     expect(() => validateProfileCapabilities(profile, { status: "online", kind: "sandbox", networkAccess: false, network: "none", capabilities: ["scratch-read"], allowedPrograms: [], missingPrograms: [] })).toThrow("workspace-read");
     expect(filterProfileTools(profile, [{ name: "read_file" }, { name: "run_command" }])).toEqual([{ name: "read_file" }]);
+  });
+
+  it("narrows offline CTF runs without expanding the operator allowlist", () => {
+    const tools = [
+      { name: "submit_plan" }, { name: "inspect_artifact" }, { name: "run_command" },
+      { name: "http_request" }, { name: "browser" }, { name: "finish_task" },
+    ];
+    expect(narrowToolsForCategory("reverse", tools).map((tool) => tool.name)).toEqual([
+      "submit_plan", "inspect_artifact", "run_command", "finish_task",
+    ]);
+    expect(narrowToolsForCategory(undefined, tools)).toEqual(tools);
   });
 });

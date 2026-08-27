@@ -16,7 +16,7 @@ import { normalizeTask, renderTaskContext } from "./input.js";
 import { estimateModelRequestTokens, ModelRequestGate } from "./model-rate-limit.js";
 import { PolicyEngine } from "./policy.js";
 import { classifyProviderError } from "./provider-errors.js";
-import { filterProfileTools, resolveAgentProfile, validateProfileCapabilities } from "./profiles.js";
+import { filterProfileTools, narrowToolsForCategory, resolveAgentProfile, validateProfileCapabilities } from "./profiles.js";
 import { renderCapabilityPlaybook } from "./playbooks.js";
 import { sanitizeSecrets } from "./sanitize.js";
 import { boundedContextSection, modelContextSnapshot } from "./session-trajectory.js";
@@ -28,9 +28,14 @@ import type { AppConfig, NormalizedTask, RunEvent, RunLineage, RunState, Runtime
 import { createWebReasoningController } from "./web-reasoning/controller.js";
 import { detectWebTask } from "./web-reasoning/task-detector.js";
 import { generateWriteup as generateWriteupDocument } from "./writeup-generator.js";
+import { resolveCtfSkillCategory } from "./skill-catalog.js";
 
 type SupportedModelApi = "anthropic-messages" | "openai-completions" | "openai-responses";
 const MAX_LENGTH_RECOVERY_ATTEMPTS = 2;
+// Some gateways can end a reasoning turn with no visible text or tool call. Give
+// the agent a small, explicit continuation window instead of losing a valid run.
+const MAX_NO_ACTION_RECOVERY_ATTEMPTS = 2;
+const MAX_PROVIDER_RETRY_ATTEMPTS = 3;
 const sharedModelRequestGates = new WeakMap<AppConfig, ModelRequestGate>();
 
 export { ModelRequestGate } from "./model-rate-limit.js";
@@ -49,6 +54,8 @@ export interface RuntimeModelStatus {
   name: string;
   api: SupportedModelApi;
   baseUrl: string;
+  reasoning: boolean;
+  thinkingFormat?: AppConfig["model"]["thinkingFormat"];
   appKeyHeaderConfigured: boolean;
 }
 
@@ -67,6 +74,7 @@ export function createModel(config: AppConfig["model"], extraHeaders: Record<str
     provider: config.provider,
     baseUrl: config.baseUrl,
     reasoning: config.reasoning,
+    ...(config.thinkingLevelMap ? { thinkingLevelMap: config.thinkingLevelMap } : {}),
     input: ["text", "image"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: config.contextWindow,
@@ -89,6 +97,8 @@ export function createModel(config: AppConfig["model"], extraHeaders: Record<str
               supportsStore: false,
               supportsDeveloperRole: false,
               supportsStrictMode: true,
+              ...(config.supportsReasoningEffort === undefined ? {} : { supportsReasoningEffort: config.supportsReasoningEffort }),
+              ...(config.thinkingFormat ? { thinkingFormat: config.thinkingFormat } : {}),
             },
           }
         : {
@@ -133,6 +143,54 @@ function lengthRecoveryThinkingLevel(
   configured: AppConfig["runtime"]["thinkingLevel"],
 ): AppConfig["runtime"]["thinkingLevel"] {
   return ["medium", "high", "xhigh", "max"].includes(configured) ? "low" : configured;
+}
+
+function effectiveThinkingLevel(
+  category: ReturnType<typeof resolveCtfSkillCategory>,
+  configured: AppConfig["runtime"]["thinkingLevel"],
+): AppConfig["runtime"]["thinkingLevel"] {
+  // Offline binary work benefits more from short, complete tool arguments than
+  // from long hidden deliberation that can consume the provider output budget.
+  return category === "reverse" && configured !== "off"
+    ? "off"
+    : configured;
+}
+
+function isRetryableModelError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /(?:\b429\b|too\s*many\s*requests|rate\s*limit|temporarily\s+unavailable|\b5\d\d\b|econnreset|etimedout|fetch failed|socket hang up)/i.test(message);
+}
+
+function providerRetryDelayMs(error: unknown, attempt: number): number {
+  const message = error instanceof Error ? error.message : String(error);
+  const hintedSeconds = message.match(/(?:wait|retry(?:-after)?)[^0-9]{0,12}(\d+(?:\.\d+)?)\s*s/i)?.[1];
+  const hinted = hintedSeconds ? Math.ceil(Number(hintedSeconds) * 1_000) : 0;
+  return Math.min(30_000, Math.max(hinted, 4_000 * (2 ** Math.max(0, attempt - 1))));
+}
+
+async function abortableDelay(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  if (milliseconds <= 0) return;
+  if (signal?.aborted) throw signal.reason ?? new Error("Model request aborted");
+  await new Promise<void>((resolveDelay, rejectDelay) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolveDelay();
+    }, milliseconds);
+    const onAbort = () => {
+      clearTimeout(timer);
+      rejectDelay(signal?.reason ?? new Error("Model request aborted"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+async function writeupLooksComplete(value: string | undefined): Promise<boolean> {
+  const text = value?.trim() ?? "";
+  return /^---\s*\n[\s\S]*?\n---\s*\n/m.test(text)
+    && text.includes("## Summary")
+    && text.includes("## Solution")
+    && text.includes("## Flag")
+    && /```[A-Za-z0-9_+-]+\n[\s\S]*?```/.test(text);
 }
 
 function publicContent(content: unknown[]): unknown[] {
@@ -235,6 +293,9 @@ export class XuanShuRuntime {
     const model = this.overrides.model ?? createModel(this.config.model, this.overrides.modelHeaders);
     const session = Boolean(this.overrides.modelApiKey);
     const environment = Boolean(process.env[this.config.model.apiKeyEnv]);
+    const thinkingFormat = model.compat && typeof model.compat === "object" && "thinkingFormat" in model.compat
+      ? (model.compat as { thinkingFormat?: AppConfig["model"]["thinkingFormat"] }).thinkingFormat
+      : undefined;
     return {
       configured: session || environment,
       source: session ? "session" : environment ? "environment" : "missing",
@@ -243,6 +304,8 @@ export class XuanShuRuntime {
       name: model.name,
       api: model.api as SupportedModelApi,
       baseUrl: model.baseUrl,
+      reasoning: model.reasoning,
+      ...(thinkingFormat ? { thinkingFormat } : {}),
       appKeyHeaderConfigured: Boolean(this.overrides.modelHeaders && Object.keys(this.overrides.modelHeaders).length > 0),
     };
   }
@@ -252,14 +315,21 @@ export class XuanShuRuntime {
     const apiKey = this.overrides.modelApiKey ?? process.env[this.config.model.apiKeyEnv];
     const providerStreamFn = this.overrides.streamFn ?? defaultStreamFn();
     const streamFn: StreamFn = (turnModel, context, streamOptions) => lazyStream(turnModel, async () => {
-      const reservation = await this.modelRequestGate.wait({
-        minimumIntervalMs: this.config.runtime.modelMinIntervalMs,
-        requestsPerMinute: this.config.runtime.modelRequestsPerMinute,
-        tokensPerMinute: this.config.runtime.modelTokensPerMinute,
-        estimatedTokens: estimateModelRequestTokens(turnModel, context, streamOptions),
-      }, streamOptions?.signal);
-      void reservation;
-      return await providerStreamFn(turnModel, context, streamOptions);
+      for (let attempt = 1; attempt <= MAX_PROVIDER_RETRY_ATTEMPTS; attempt += 1) {
+        await this.modelRequestGate.wait({
+          minimumIntervalMs: this.config.runtime.modelMinIntervalMs,
+          requestsPerMinute: this.config.runtime.modelRequestsPerMinute,
+          tokensPerMinute: this.config.runtime.modelTokensPerMinute,
+          estimatedTokens: estimateModelRequestTokens(turnModel, context, streamOptions),
+        }, streamOptions?.signal);
+        try {
+          return await providerStreamFn(turnModel, context, streamOptions);
+        } catch (error) {
+          if (!isRetryableModelError(error) || attempt >= MAX_PROVIDER_RETRY_ATTEMPTS) throw error;
+          await abortableDelay(providerRetryDelayMs(error, attempt), streamOptions?.signal);
+        }
+      }
+      throw new Error("Model provider retry budget exhausted");
     });
     const result = await generateWriteupDocument({
       runId: state.id,
@@ -280,6 +350,7 @@ export class XuanShuRuntime {
     const id = options.id ?? randomUUID();
     const configuredScope = mergeScope(this.config.scope, request.scope);
     const task = await normalizeTask(request);
+    const taskCategory = resolveCtfSkillCategory(task.metadata.category) ?? resolveCtfSkillCategory(task.task);
     const memoryContext = this.overrides.memoryStore
       ? await this.overrides.memoryStore.context({
           ...(task.metadata.userId ? { userId: task.metadata.userId } : {}),
@@ -288,7 +359,19 @@ export class XuanShuRuntime {
       : "";
     const runDirectory = join(this.config.runtime.artifactRoot, id);
     const runScratchRoot = join(this.config.runtime.scratchRoot, "runs", id);
-    const runtimeConfig = { ...this.config.runtime, scratchRoot: runScratchRoot };
+    // Native reversing often needs one extra evidence/verification cycle after
+    // a parser correction. Keep this bounded and category-driven rather than
+    // embedding any challenge-specific assumptions in the core loop.
+    const runtimeConfig = {
+      ...this.config.runtime,
+      scratchRoot: runScratchRoot,
+      ...(taskCategory === "reverse"
+        ? {
+            maxTurns: Math.max(this.config.runtime.maxTurns, 40),
+            maxToolCalls: Math.max(this.config.runtime.maxToolCalls, 100),
+          }
+        : {}),
+    };
     const workspaceMode = options.workspaceMode ?? "configured";
     const isolatedInputRoot = join(runScratchRoot, "inputs");
     await Promise.all([mkdir(runDirectory, { recursive: true }), mkdir(runScratchRoot, { recursive: true })]);
@@ -311,6 +394,7 @@ export class XuanShuRuntime {
         });
     const externalTools = this.overrides.externalTools ?? [];
     const profile = resolveAgentProfile(this.config, externalTools.map((item) => item.descriptor.name));
+    const runThinkingLevel = effectiveThinkingLevel(taskCategory, this.config.runtime.thinkingLevel);
     let sandboxReachable = false;
     let sandboxNetwork = "unknown";
     let availablePrograms: string[] = [];
@@ -435,6 +519,7 @@ export class XuanShuRuntime {
       ...(this.config.browser ? { browser: this.config.browser } : {}),
     });
     toolSet.tools = filterProfileTools(profile, toolSet.tools);
+    toolSet.tools = narrowToolsForCategory(taskCategory, toolSet.tools);
     if (options.allowedToolEffects) {
       const allowedEffects = new Set(options.allowedToolEffects);
       toolSet.tools = toolSet.tools.filter((tool) => {
@@ -450,37 +535,56 @@ export class XuanShuRuntime {
     const streamFn: StreamFn = (turnModel, context, streamOptions) => lazyStream(turnModel, async () => {
       const requestId = `${id}:request:${++modelRequestNumber}`;
       activeModelRequestId = requestId;
-      const contextRecord = await audit.append("model.context", {
-        requestId,
-        turn: state.turns,
-        model: { provider: turnModel.provider, id: turnModel.id, api: turnModel.api },
-        thinkingLevel: runtimeConfig.thinkingLevel,
-        ...modelContextSnapshot(context),
-      }, { source: "context", actor: "primary-agent", correlationId: requestId });
-      const reservation = await this.modelRequestGate.wait({
-        minimumIntervalMs: runtimeConfig.modelMinIntervalMs,
-        requestsPerMinute: runtimeConfig.modelRequestsPerMinute,
-        tokensPerMinute: runtimeConfig.modelTokensPerMinute,
-        estimatedTokens: estimateModelRequestTokens(turnModel, context, streamOptions),
-      }, streamOptions?.signal);
-      await audit.append("model.request_reserved", {
-        requestId,
-        estimatedTokens: reservation.estimatedTokens,
-        waitedMs: reservation.waitedMs,
-        requestsPerMinute: runtimeConfig.modelRequestsPerMinute,
-        tokensPerMinute: runtimeConfig.modelTokensPerMinute,
-      }, { source: "orchestrator", actor: "model-request-gate", correlationId: requestId, parentSequence: contextRecord.sequence });
-      if (reservation.waitedMs > 0) {
-        await emit("model.request_throttled", {
+      for (let attempt = 1; attempt <= MAX_PROVIDER_RETRY_ATTEMPTS; attempt += 1) {
+        const contextRecord = await audit.append("model.context", {
+          requestId,
+          attempt,
+          turn: state.turns,
+          model: { provider: turnModel.provider, id: turnModel.id, api: turnModel.api },
+          thinkingLevel: runThinkingLevel,
+          ...modelContextSnapshot(context),
+        }, { source: "context", actor: "primary-agent", correlationId: requestId });
+        const reservation = await this.modelRequestGate.wait({
+          minimumIntervalMs: runtimeConfig.modelMinIntervalMs,
+          requestsPerMinute: runtimeConfig.modelRequestsPerMinute,
+          tokensPerMinute: runtimeConfig.modelTokensPerMinute,
+          estimatedTokens: estimateModelRequestTokens(turnModel, context, streamOptions),
+        }, streamOptions?.signal);
+        await audit.append("model.request_reserved", {
+          requestId,
+          attempt,
           estimatedTokens: reservation.estimatedTokens,
           waitedMs: reservation.waitedMs,
-        });
+          requestsPerMinute: runtimeConfig.modelRequestsPerMinute,
+          tokensPerMinute: runtimeConfig.modelTokensPerMinute,
+        }, { source: "orchestrator", actor: "model-request-gate", correlationId: requestId, parentSequence: contextRecord.sequence });
+        if (reservation.waitedMs > 0) {
+          await emit("model.request_throttled", {
+            estimatedTokens: reservation.estimatedTokens,
+            waitedMs: reservation.waitedMs,
+          });
+        }
+        try {
+          return await providerStreamFn(turnModel, context, streamOptions);
+        } catch (error) {
+          if (!isRetryableModelError(error) || attempt >= MAX_PROVIDER_RETRY_ATTEMPTS) throw error;
+          const delayMs = providerRetryDelayMs(error, attempt);
+          await audit.append("model.provider_retry", {
+            requestId,
+            attempt,
+            delayMs,
+            errorClass: classifyProviderError(error),
+          }, { source: "orchestrator", actor: "model-retry", correlationId: requestId, parentSequence: contextRecord.sequence });
+          await emit("model.provider_retry", { attempt, delayMs, errorClass: classifyProviderError(error) });
+          await abortableDelay(delayMs, streamOptions?.signal);
+        }
       }
-      return await providerStreamFn(turnModel, context, streamOptions);
+      throw new Error("Model provider retry budget exhausted");
     });
     const apiKey = this.overrides.modelApiKey ?? process.env[this.config.model.apiKeyEnv];
-    const recoveryThinkingLevel = lengthRecoveryThinkingLevel(runtimeConfig.thinkingLevel);
+    const recoveryThinkingLevel = lengthRecoveryThinkingLevel(runThinkingLevel);
     let lengthRecoveryAttempts = 0;
+    let noActionRecoveryAttempts = 0;
     let lastContextCutId: string | undefined;
     const agent = new Agent({
       streamFn,
@@ -527,7 +631,7 @@ export class XuanShuRuntime {
           unavailablePythonModules: [...(executorHealth.missingPythonModules ?? [])],
         }, { sharedEvidence: Boolean(options.sharedEvidence) }, { id: profile.id, instructions: profile.systemPrompt }),
         model,
-        thinkingLevel: runtimeConfig.thinkingLevel,
+        thinkingLevel: runThinkingLevel,
         tools: toolSet.tools,
       },
       beforeToolCall: async ({ toolCall, args }) => {
@@ -672,6 +776,31 @@ export class XuanShuRuntime {
             maximumAttempts: MAX_LENGTH_RECOVERY_ATTEMPTS,
             thinkingLevel: recoveryThinkingLevel,
           });
+        } else if (
+          state.status === "running" &&
+          event.message.stopReason === "stop" &&
+          assistantText(event.message).trim().length === 0 &&
+          !event.message.content.some((item) => item.type === "toolCall") &&
+          noActionRecoveryAttempts < MAX_NO_ACTION_RECOVERY_ATTEMPTS
+        ) {
+          noActionRecoveryAttempts += 1;
+          agent.followUp({
+            role: "user",
+            content: [{
+              type: "text",
+              text: "The previous turn ended without a structured tool call. Continue from the preserved evidence now: either issue the next required bounded tool call, or call finish_task. Do not return another prose-only response; if the evidence is sufficient, run the smallest independent verification script and then submit the exact result with finish_task.",
+            }],
+            timestamp: Date.now(),
+          });
+          await audit.append("model.no_action_recovery", {
+            attempt: noActionRecoveryAttempts,
+            maximumAttempts: MAX_NO_ACTION_RECOVERY_ATTEMPTS,
+            hadVisibleText: assistantText(event.message).trim().length > 0,
+          });
+          await emit("model.no_action_recovery", {
+            attempt: noActionRecoveryAttempts,
+            maximumAttempts: MAX_NO_ACTION_RECOVERY_ATTEMPTS,
+          });
         }
       } else if (event.type === "tool_execution_start") {
         await emit("tool.started", { toolName: event.toolName });
@@ -747,29 +876,35 @@ export class XuanShuRuntime {
       state.finishedAt = state.updatedAt;
       const transcript = agent.state.messages.map(publicMessage);
       if (options.writeup === true && state.summary?.trim()) {
-        await audit.append("writeup.generation_requested", {
-          status: state.status,
-          submissionPresent: Boolean(state.submission),
-          transcriptMessages: transcript.length,
-        }, { source: "orchestrator", actor: "writeup-generator" });
-        try {
-          const generated = await generateWriteupDocument({
-            runId: id,
-            task,
-            state,
-            transcript,
-            model,
-            streamFn,
-            ...(apiKey ? { apiKey } : {}),
-            maxRetryDelayMs: runtimeConfig.modelMaxRetryDelayMs,
-            timeoutMs: runtimeConfig.finalizationReserveMs,
-          });
-          state.writeup = generated.markdown;
+        if (await writeupLooksComplete(state.summary)) {
+          state.writeup = state.summary.trim();
           delete state.writeupError;
-          await audit.append("writeup.generated", { attempts: generated.attempts, characters: generated.markdown.length }, { source: "orchestrator", actor: "writeup-generator" });
-        } catch (error) {
-          state.writeupError = (error instanceof Error ? error.message : String(error)).slice(0, 600);
-          await audit.append("writeup.failed", { error: state.writeupError }, { source: "orchestrator", actor: "writeup-generator" });
+          await audit.append("writeup.reused", { characters: state.writeup.length, source: "agent-summary" }, { source: "orchestrator", actor: "writeup-generator" });
+        } else {
+          await audit.append("writeup.generation_requested", {
+            status: state.status,
+            submissionPresent: Boolean(state.submission),
+            transcriptMessages: transcript.length,
+          }, { source: "orchestrator", actor: "writeup-generator" });
+          try {
+            const generated = await generateWriteupDocument({
+              runId: id,
+              task,
+              state,
+              transcript,
+              model,
+              streamFn,
+              ...(apiKey ? { apiKey } : {}),
+              maxRetryDelayMs: runtimeConfig.modelMaxRetryDelayMs,
+              timeoutMs: runtimeConfig.finalizationReserveMs,
+            });
+            state.writeup = generated.markdown;
+            delete state.writeupError;
+            await audit.append("writeup.generated", { attempts: generated.attempts, characters: generated.markdown.length }, { source: "orchestrator", actor: "writeup-generator" });
+          } catch (error) {
+            state.writeupError = (error instanceof Error ? error.message : String(error)).slice(0, 600);
+            await audit.append("writeup.failed", { error: state.writeupError }, { source: "orchestrator", actor: "writeup-generator" });
+          }
         }
       }
       await writeJson(join(runDirectory, "state.json"), state);

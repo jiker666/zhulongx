@@ -1,6 +1,20 @@
 import type { StreamFn } from "@earendil-works/pi-agent-core";
 import type { Model } from "@earendil-works/pi-ai";
 
+export type ModelThinkingFormat =
+  | "openai"
+  | "openrouter"
+  | "deepseek"
+  | "together"
+  | "zai"
+  | "qwen"
+  | "chat-template"
+  | "qwen-chat-template"
+  | "string-thinking"
+  | "ant-ling";
+
+export type ModelThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
 export type RunStatus = "queued" | "running" | "completed" | "blocked" | "failed" | "aborted";
 export type RunPhase = "intake" | "planning" | "exploration" | "analysis" | "verification" | "reporting" | "done";
 export type ScopeMode = "observe" | "controlled";
@@ -13,6 +27,12 @@ export interface ModelConfig {
   baseUrl: string;
   apiKeyEnv: string;
   reasoning: boolean;
+  /** Provider-specific wire format for explicitly enabling/disabling reasoning. */
+  thinkingFormat?: ModelThinkingFormat;
+  /** Provider-specific values for pi thinking levels; null marks a level unsupported. */
+  thinkingLevelMap?: Partial<Record<ModelThinkingLevel, string | null>>;
+  /** Whether the gateway accepts the optional reasoning_effort field. */
+  supportsReasoningEffort?: boolean;
   contextWindow: number;
   maxTokens: number;
   headersFromEnv?: Record<string, string>;

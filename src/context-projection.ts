@@ -60,15 +60,23 @@ function summarize(messages: AgentMessage[], maxChars: number): string {
 
 function cutIndex(messages: AgentMessage[], keepRecentTokens: number): number {
   let retainedTokens = 0;
+  let fallbackBoundary = 0;
   for (let index = messages.length - 1; index > 0; index -= 1) {
     retainedTokens += estimateTokens(messages[index]!);
+    if (retainedTokens >= keepRecentTokens && fallbackBoundary === 0) fallbackBoundary = index;
     if (retainedTokens < keepRecentTokens) continue;
     for (let boundary = index; boundary > 0; boundary -= 1) {
       if (messages[boundary]?.role === "user") return boundary;
     }
-    return 0;
+    // Tool-heavy agent sessions often have only the initial user message. In
+    // that case keep a recent assistant/tool group instead of retaining the
+    // entire trajectory forever. Avoid starting the projected context on a
+    // standalone tool result when possible.
+    let boundary = fallbackBoundary;
+    while (boundary > 0 && messages[boundary]?.role === "toolResult") boundary -= 1;
+    return boundary;
   }
-  return 0;
+  return fallbackBoundary;
 }
 
 export function projectModelMessages(messages: AgentMessage[], policy: ModelContextPolicy): ModelContextProjection {

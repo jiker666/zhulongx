@@ -306,9 +306,42 @@ async function main(): Promise<void> {
     return;
   }
   if (args.command === "serve") {
+    let sandboxRunning: Awaited<ReturnType<typeof startSandboxServer>> | undefined;
+    const autoStartSandbox = process.env.XUANSHU_AUTO_START_SANDBOX !== "0";
+    if (autoStartSandbox) {
+      try {
+        await new SandboxClient(config.runtime.sandbox.socketPath, config.runtime.sandbox.connectTimeoutMs).health();
+        console.log(`CTF sandbox already reachable at ${config.runtime.sandbox.socketPath}`);
+      } catch {
+        try {
+          sandboxRunning = await startSandboxServer({
+            socketPath: config.runtime.sandbox.socketPath,
+            workspaceRoot: config.scope.workspaceRoot,
+            scratchRoot: config.runtime.scratchRoot,
+            allowedPrograms: config.scope.allowedPrograms,
+            ...(config.scope.pythonModules ? { pythonModules: config.scope.pythonModules } : {}),
+            defaultTimeoutMs: config.runtime.commandTimeoutMs,
+            maxOutputBytes: config.runtime.maxOutputBytes,
+            network: process.env.XUANSHU_SANDBOX_NETWORK ?? "none",
+            ...(config.scope.extraPaths ? { extraPaths: config.scope.extraPaths } : {}),
+            ...(config.scope.readOnlyPaths ? { readOnlyPaths: config.scope.readOnlyPaths } : {}),
+          });
+          console.log(`Started local CTF sandbox at ${sandboxRunning.endpoint}`);
+        } catch (error) {
+          console.warn(`CTF sandbox is unavailable; run_command will be disabled: ${error instanceof Error ? error.message : String(error)}`);
+          console.warn("Start a sidecar with `npm run sandbox` or set XUANSHU_AUTO_START_SANDBOX=0 to disable auto-start.");
+        }
+      }
+    }
     const running = await startApiServer(config);
     console.log(`烛龙·玄枢 API listening at ${running.url}`);
     console.log(`scope=${config.scope.mode} workspace=${config.scope.workspaceRoot}`);
+    const close = async () => {
+      await running.close();
+      await sandboxRunning?.close();
+    };
+    process.once("SIGINT", () => void close().then(() => process.exit(0)));
+    process.once("SIGTERM", () => void close().then(() => process.exit(0)));
     return;
   }
   if (args.command === "sandbox") {
@@ -321,7 +354,7 @@ async function main(): Promise<void> {
       ...(config.scope.pythonModules ? { pythonModules: config.scope.pythonModules } : {}),
       defaultTimeoutMs: config.runtime.commandTimeoutMs,
       maxOutputBytes: config.runtime.maxOutputBytes,
-      network: process.env.XUANSHU_SANDBOX_NETWORK ?? "external",
+      network: process.env.XUANSHU_SANDBOX_NETWORK ?? "none",
       ...(config.scope.extraPaths ? { extraPaths: config.scope.extraPaths } : {}),
       ...(config.scope.readOnlyPaths ? { readOnlyPaths: config.scope.readOnlyPaths } : {}),
     });

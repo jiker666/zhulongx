@@ -162,6 +162,7 @@ function taskWithOutputContract(
           "- Set summary to a concise submission-style Markdown task report (writeup) no longer than 12000 characters.",
           "- Use this structure: YAML front matter (title, ctf, date, category, difficulty, points, flag_format, author), # title, ## Summary, ## Solution, and ## Flag.",
           "- Keep Solution to 1-3 short steps and include one complete runnable solving script from the provided challenge data to printing the final flag whenever the artifacts support it.",
+          "- For reverse or binary tasks, the script must mirror every observed instruction in the transform (including XOR/arithmetic, indexing, byte width, and truncation); do not validate a candidate only against a simplified or guessed model.",
           "- Show the exact final flag in a fenced code block under ## Flag, matching submission; never invent commands, evidence, or a flag.",
           "- Preserve concrete public observations and solver constants in the report; the platform may run a dedicated writeup generation pass after settlement.",
           "- The report must cover the approach, key evidence, essential commands or scripts, verification, and exact final result.",
@@ -241,7 +242,7 @@ export function validateManualJobInput(input: unknown): ManualJobStartInput {
   if (typeof writeup !== "boolean") throw new Error("writeup must be a boolean");
   const skipBlocked = value.skipBlocked === undefined ? false : value.skipBlocked;
   if (typeof skipBlocked !== "boolean") throw new Error("skipBlocked must be a boolean");
-  const transientRetryLimit = value.transientRetryLimit === undefined ? 0 : Number(value.transientRetryLimit);
+  const transientRetryLimit = value.transientRetryLimit === undefined ? 2 : Number(value.transientRetryLimit);
   if (!Number.isInteger(transientRetryLimit) || transientRetryLimit < 0 || transientRetryLimit > 3) {
     throw new Error("transientRetryLimit must be an integer between 0 and 3");
   }

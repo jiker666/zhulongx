@@ -1,5 +1,6 @@
 import type { ExecutorHealth } from "./executor.js";
 import { getBuiltinToolDescriptor } from "./tool-catalog.js";
+import type { CtfSkillCategory } from "./skill-catalog.js";
 import type { AgentProfileConfig, AppConfig } from "./types.js";
 
 export interface ResolvedAgentProfile extends AgentProfileConfig {
@@ -53,4 +54,20 @@ export function validateProfileCapabilities(profile: ResolvedAgentProfile, healt
 export function filterProfileTools<T extends { name: string }>(profile: ResolvedAgentProfile, tools: T[]): T[] {
   const allowed = new Set(profile.toolAllowlist);
   return tools.filter((tool) => allowed.has(tool.name));
+}
+
+/** Narrow a broad operator profile to the tools relevant to a known offline CTF category.
+ * This is a per-run reduction only; it never expands the configured allowlist or bypasses PolicyEngine. */
+export function narrowToolsForCategory<T extends { name: string }>(category: CtfSkillCategory | undefined, tools: T[]): T[] {
+  if (!category || category === "web" || category === "osint" || category === "ai/ml") return tools;
+  const common = new Set([
+    "submit_plan", "checkpoint", "record_finding", "record_lesson", "finish_task",
+    "list_files", "read_file", "inspect_artifact", "extract_archive", "search_artifact",
+    "list_scratch_files", "read_scratch_file", "write_scratch_file", "run_command",
+    "read_shared_evidence", "publish_shared_evidence",
+  ]);
+  if (category === "reverse" || category === "pwn" || category === "malware" || category === "forensics" || category === "crypto" || category === "misc") {
+    return tools.filter((tool) => common.has(tool.name));
+  }
+  return tools;
 }

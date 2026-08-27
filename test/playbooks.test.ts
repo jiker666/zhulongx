@@ -15,6 +15,9 @@ describe("category capability playbooks", () => {
     expect(crypto).not.toMatch(/[A-Za-z][A-Za-z0-9_-]{1,63}\{[^{}]+\}|0x[0-9a-f]+/i);
 
     expect(renderCapabilityPlaybook("Pwn")).toContain("never use guessed offsets");
+    expect(renderCapabilityPlaybook("Reverse")).toContain("preserve every xor/add/sub/rotate");
+    expect(renderCapabilityPlaybook("Reverse")).toContain("image-base + RVA");
+    expect(renderCapabilityPlaybook("Reverse")).toContain("full check independently");
     expect(renderCapabilityPlaybook("Misc")).toContain("pickora");
     expect(renderCapabilityPlaybook("Misc")).toContain("bounded derivative in scratch");
     expect(renderCapabilityPlaybook("unknown")).toBe("");

@@ -8,8 +8,12 @@ export interface ModelSettings {
   name: string;
   api: "openai-completions" | "openai-responses" | "anthropic-messages";
   baseUrl: string;
+  reasoning: boolean;
+  thinkingFormat?: ModelThinkingFormat;
   appKeyHeaderConfigured: boolean;
 }
+
+export type ModelThinkingFormat = "openai" | "openrouter" | "deepseek" | "together" | "zai" | "qwen" | "chat-template" | "qwen-chat-template" | "string-thinking" | "ant-ling";
 
 export interface ModelSettingsInput {
   provider: string;
@@ -20,6 +24,8 @@ export interface ModelSettingsInput {
   apiKey: string;
   appKey?: string;
   appKeyHeader?: string;
+  reasoning?: boolean;
+  thinkingFormat?: ModelThinkingFormat;
 }
 
 export const getModelSettings = (signal?: AbortSignal) => request<{ model: ModelSettings }>("/v1/settings/model", { signal });

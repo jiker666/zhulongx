@@ -45,4 +45,26 @@ describe("model context projection", () => {
     const policy = { contextWindow: 1_000, compactAtRatio: 0.2, keepRecentTokens: 300, maxSummaryChars: 2_000 };
     expect(projectModelMessages(source, policy)).toEqual(projectModelMessages(source, policy));
   });
+
+  it("compacts tool-heavy sessions even when only the initial user boundary exists", () => {
+    const source: AgentMessage[] = [{ role: "user", content: "initial task", timestamp: 0 }];
+    for (let index = 0; index < 12; index += 1) {
+      source.push({
+        role: "assistant",
+        content: [{ type: "toolCall", id: `call-${index}`, name: "inspect_artifact", arguments: { path: `file-${index}` } }],
+        api: "openai-completions",
+        provider: "faux",
+        model: "faux",
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        stopReason: "toolUse",
+        timestamp: index * 2 + 1,
+      });
+      source.push({ role: "toolResult", toolCallId: `call-${index}`, toolName: "inspect_artifact", content: [{ type: "text", text: `evidence ${"x".repeat(500)}` }], isError: false, timestamp: index * 2 + 2 });
+    }
+    const projected = projectModelMessages(source, { contextWindow: 1_000, compactAtRatio: 0.2, keepRecentTokens: 300, maxSummaryChars: 2_000 });
+    expect(projected.cut).toBeDefined();
+    expect(projected.messages.length).toBeLessThan(source.length);
+    expect(projected.messages[0]?.role).toBe("user");
+    expect(projected.messages.some((message) => message.role === "toolResult")).toBe(true);
+  });
 });

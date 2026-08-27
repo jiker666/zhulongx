@@ -28,9 +28,18 @@ const PLAYBOOKS: Record<CtfSkillCategory, string[]> = {
   ],
   reverse: [
     "Identify format, architecture, packing, imports, sections, strings, entry points, and anti-analysis signals before deep decompilation.",
+    "Check the negotiated sandbox capability once. Use only reported programs; when it is unavailable, pivot immediately to inspect_artifact, search_artifact, and offset-based read_file instead of retrying denied commands.",
+    "For native PE or ELF files, collect file/type metadata, section and entry-point information, bounded strings, and a short disassembly or symbol/import listing before following any one hypothesis.",
+    "Use structured offsets from the artifact parser to inspect headers, section raw data, and candidate tables; never infer a file offset from an RVA without recording the section mapping.",
+    "For PE addresses, distinguish image-base + RVA (the disassembler VMA) from the RVA and raw file pointer; use the parsed section's virtualAddress, rawPointer, and rawSize to map constants before reading them.",
     "Trace data from input to comparison/output and rename semantics as evidence accumulates; use cross-references and callers to avoid isolated-function guesses.",
     "Reimplement only the smallest transformation needed and validate it against multiple known input/output observations or the original binary in the sandbox.",
     "Treat decompiler output as a hypothesis; confirm integer widths, signedness, control flow, and memory layout in disassembly or execution evidence.",
+    "Translate the transform loop instruction-by-instruction before inverting it: preserve every xor/add/sub/rotate, table lookup, byte truncation, and write order. A permutation-looking index table is not proof that the transform is only a permutation.",
+    "Keep tool-call arguments concise and issue one investigative tool call per assistant turn when collecting disassembly or writing a solver; this preserves complete structured arguments and makes traceback recovery possible.",
+    "Prefer narrow disassembly windows around a confirmed address and bounded byte reads; do not request a whole text section when a short instruction slice answers the current question.",
+    "Once a reversible transform and its constants are identified, stop expanding the search: write the smallest artifact-derived solver, assert its length/shape, replay the full check independently, run that exact script successfully with the attachment path shown in INPUTS (using the hinted cwd), and only then call finish_task.",
+    "Before claiming a recovered answer, replay the complete candidate through an independent script or execution path and record the exact observed output, not only a plausible-looking string.",
   ],
   forensics: [
     "Hash and identify every artifact before extraction; preserve originals and write carved, decoded, or repaired outputs only to the run scratch namespace.",

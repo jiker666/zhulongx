@@ -204,7 +204,7 @@ const ALIASES: Array<[RegExp, CtfSkillCategory]> = [
   [/web|api/i, "web"],
   [/pwn|binary exploitation/i, "pwn"],
   [/crypto|cryptography/i, "crypto"],
-  [/reverse|reversing/i, "reverse"],
+  [/reverse|reversing|逆向|disassembl|decompil|\bpe\b|\belf\b/i, "reverse"],
   [/forensic|取证/i, "forensics"],
   [/malware|恶意/i, "malware"],
   [/osint/i, "osint"],

@@ -37,10 +37,13 @@ describe("runtime model session settings", () => {
       api: "openai-completions",
       baseUrl: "https://example.invalid/v1",
       apiKeyEnv: "XUANSHU_SESSION_MODEL_KEY",
-      reasoning: false,
+      reasoning: true,
+      thinkingFormat: "deepseek",
       contextWindow: 128_000,
       maxTokens: 8_192,
     }, { "X-App-Key": "ephemeral" });
     expect(model.headers).toEqual({ "X-App-Key": "ephemeral" });
+    expect(model.reasoning).toBe(true);
+    expect(model.compat).toMatchObject({ thinkingFormat: "deepseek" });
   });
 });

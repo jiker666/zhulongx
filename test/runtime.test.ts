@@ -12,6 +12,7 @@ import type { StreamFn } from "@earendil-works/pi-agent-core";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import type { Model } from "@earendil-works/pi-ai";
 import { streamSimple as streamOpenAIResponses } from "@earendil-works/pi-ai/api/openai-responses";
+import { streamSimple as streamOpenAICompletions } from "@earendil-works/pi-ai/api/openai-completions";
 import { afterEach, describe, expect, it } from "vitest";
 import { verifyAuditChain } from "../src/audit.js";
 import { createModel, XuanShuRuntime } from "../src/runtime.js";
@@ -233,6 +234,41 @@ describe("XuanShuRuntime", () => {
     expect(state.stopReason).toContain("output token limit after 2 recovery attempt(s)");
   });
 
+  it("recovers a gateway turn that stops without a tool call", async () => {
+    const root = await mkdtemp(join(tmpdir(), "xuan-runtime-no-action-recovery-"));
+    roots.push(root);
+    const config = testConfig(root);
+    await mkdir(config.scope.workspaceRoot, { recursive: true });
+    const faux = registerFauxProvider();
+    registrations.push(faux);
+    faux.setResponses([
+      fauxAssistantMessage([], { stopReason: "stop" }),
+      fauxAssistantMessage(
+        fauxToolCall("finish_task", {
+          status: "completed",
+          summary: "Recovered after an empty gateway turn.",
+          submission: "verified-answer",
+          evidence: ["deterministic faux response"],
+          remainingRisks: [],
+          nextSteps: [],
+          confidence: 0.95,
+          verification: ["the continuation issued finish_task"],
+          independentlyVerified: true,
+        }, { id: "finish-after-no-action" }),
+        { stopReason: "toolUse" },
+      ),
+    ]);
+
+    const runtime = new XuanShuRuntime(config, { streamFn: streamSimple, model: faux.getModel() });
+    const state = await runtime.run({ task: "Recover an empty model turn" });
+
+    expect(state).toMatchObject({ status: "completed", submission: "verified-answer", turns: 2 });
+    expect(await readAuditRecords(join(config.runtime.artifactRoot, state.id, "audit.jsonl"))).toContainEqual(expect.objectContaining({
+      type: "model.no_action_recovery",
+      data: expect.objectContaining({ attempt: 1, maximumAttempts: 2, hadVisibleText: false }),
+    }));
+  });
+
   it("preserves xhigh reasoning for Responses-compatible models", () => {
     const config = testConfig("/tmp/xuan-responses-model");
     config.model.api = "openai-responses";
@@ -315,6 +351,39 @@ describe("XuanShuRuntime", () => {
       store: false,
       reasoning: { effort: "xhigh", summary: "auto" },
     });
+  });
+
+  it("sends an explicit DeepSeek thinking disable for off-level runs", async () => {
+    const config = testConfig("/tmp/xuan-deepseek-thinking-payload");
+    config.model = {
+      ...config.model,
+      provider: "wanqing",
+      id: "ep-deepseek-model",
+      api: "openai-completions",
+      baseUrl: "https://wanqing.example.invalid/api/gateway/v1/endpoints",
+      reasoning: true,
+      thinkingFormat: "deepseek",
+    };
+    const model = createModel(config.model) as Model<"openai-completions">;
+    let requestBody: Record<string, unknown> = {};
+    const captureFetch: typeof fetch = async (input, init) => {
+      const body = init?.body ?? (input instanceof Request ? await input.clone().text() : undefined);
+      requestBody = JSON.parse(String(body)) as Record<string, unknown>;
+      return new Response(JSON.stringify({ error: { message: "captured by unit test" } }), {
+        status: 400,
+        headers: { "content-type": "application/json" },
+      });
+    };
+
+    const message = await streamOpenAICompletions(
+      model,
+      { systemPrompt: "Reply with pong.", messages: [{ role: "user", content: "ping", timestamp: Date.now() }], tools: [] },
+      { apiKey: "unit-test-only", fetch: captureFetch, maxRetries: 0 },
+    ).result();
+
+    expect(message.stopReason).toBe("error");
+    expect(requestBody).toMatchObject({ model: "ep-deepseek-model", thinking: { type: "disabled" } });
+    expect(requestBody).not.toHaveProperty("reasoning_effort");
   });
 
   it("runs a deterministic plan-observe-reflect-report loop on Pi", async () => {
@@ -561,6 +630,63 @@ describe("XuanShuRuntime", () => {
         type: "tool.result",
         data: expect.objectContaining({ toolName: "run_command", isError: false }),
       }));
+    } finally {
+      await sandbox.close();
+    }
+  });
+
+  it("resets repeated-action signatures after an explicit strategy checkpoint", async () => {
+    const root = await mkdtemp(join(tmpdir(), "xuan-runtime-checkpoint-repeat-"));
+    roots.push(root);
+    const config = testConfig(root);
+    config.scope.allowedPrograms = ["node"];
+    await mkdir(config.scope.workspaceRoot, { recursive: true });
+    const sandbox = await startSandboxServer({
+      socketPath: config.runtime.sandbox.socketPath,
+      workspaceRoot: config.scope.workspaceRoot,
+      scratchRoot: config.runtime.scratchRoot,
+      allowedPrograms: ["node"],
+      defaultTimeoutMs: config.runtime.commandTimeoutMs,
+      maxOutputBytes: config.runtime.maxOutputBytes,
+      network: "none",
+    });
+    const faux = registerFauxProvider();
+    registrations.push(faux);
+    const command = { program: "node", args: ["-e", "process.stdout.write('repeat-ok')"] };
+    faux.setResponses([
+      fauxAssistantMessage(fauxToolCall("submit_plan", {
+        goal: "Verify a bounded command can be retried after a strategy change",
+        assumptions: [],
+        hypotheses: [],
+        steps: [{ id: "command", objective: "Run the command", successCriteria: ["repeat-ok"], tools: ["run_command"] }],
+      }, { id: "repeat-plan" }), { stopReason: "toolUse" }),
+      fauxAssistantMessage(fauxToolCall("run_command", command, { id: "repeat-1" }), { stopReason: "toolUse" }),
+      fauxAssistantMessage(fauxToolCall("run_command", command, { id: "repeat-2" }), { stopReason: "toolUse" }),
+      fauxAssistantMessage(fauxToolCall("checkpoint", {
+        observations: ["The same command was run twice with deterministic output"],
+        assessment: "A revised verification phase is required",
+        planChanges: ["Repeat the exact command once after the checkpoint"],
+        nextAction: "Run the command again",
+        failureClassification: "evidence",
+        nextActionRationale: "The checkpoint defines a new verification phase",
+      }, { id: "repeat-checkpoint" }), { stopReason: "toolUse" }),
+      fauxAssistantMessage(fauxToolCall("run_command", command, { id: "repeat-3" }), { stopReason: "toolUse" }),
+      fauxAssistantMessage(fauxToolCall("finish_task", {
+        status: "completed",
+        summary: "The command was independently replayed after a strategy checkpoint.",
+        evidence: ["repeat-ok"],
+        remainingRisks: [],
+        nextSteps: [],
+        confidence: 1,
+        verification: ["The post-checkpoint replay returned exitCode=0"],
+        independentlyVerified: true,
+      }, { id: "repeat-finish" }), { stopReason: "toolUse" }),
+    ]);
+    try {
+      const runtime = new XuanShuRuntime(config, { streamFn: streamSimple, model: faux.getModel() });
+      const state = await runtime.run({ task: "Replay one bounded offline command after a strategy checkpoint" });
+      expect(state.status).toBe("completed");
+      expect(state.toolCalls).toBe(6);
     } finally {
       await sandbox.close();
     }

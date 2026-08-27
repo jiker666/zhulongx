@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { readFile } from "node:fs/promises";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import type { AddressInfo } from "node:net";
-import type { AppConfig, ModelConfig, TaskRequest } from "./types.js";
+import type { AppConfig, ModelConfig, ModelThinkingFormat, TaskRequest } from "./types.js";
 import { AuditChain } from "./audit.js";
 import { dashboardHtml } from "./dashboard.js";
 import { ExperienceStore, type ExperienceUpdate } from "./experience.js";
@@ -171,8 +171,26 @@ function modelSessionInput(value: unknown): RuntimeModelSessionConfig {
   const provider = typeof input.provider === "string" && input.provider.trim() ? input.provider.trim().slice(0, 100) : "custom-openai-compatible";
   const appKey = typeof input.appKey === "string" ? input.appKey.trim() : "";
   if (appKey.length > 1_000) throw new RequestInputError("appKey must be at most 1000 characters");
-  const appKeyHeader = typeof input.appKeyHeader === "string" && input.appKeyHeader.trim() ? input.appKeyHeader.trim() : "X-App-Key";
+  const appKeyHeader = typeof input.appKeyHeader === "string" && input.appKeyHeader.trim() ? input.appKeyHeader.trim() : "AppKey";
   if (!/^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/.test(appKeyHeader)) throw new RequestInputError("appKeyHeader is invalid");
+  const thinkingFormats: ModelThinkingFormat[] = ["openai", "openrouter", "deepseek", "together", "zai", "qwen", "chat-template", "qwen-chat-template", "string-thinking", "ant-ling"];
+  const thinkingFormat = input.thinkingFormat === undefined || input.thinkingFormat === "" ? undefined : String(input.thinkingFormat);
+  if (thinkingFormat !== undefined && !thinkingFormats.includes(thinkingFormat as ModelThinkingFormat)) throw new RequestInputError("thinkingFormat is invalid");
+  if (input.reasoning !== undefined && typeof input.reasoning !== "boolean") throw new RequestInputError("reasoning must be a boolean");
+  const reasoning = input.reasoning === undefined ? api === "openai-responses" || thinkingFormat !== undefined : input.reasoning;
+  const boundedModelNumber = (key: string, fallback: number, minimum: number, maximum: number): number => {
+    if (input[key] === undefined) return fallback;
+    const candidate = Number(input[key]);
+    if (!Number.isSafeInteger(candidate) || candidate < minimum || candidate > maximum) {
+      throw new RequestInputError(`${key} must be an integer between ${minimum} and ${maximum}`);
+    }
+    return candidate;
+  };
+  // Session models are commonly backed by gateways with a smaller effective
+  // context/TPM quota than their advertised maximum. Keep the safe default
+  // compact, while allowing an operator to raise it explicitly when needed.
+  const contextWindow = boundedModelNumber("contextWindow", 32_000, 16_000, 256_000);
+  const maxTokens = boundedModelNumber("maxTokens", 8_192, 1_024, 32_768);
   const model: ModelConfig = {
     provider,
     id: modelId,
@@ -180,9 +198,10 @@ function modelSessionInput(value: unknown): RuntimeModelSessionConfig {
     api: api as ModelConfig["api"],
     baseUrl,
     apiKeyEnv: "XUANSHU_SESSION_MODEL_KEY",
-    reasoning: api === "openai-responses",
-    contextWindow: 128_000,
-    maxTokens: 8_192,
+    reasoning,
+    ...(thinkingFormat ? { thinkingFormat: thinkingFormat as ModelThinkingFormat } : {}),
+    contextWindow,
+    maxTokens,
   };
   return { model, apiKey, ...(appKey ? { headers: { [appKeyHeader]: appKey } } : {}) };
 }

@@ -87,6 +87,17 @@ interface RunCommandInput {
   timeoutMs?: number;
 }
 
+const MAX_COMMAND_OUTPUT_CHARS = 24_000;
+const ANSI_ESCAPE = /\u001B(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007]*(?:\u0007|\u001B\\))/g;
+
+function boundedCommandOutput(value: string): string {
+  const clean = value.replace(ANSI_ESCAPE, "");
+  if (clean.length <= MAX_COMMAND_OUTPUT_CHARS) return clean;
+  const head = Math.floor(MAX_COMMAND_OUTPUT_CHARS * 0.72);
+  const tail = MAX_COMMAND_OUTPUT_CHARS - head - 64;
+  return `${clean.slice(0, head)}\n...[command output bounded; use offset-based reads or narrower disassembly]...\n${clean.slice(-Math.max(0, tail))}`;
+}
+
 interface HttpRequestInput {
   method: "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE" | "OPTIONS";
   url: string;
@@ -285,6 +296,8 @@ async function readBoundedFile(
   path: string;
   output: string;
   encoding: "utf8" | "base64";
+  display: string;
+  preview?: { format: "hex+ascii"; lines: string[]; bytes: number };
   offset: number;
   bytes: number;
   truncated: boolean;
@@ -303,14 +316,37 @@ async function readBoundedFile(
     await handle.close();
   }
   const binary = data.includes(0);
+  const preview = binary ? makeHexPreview(data, offset) : undefined;
+  const display = binary
+    ? [
+        `binary preview offset=${offset} bytes=${data.length} truncated=${offset + data.length < stats.size}`,
+        preview?.lines.join("\n") ?? "",
+        `base64 (bounded): ${data.toString("base64").slice(0, 4096)}${data.length > 3072 ? "..." : ""}`,
+      ].filter(Boolean).join("\n")
+    : data.toString("utf8");
   return {
     path: relative(root, path),
     output: binary ? data.toString("base64") : data.toString("utf8"),
     encoding: binary ? "base64" : "utf8",
+    display,
+    ...(preview ? { preview } : {}),
     offset,
     bytes: data.length,
     truncated: offset + data.length < stats.size,
   };
+}
+
+function makeHexPreview(data: Buffer, offset: number, maxBytes = 1024): { format: "hex+ascii"; lines: string[]; bytes: number } {
+  const sample = data.subarray(0, Math.min(data.length, maxBytes));
+  const lines: string[] = [];
+  for (let index = 0; index < sample.length; index += 16) {
+    const row = sample.subarray(index, index + 16);
+    const hex = Array.from(row, (value) => value.toString(16).padStart(2, "0"));
+    const padded = [...hex, ...Array.from({ length: 16 - hex.length }, () => "  ")];
+    const ascii = Array.from(row, (value) => value >= 0x20 && value <= 0x7e ? String.fromCharCode(value) : ".").join("");
+    lines.push(`${(offset + index).toString(16).padStart(8, "0")}  ${padded.slice(0, 8).join(" ")}  ${padded.slice(8).join(" ")}  |${ascii.padEnd(16, " ")}|`);
+  }
+  return { format: "hex+ascii", lines, bytes: sample.length };
 }
 
 const MAX_ARTIFACT_INSPECTION_BYTES = 8 * 1024 * 1024;
@@ -335,6 +371,133 @@ function identifyMagic(bytes: Buffer): string {
     bytes.subarray(0, 4).equals(Buffer.from([0x0a, 0x0d, 0x0d, 0x0a]))
   ) return "pcap-or-pcapng";
   return "unknown";
+}
+
+const PE_MACHINE_NAMES: Record<number, string> = {
+  0x014c: "i386",
+  0x014d: "i860",
+  0x0166: "mips",
+  0x01c0: "arm",
+  0x01c4: "armv7",
+  0x01c2: "thumb",
+  0x0200: "ia64",
+  0x8664: "x86_64",
+  0xaa64: "arm64",
+};
+
+function readUInt32(bytes: Buffer, offset: number): number | undefined {
+  return offset >= 0 && offset + 4 <= bytes.length ? bytes.readUInt32LE(offset) : undefined;
+}
+
+function readUInt16(bytes: Buffer, offset: number): number | undefined {
+  return offset >= 0 && offset + 2 <= bytes.length ? bytes.readUInt16LE(offset) : undefined;
+}
+
+function readUInt64Hex(bytes: Buffer, offset: number): string | undefined {
+  if (offset < 0 || offset + 8 > bytes.length) return undefined;
+  return `0x${bytes.readBigUInt64LE(offset).toString(16)}`;
+}
+
+function peString(bytes: Buffer, offset: number, length: number): string {
+  return bytes.subarray(offset, Math.min(bytes.length, offset + length)).toString("ascii").replace(/\0.*$/, "");
+}
+
+/** Parse bounded PE headers without executing or relying on an external toolchain. */
+export function parsePeHeaders(bytes: Buffer): Record<string, unknown> | undefined {
+  if (bytes.length < 2 || bytes.subarray(0, 2).toString("ascii") !== "MZ") return undefined;
+  const peOffset = readUInt32(bytes, 0x3c);
+  if (peOffset === undefined || peOffset < 0x40 || peOffset + 24 > bytes.length) {
+    return { format: "dos", peHeaderOffset: peOffset ?? null, validPeSignature: false };
+  }
+  const signature = bytes.subarray(peOffset, peOffset + 4).toString("ascii");
+  if (signature !== "PE\0\0") {
+    return { format: "dos", peHeaderOffset: peOffset, validPeSignature: false };
+  }
+  const coff = peOffset + 4;
+  const machine = readUInt16(bytes, coff);
+  const sectionCount = readUInt16(bytes, coff + 2);
+  const optionalSize = readUInt16(bytes, coff + 16);
+  const optionalOffset = coff + 20;
+  if (machine === undefined || sectionCount === undefined || optionalSize === undefined || optionalOffset + optionalSize > bytes.length) {
+    return { format: "pe", peHeaderOffset: peOffset, validPeSignature: true, truncatedHeaders: true };
+  }
+  const optionalMagic = readUInt16(bytes, optionalOffset);
+  const pe32Plus = optionalMagic === 0x20b;
+  const entryPointRva = readUInt32(bytes, optionalOffset + 16);
+  const sectionAlignment = readUInt32(bytes, optionalOffset + 32);
+  const fileAlignment = readUInt32(bytes, optionalOffset + 36);
+  const sizeOfImage = readUInt32(bytes, optionalOffset + 56);
+  const sizeOfHeaders = readUInt32(bytes, optionalOffset + 60);
+  const subsystem = readUInt16(bytes, optionalOffset + 68);
+  const imageBase = pe32Plus ? readUInt64Hex(bytes, optionalOffset + 24) : readUInt32(bytes, optionalOffset + 28);
+  const directoryCountOffset = optionalOffset + (pe32Plus ? 108 : 92);
+  const directoryOffset = optionalOffset + (pe32Plus ? 112 : 96);
+  const directoryCount = readUInt32(bytes, directoryCountOffset) ?? 0;
+  const directoryNames = ["export", "import", "resource", "exception", "certificate", "base-reloc", "debug", "architecture", "global-ptr", "tls", "load-config", "bound-import", "iat", "delay-import", "com-descriptor"];
+  const directories: Record<string, { rva: number; size: number }>[] = [];
+  for (let index = 0; index < Math.min(directoryCount, directoryNames.length, 16); index += 1) {
+    const rva = readUInt32(bytes, directoryOffset + index * 8);
+    const size = readUInt32(bytes, directoryOffset + index * 8 + 4);
+    if (rva === undefined || size === undefined || (rva === 0 && size === 0)) continue;
+    directories.push({ [directoryNames[index] ?? `directory-${index}`]: { rva, size } });
+  }
+  const sectionTableOffset = optionalOffset + optionalSize;
+  const sections: Array<Record<string, unknown>> = [];
+  for (let index = 0; index < Math.min(sectionCount, 96); index += 1) {
+    const offset = sectionTableOffset + index * 40;
+    if (offset + 40 > bytes.length) break;
+    const virtualSize = readUInt32(bytes, offset + 8);
+    const virtualAddress = readUInt32(bytes, offset + 12);
+    const rawSize = readUInt32(bytes, offset + 16);
+    const rawPointer = readUInt32(bytes, offset + 20);
+    const characteristics = readUInt32(bytes, offset + 36);
+    if ([virtualSize, virtualAddress, rawSize, rawPointer, characteristics].some((value) => value === undefined)) break;
+    sections.push({
+      name: peString(bytes, offset, 8),
+      virtualSize,
+      virtualAddress,
+      rawSize,
+      rawPointer,
+      characteristics: `0x${characteristics!.toString(16)}`,
+      rawEnd: rawPointer! + rawSize!,
+    });
+  }
+  let entryPointFileOffset: number | undefined;
+  if (entryPointRva !== undefined) {
+    if (entryPointRva < (sizeOfHeaders ?? 0)) {
+      entryPointFileOffset = entryPointRva;
+    } else {
+      const section = sections.find((item) => {
+        const start = Number(item.virtualAddress);
+        const span = Math.max(Number(item.virtualSize), Number(item.rawSize));
+        return entryPointRva >= start && entryPointRva < start + span;
+      });
+      if (section) entryPointFileOffset = Number(section.rawPointer) + (entryPointRva - Number(section.virtualAddress));
+    }
+  }
+  return {
+    format: "pe",
+    peHeaderOffset: peOffset,
+    validPeSignature: true,
+    architecture: optionalMagic === 0x10b ? "PE32" : optionalMagic === 0x20b ? "PE32+" : `optional-magic-0x${(optionalMagic ?? 0).toString(16)}`,
+    machine: machine === undefined ? null : `0x${machine.toString(16)}`,
+    machineName: machine === undefined ? "unknown" : PE_MACHINE_NAMES[machine] ?? "unknown",
+    numberOfSections: sectionCount,
+    timestamp: readUInt32(bytes, coff + 4),
+    characteristics: `0x${(readUInt16(bytes, coff + 18) ?? 0).toString(16)}`,
+    optionalHeaderSize: optionalSize,
+    imageBase: imageBase === undefined ? null : typeof imageBase === "number" ? `0x${imageBase.toString(16)}` : imageBase,
+    entryPointRva: entryPointRva === undefined ? null : `0x${entryPointRva.toString(16)}`,
+    entryPointFileOffset: entryPointFileOffset === undefined ? null : entryPointFileOffset,
+    sectionAlignment,
+    fileAlignment,
+    sizeOfImage,
+    sizeOfHeaders,
+    subsystem,
+    dataDirectories: Object.assign({}, ...directories),
+    sections,
+    truncatedHeaders: sections.length !== Math.min(sectionCount, 96),
+  };
 }
 
 function shannonEntropy(bytes: Buffer): number {
@@ -403,6 +566,7 @@ async function inspectArtifactFile(
   for (const byte of entropySample) if (byte === 9 || byte === 10 || byte === 13 || (byte >= 0x20 && byte <= 0x7e)) printable += 1;
   const hash = createHash("sha256").update(bytes).digest("hex");
   const hashComplete = offset === stats.size;
+  const pe = parsePeHeaders(bytes);
   return {
     source,
     path: relative(root, path),
@@ -414,6 +578,7 @@ async function inspectArtifactFile(
     printableRatio: entropySample.length === 0 ? 0 : Number((printable / entropySample.length).toFixed(4)),
     ...(hashComplete ? { sha256: hash } : { inspectedPrefixSha256: hash }),
     hashComplete,
+    ...(pe ? { pe } : {}),
     strings: extractPrintableStrings(bytes, maxStrings),
   };
 }
@@ -731,11 +896,15 @@ export function createToolSet(context: ToolContext): ToolSet {
             record.updatedAt = now;
           }
         }
+        const resolvedFailure = state.lastFailure;
+        const failureClassification = input.failureClassification && input.failureClassification !== "none"
+          ? input.failureClassification
+          : resolvedFailure?.classification;
         let strategyRevision: StrategyRevision | undefined;
-        if (input.failureClassification && input.failureClassification !== "none" && input.planChanges.length > 0) {
+        if (failureClassification && input.planChanges.length > 0) {
           strategyRevision = {
             id: randomUUID(),
-            classification: input.failureClassification,
+            classification: failureClassification,
             planChanges: [...input.planChanges],
             nextAction: input.nextAction,
             rationale: input.nextActionRationale ?? input.assessment,
@@ -743,9 +912,12 @@ export function createToolSet(context: ToolContext): ToolSet {
           };
           state.strategyRevisions.push(strategyRevision);
         }
-        const resolvedFailure = state.lastFailure;
         state.strategyRevisionRequired = false;
         delete state.lastFailure;
+        // A checkpoint records a concrete strategy change. Let the revised
+        // strategy revisit an action whose previous signature was exhausted,
+        // while keeping the repeated-action guard active within each strategy.
+        state.repeatedActions = {};
         state.phase = "analysis";
         const checkpoint = {
           ...input,
@@ -881,12 +1053,13 @@ export function createToolSet(context: ToolContext): ToolSet {
           input.length ?? 32768,
           runtime.maxOutputBytes,
         );
-        return textResult(result.output, {
+        return textResult(result.display, {
           path: result.path,
           encoding: result.encoding,
           offset: result.offset,
           bytes: result.bytes,
           truncated: result.truncated,
+          ...(result.preview ? { preview: result.preview } : {}),
         });
       },
     },
@@ -1059,12 +1232,13 @@ export function createToolSet(context: ToolContext): ToolSet {
           input.length ?? 32768,
           runtime.maxOutputBytes,
         );
-        return textResult(result.output, {
+        return textResult(result.display, {
           path: result.path,
           encoding: result.encoding,
           offset: result.offset,
           bytes: result.bytes,
           truncated: result.truncated,
+          ...(result.preview ? { preview: result.preview } : {}),
         });
       },
     },
@@ -1136,19 +1310,25 @@ export function createToolSet(context: ToolContext): ToolSet {
             cwd: input.cwd ?? "scratch",
             ...(input.stdin !== undefined ? { stdin: input.stdin, stdinEncoding: input.stdinEncoding ?? "utf8" } : {}),
             timeoutMs: Math.min(input.timeoutMs ?? runtime.commandTimeoutMs, runtime.commandTimeoutMs),
-            maxOutputBytes: runtime.maxOutputBytes,
+            maxOutputBytes: Math.min(runtime.maxOutputBytes, MAX_COMMAND_OUTPUT_CHARS),
           },
           signal,
         );
+        const publicResult = {
+          ...result,
+          stdout: boundedCommandOutput(result.stdout),
+          stderr: boundedCommandOutput(result.stderr),
+          ...(result.truncated ? { truncated: true } : {}),
+        };
         return textResult(
           [
-            `exitCode=${result.exitCode}`,
-            `signal=${result.signal ?? "none"}`,
-            `timedOut=${result.timedOut}`,
-            `stdout:\n${result.stdout}`,
-            `stderr:\n${result.stderr}`,
+            `exitCode=${publicResult.exitCode}`,
+            `signal=${publicResult.signal ?? "none"}`,
+            `timedOut=${publicResult.timedOut}`,
+            `stdout:\n${publicResult.stdout}`,
+            `stderr:\n${publicResult.stderr}`,
           ].join("\n"),
-          result,
+          publicResult,
         );
       },
     },

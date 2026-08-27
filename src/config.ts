@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { parse } from "yaml";
 import { hostMatches, isPathInside } from "./policy.js";
-import type { AppConfig, ScopeConfig, WebReasoningConfig } from "./types.js";
+import type { AppConfig, ModelThinkingFormat, ScopeConfig, WebReasoningConfig } from "./types.js";
 
 const DEFAULT_CONFIG_PATH = resolve("config/default.yaml");
 
@@ -75,6 +75,14 @@ function validateConfig(value: unknown, configPath: string): AppConfig {
   if (api !== "anthropic-messages" && api !== "openai-completions" && api !== "openai-responses") {
     throw new Error("model.api must be anthropic-messages, openai-completions, or openai-responses");
   }
+  const thinkingFormat = model.thinkingFormat === undefined ? undefined : requireString(model.thinkingFormat, "model.thinkingFormat");
+  const validThinkingFormats: ModelThinkingFormat[] = ["openai", "openrouter", "deepseek", "together", "zai", "qwen", "chat-template", "qwen-chat-template", "string-thinking", "ant-ling"];
+  if (thinkingFormat !== undefined && !validThinkingFormats.includes(thinkingFormat as ModelThinkingFormat)) {
+    throw new Error("model.thinkingFormat is invalid");
+  }
+  if (model.supportsReasoningEffort !== undefined && typeof model.supportsReasoningEffort !== "boolean") {
+    throw new Error("model.supportsReasoningEffort must be a boolean");
+  }
 
   const result: AppConfig = {
     model: {
@@ -85,6 +93,8 @@ function validateConfig(value: unknown, configPath: string): AppConfig {
       baseUrl: requireString(model.baseUrl, "model.baseUrl").replace(/\/$/, ""),
       apiKeyEnv: requireString(model.apiKeyEnv, "model.apiKeyEnv"),
       reasoning: Boolean(model.reasoning),
+      ...(thinkingFormat ? { thinkingFormat: thinkingFormat as ModelThinkingFormat } : {}),
+      ...(model.supportsReasoningEffort === undefined ? {} : { supportsReasoningEffort: model.supportsReasoningEffort }),
       contextWindow: requireNumber(model.contextWindow, "model.contextWindow"),
       maxTokens: requireNumber(model.maxTokens, "model.maxTokens"),
       ...(model.headersFromEnv === undefined

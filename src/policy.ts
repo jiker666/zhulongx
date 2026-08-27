@@ -132,9 +132,12 @@ export class PolicyEngine {
         planChanges?: unknown;
         nextActionRationale?: unknown;
       };
+      // The tool schema keeps failureClassification optional so a model can
+      // recover from the persisted lastFailure without repeating boilerplate.
+      // If it is supplied, it must still be a concrete non-none class.
       if (
-        typeof checkpoint.failureClassification !== "string" ||
-        checkpoint.failureClassification === "none"
+        checkpoint.failureClassification !== undefined &&
+        (typeof checkpoint.failureClassification !== "string" || checkpoint.failureClassification === "none")
       ) {
         return { allowed: false, reason: "Failure recovery requires a non-none failure classification", signature: actionSignature };
       }

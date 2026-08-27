@@ -234,5 +234,17 @@ describe("PolicyEngine", () => {
         nextActionRationale: "The replacement is available and tests the same hypothesis",
       }, run).allowed,
     ).toBe(true);
+
+    run.strategyRevisionRequired = true;
+    run.lastFailure = { classification: "policy", toolName: "run_command", reason: "repeated action", createdAt: new Date().toISOString() };
+    expect(
+      policy.evaluate("checkpoint", {
+        observations: ["The previous action was denied"],
+        assessment: "Use a different bounded observation",
+        planChanges: ["Switch to a narrow artifact read"],
+        nextAction: "Read the relevant offset",
+        nextActionRationale: "The persisted failure already identifies the recovery class",
+      }, run).allowed,
+    ).toBe(true);
   });
 });

@@ -258,7 +258,12 @@ export function renderTaskContext(task: NormalizedTask): string {
       `kind=${attachment.kind} size=${attachment.size} sha256=${attachment.sha256 ?? "n/a"}`,
       attachment.summary,
       attachment.entries?.length ? `entries:\n${attachment.entries.join("\n")}` : "",
-      attachment.toolPath ? `toolPath=${attachment.toolPath.source}:${attachment.toolPath.path}` : "",
+      attachment.toolPath
+        ? [
+            `toolPath=${attachment.toolPath.source}:${attachment.toolPath.path}`,
+            `executionHint=for run_command use cwd=${attachment.toolPath.source} and pass the path exactly as ${attachment.toolPath.path}; do not use ../ or an absolute path`,
+          ].join("\n")
+        : "",
       attachment.content ? `preview:\n${attachment.content}` : "",
       attachment.truncated ? "[preview truncated]" : "",
     ].filter(Boolean);

@@ -22,6 +22,10 @@ export class RunManager {
 
   start(request: TaskRequest, options: Pick<RunOptions, "workspaceMode" | "sharedEvidence" | "allowedToolEffects" | "contextSections" | "lineage" | "writeup"> = {}): string {
     const id = randomUUID();
+    // Attachments belong to the isolated per-run input mount by default. An
+    // operator can still explicitly request the configured workspace when a
+    // task needs both a shared workspace and supplied files.
+    const workspaceMode = options.workspaceMode ?? (request.attachments?.length ? "attachments-only" : undefined);
     const handle: RunHandle = {
       id,
       status: "queued",
@@ -32,7 +36,7 @@ export class RunManager {
     handle.promise = this.runtime
       .run(request, {
         id,
-        ...(options.workspaceMode ? { workspaceMode: options.workspaceMode } : {}),
+        ...(workspaceMode ? { workspaceMode } : {}),
         ...(options.sharedEvidence ? { sharedEvidence: options.sharedEvidence } : {}),
         ...(options.allowedToolEffects ? { allowedToolEffects: options.allowedToolEffects } : {}),
         ...(options.contextSections ? { contextSections: options.contextSections } : {}),

@@ -9,10 +9,12 @@ const DEFAULTS: ModelSettingsInput = {
   name: "DeepSeek-V4-Flash 0731",
   modelId: "ep-cxx3oi-1786692469617693484",
   api: "openai-completions",
-  baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
+  baseUrl: "https://wanqing-api.corp.kuaishou.com/api/gateway/v1/endpoints",
   apiKey: "",
   appKey: "",
-  appKeyHeader: "X-App-Key",
+  appKeyHeader: "AppKey",
+  reasoning: true,
+  thinkingFormat: "deepseek",
 };
 
 const sourceLabels = { session: "当前会话", environment: "环境变量", missing: "未配置" } as const;
@@ -46,7 +48,7 @@ export function ModelSettingsPage() {
       <div className="model-settings-grid">
         <Card className="model-settings-card">
           <div className="panel-heading"><div><span className="section-label">ACTIVE MODEL</span><h2>当前运行配置</h2></div><Settings2 size={18} aria-hidden="true" /></div>
-          {current && <dl className="model-facts"><div><dt>Provider</dt><dd>{current.provider}</dd></div><div><dt>Model</dt><dd>{current.name} <code>{current.id}</code></dd></div><div><dt>协议</dt><dd>{current.api}</dd></div><div><dt>Endpoint</dt><dd>{current.baseUrl}</dd></div><div><dt>AppKey</dt><dd>{current.appKeyHeaderConfigured ? "已配置自定义请求头" : "未配置"}</dd></div></dl>}
+          {current && <dl className="model-facts"><div><dt>Provider</dt><dd>{current.provider}</dd></div><div><dt>Model</dt><dd>{current.name} <code>{current.id}</code></dd></div><div><dt>协议</dt><dd>{current.api}</dd></div><div><dt>Endpoint</dt><dd>{current.baseUrl}</dd></div><div><dt>推理</dt><dd>{current.reasoning ? `启用 · ${current.thinkingFormat ?? "provider default"}` : "明确关闭"}</dd></div><div><dt>AppKey</dt><dd>{current.appKeyHeaderConfigured ? "已配置自定义请求头" : "未配置"}</dd></div></dl>}
           <div className="model-security-note"><ShieldCheck size={15} aria-hidden="true" /><span>配置仅驻留 API 进程内存。API 重启后会回退到 `config/default.yaml` 和环境变量。</span></div>
           <Button className="button secondary" type="button" loading={clear.isPending} onClick={() => clear.mutate()} disabled={!current?.source || current.source !== "session"}><Trash2 size={15} aria-hidden="true" />清除页面配置</Button>
         </Card>
@@ -59,7 +61,9 @@ export function ModelSettingsPage() {
             <label className="settings-field-wide"><span className="field-label">Model ID / Endpoint ID</span><input value={form.modelId} onChange={(event) => setForm({ ...form, modelId: event.target.value })} required maxLength={200} /></label>
             <label className="settings-field-wide"><span className="field-label">Base URL</span><input type="url" value={form.baseUrl} onChange={(event) => setForm({ ...form, baseUrl: event.target.value })} required maxLength={500} /></label>
             <label><span className="field-label">协议</span><select value={form.api} onChange={(event) => setForm({ ...form, api: event.target.value as ModelSettingsInput["api"] })}><option value="openai-completions">OpenAI Chat Completions</option><option value="openai-responses">OpenAI Responses</option><option value="anthropic-messages">Anthropic Messages</option></select></label>
-            <label><span className="field-label">AppKey 请求头</span><input value={form.appKeyHeader} onChange={(event) => setForm({ ...form, appKeyHeader: event.target.value })} placeholder="X-App-Key" maxLength={64} /></label>
+            <label><span className="field-label">推理模式</span><select value={form.thinkingFormat ?? ""} onChange={(event) => setForm({ ...form, thinkingFormat: event.target.value ? event.target.value as NonNullable<ModelSettingsInput["thinkingFormat"]> : undefined })}><option value="">Provider 默认</option><option value="deepseek">DeepSeek thinking</option><option value="openai">OpenAI reasoning_effort</option><option value="qwen">Qwen enable_thinking</option><option value="zai">Z.ai thinking</option><option value="together">Together reasoning</option><option value="chat-template">chat_template_kwargs</option></select></label>
+            <label className="settings-checkbox"><input type="checkbox" checked={form.reasoning === true} onChange={(event) => setForm({ ...form, reasoning: event.target.checked })} /><span className="field-label">模型支持推理控制</span></label>
+            <label><span className="field-label">AppKey 请求头</span><input value={form.appKeyHeader} onChange={(event) => setForm({ ...form, appKeyHeader: event.target.value })} placeholder="AppKey" maxLength={64} /></label>
             <label className="settings-field-wide"><span className="field-label">API Key</span><input type="password" autoComplete="off" value={form.apiKey} onChange={(event) => setForm({ ...form, apiKey: event.target.value })} placeholder="仅本次提交使用，不会回填" required maxLength={1000} /></label>
             <label className="settings-field-wide"><span className="field-label">AppKey（可选）</span><input type="password" autoComplete="off" value={form.appKey} onChange={(event) => setForm({ ...form, appKey: event.target.value })} placeholder="需要网关 AppKey 时填写" maxLength={1000} /></label>
           </div>
