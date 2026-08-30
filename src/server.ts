@@ -336,11 +336,13 @@ export function createApiServer(config: AppConfig, dependencies: ApiServerDepend
   const permissionBroker = dependencies.permissionBroker ?? new PermissionBroker(config.profile?.approvalPolicy ?? "never");
   const orchestrationRoot = join(config.runtime.artifactRoot, "..", "orchestration");
   const memoryStore = dependencies.memoryStore ?? new MemoryStore(orchestrationRoot);
+  const knowledgeStore = dependencies.knowledgeStore ?? new KnowledgeStore(orchestrationRoot);
   const connectorBroker = dependencies.connectorBroker ?? new ConnectorBroker(config.connectors ?? []);
   const targetConnectorId = config.profile?.preferredExecutor === "connector" ? config.profile.executorTargetId : undefined;
   const runtime = new XuanShuRuntime(config, {
     permissionGate: permissionBroker,
     memoryStore,
+    knowledgeStore,
     ...(targetConnectorId ? { executorFactory: () => new ConnectorExecutor(targetConnectorId, connectorBroker) } : {}),
   });
   const manager = new RunManager(runtime);
@@ -351,7 +353,6 @@ export function createApiServer(config: AppConfig, dependencies: ApiServerDepend
   const workflowWorker = dependencies.workflowWorker ?? new BoundedWorkflowWorker(workflowStore, runManagerWorkflowNodeRunner(manager));
   workflowWorker.start();
   const evaluationLedger = dependencies.evaluationLedger ?? new EvaluationLedger(orchestrationRoot);
-  const knowledgeStore = dependencies.knowledgeStore ?? new KnowledgeStore(orchestrationRoot);
   const adaptiveCampaigns = dependencies.adaptiveCampaigns ?? new AdaptiveCampaignManager({
     store: new DurableAdaptiveCampaignStore(orchestrationRoot),
     runManager: manager,

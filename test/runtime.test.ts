@@ -15,6 +15,7 @@ import { streamSimple as streamOpenAIResponses } from "@earendil-works/pi-ai/api
 import { streamSimple as streamOpenAICompletions } from "@earendil-works/pi-ai/api/openai-completions";
 import { afterEach, describe, expect, it } from "vitest";
 import { verifyAuditChain } from "../src/audit.js";
+import { KnowledgeStore } from "../src/knowledge-store.js";
 import { createModel, XuanShuRuntime } from "../src/runtime.js";
 import { startSandboxServer } from "../src/sandbox.js";
 import { SharedEvidenceBoard } from "../src/shared-evidence.js";
@@ -30,6 +31,56 @@ afterEach(async () => {
 });
 
 describe("XuanShuRuntime", () => {
+  it("retrieves relevant knowledge before the first planning prompt", async () => {
+    const root = await mkdtemp(join(tmpdir(), "xuan-runtime-knowledge-"));
+    roots.push(root);
+    const config = testConfig(root);
+    await mkdir(config.scope.workspaceRoot, { recursive: true });
+    const knowledgeStore = new KnowledgeStore(join(root, "knowledge"));
+    await knowledgeStore.ingest({
+      docId: "ssrf-guide",
+      sourceUrl: "https://docs.example.invalid/ssrf",
+      title: "SSRF guide",
+      mediaType: "text/markdown",
+      trust: "community",
+      source: "SSRF gopher reference",
+      markdown: "# SSRF\nUse this reference to identify gopher-related verification ideas.",
+      summary: "SSRF and gopher reference for authorized CTF analysis",
+      keyParameters: ["gopher", "authorized challenge"],
+    });
+    const faux = registerFauxProvider();
+    registrations.push(faux);
+    faux.setResponses([
+      fauxAssistantMessage(fauxToolCall("submit_plan", {
+        goal: "Use the authorized challenge evidence",
+        assumptions: [],
+        hypotheses: [],
+        steps: [{ id: "inspect", objective: "Inspect the supplied evidence", successCriteria: ["Evidence is reviewed"], tools: ["list_files"] }],
+      }, { id: "knowledge-plan" }), { stopReason: "toolUse" }),
+      fauxAssistantMessage(fauxToolCall("finish_task", {
+        status: "completed",
+        summary: "Completed the bounded authorized analysis.",
+        evidence: ["knowledge context was available before planning"],
+        remainingRisks: [],
+        nextSteps: [],
+        confidence: 0.9,
+        verification: ["retrieval was recorded in the audit trail"],
+        independentlyVerified: true,
+      }, { id: "knowledge-finish" }), { stopReason: "toolUse" }),
+    ]);
+
+    const runtime = new XuanShuRuntime(config, { streamFn: streamSimple, model: faux.getModel(), knowledgeStore });
+    const state = await runtime.run({ task: "Solve this authorized SSRF gopher challenge" });
+    const records = await readAuditRecords(join(config.runtime.artifactRoot, state.id, "audit.jsonl"));
+    const retrieval = records.find((record) => record.type === "knowledge.retrieved");
+    const context = records.find((record) => record.type === "context.injected");
+
+    expect(state.status).toBe("completed");
+    expect(retrieval).toMatchObject({ source: "context", actor: "knowledge-retriever", data: { resultCount: 1, documents: [{ docId: "ssrf-guide" }] } });
+    expect(JSON.stringify(context)).toContain("UNTRUSTED KNOWLEDGE RETRIEVAL");
+    expect(JSON.stringify(context)).toContain("SSRF guide");
+  });
+
   it("redacts sensitive text from every persisted run artifact", async () => {
     const root = await mkdtemp(join(tmpdir(), "xuan-runtime-redaction-"));
     roots.push(root);

@@ -262,6 +262,26 @@ export interface RunReview {
   createdAt: string;
 }
 
+export type SubmissionValidationStatus = "accepted" | "pending" | "rejected";
+
+export interface SubmissionValidation {
+  policy: "strict" | "advisory";
+  status: SubmissionValidationStatus;
+  reason: string;
+  grounded: boolean;
+  independentlyVerified: boolean;
+  verificationMentionsCandidate: boolean;
+  observedOutputCount: number;
+  checkedAt: string;
+}
+
+export interface CheckpointSnapshot {
+  observations: string[];
+  assessment: string;
+  nextAction: string;
+  updatedAt: string;
+}
+
 export interface RunLineage {
   parentRunId: string;
   boundarySequence: number;
@@ -290,9 +310,14 @@ export interface RunState {
   workspaceMode: "configured" | "attachments-only";
   appliedExperienceIds: string[];
   submission?: string;
+  submissionValidation?: SubmissionValidation;
   verification?: string[];
   independentlyVerified?: boolean;
   summary?: string;
+  remainingRisks?: string[];
+  nextSteps?: string[];
+  lastCheckpoint?: CheckpointSnapshot;
+  handoffPath?: string;
   writeup?: string;
   writeupError?: string;
   stopReason?: string;
@@ -384,5 +409,6 @@ export interface RuntimeOverrides {
   externalTools?: import("./external-tools.js").ExternalToolRegistration[];
   permissionGate?: import("./permissions.js").PermissionGate;
   memoryStore?: import("./memory.js").MemoryStore;
+  knowledgeStore?: import("./knowledge-store.js").KnowledgeStore;
   executorFactory?: (input: { runId: string; workspaceRoot: string; scratchRoot: string; signal?: AbortSignal }) => Promise<import("./executor.js").Executor> | import("./executor.js").Executor;
 }

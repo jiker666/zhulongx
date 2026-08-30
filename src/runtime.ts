@@ -12,6 +12,7 @@ import { mergeScope } from "./config.js";
 import { projectModelMessages } from "./context-projection.js";
 import { SandboxExecutor } from "./executor.js";
 import { ExperienceStore, renderExperienceContext } from "./experience.js";
+import { renderRunHandoff } from "./handoff.js";
 import { normalizeTask, renderTaskContext } from "./input.js";
 import { estimateModelRequestTokens, ModelRequestGate } from "./model-rate-limit.js";
 import { PolicyEngine } from "./policy.js";
@@ -25,6 +26,7 @@ import { buildSystemPrompt } from "./system-prompt.js";
 import { createToolSet } from "./tools.js";
 import { toolDescriptorMap, type ToolEffect } from "./tool-catalog.js";
 import type { AppConfig, NormalizedTask, RunEvent, RunLineage, RunState, RuntimeOverrides, TaskRequest } from "./types.js";
+import { submissionPolicyFor, validateSubmission } from "./submission-policy.js";
 import { createWebReasoningController } from "./web-reasoning/controller.js";
 import { detectWebTask } from "./web-reasoning/task-detector.js";
 import { generateWriteup as generateWriteupDocument } from "./writeup-generator.js";
@@ -133,6 +135,14 @@ function assistantText(message: AssistantMessage): string {
     .filter((item) => item.type === "text")
     .map((item) => item.text)
     .join("\n");
+}
+
+function renderKnowledgeQuery(task: NormalizedTask): string {
+  const attachmentSignals = task.attachments
+    .map((attachment) => [attachment.source, attachment.summary, attachment.content].filter(Boolean).join("\n"))
+    .join("\n")
+    .slice(0, 8_000);
+  return [task.task, task.metadata.category, attachmentSignals].filter(Boolean).join("\n").slice(0, 12_000);
 }
 
 function hitOutputLimitWithoutToolCall(message: AssistantMessage): boolean {
@@ -528,10 +538,12 @@ export class XuanShuRuntime {
       });
     }
     profileState.tools = toolSet.tools.map((tool) => tool.name);
+    const submissionPolicy = submissionPolicyFor(task);
     const providerStreamFn = this.overrides.streamFn ?? defaultStreamFn();
     let modelRequestNumber = 0;
     let activeModelRequestId: string | undefined;
     const toolRequestSequences = new Map<string, number>();
+    const observedToolOutputs: string[] = [];
     const streamFn: StreamFn = (turnModel, context, streamOptions) => lazyStream(turnModel, async () => {
       const requestId = `${id}:request:${++modelRequestNumber}`;
       activeModelRequestId = requestId;
@@ -642,6 +654,24 @@ export class XuanShuRuntime {
           description: descriptors.get(toolCall.name)?.sideEffects.join("; ") || "Agent requested a bounded tool action",
         }, { source: "model", actor: "primary-agent", correlationId: toolCall.id });
         toolRequestSequences.set(toolCall.id, requested.sequence);
+        if (toolCall.name === "finish_task" && submissionPolicy === "strict") {
+          const input = args && typeof args === "object" ? args as Record<string, unknown> : {};
+          const verification = Array.isArray(input.verification)
+            ? input.verification.filter((item): item is string => typeof item === "string")
+            : [];
+          const validation = validateSubmission({
+            policy: submissionPolicy,
+            status: input.status === "completed" ? "completed" : "blocked",
+            ...(typeof input.submission === "string" ? { candidate: input.submission } : {}),
+            observedOutputs: observedToolOutputs,
+            verification,
+            independentlyVerified: input.independentlyVerified === true,
+          });
+          state.submissionValidation = validation;
+          await audit.append("submission.validation", validation, { source: "system", actor: "submission-gate", correlationId: toolCall.id, parentSequence: requested.sequence });
+          await emit("submission.validation", { status: validation.status, reason: validation.reason });
+          if (validation.status !== "accepted") return { block: true, reason: `Submission gate: ${validation.reason}` };
+        }
         const guard = webReasoning.guardToolCall(toolCall.name, args, toolSet.tools.map((tool) => tool.name));
         if (!guard.allowed) {
           await audit.append("WEB_ACTION_GUARD_REJECTED", { toolCallId: toolCall.id, toolName: toolCall.name, decision: guard.decision, reason: guard.reason }, { source: "policy", actor: "web-action-guard", correlationId: toolCall.id, parentSequence: requested.sequence });
@@ -701,19 +731,28 @@ export class XuanShuRuntime {
         return undefined;
       },
       afterToolCall: async ({ toolCall, args, result, isError }) => {
+        const persistedContent = sanitizeSecrets(publicContent(result.content));
+        const persistedDetails = sanitizeSecrets(result.details);
         await audit.append("tool.result", {
           toolCallId: toolCall.id,
           toolName: toolCall.name,
           args: sanitizeSecrets(args),
           isError,
-          content: sanitizeSecrets(publicContent(result.content)),
-          details: sanitizeSecrets(result.details),
+          content: persistedContent,
+          details: persistedDetails,
         }, {
           source: "tool",
           actor: toolCall.name,
           correlationId: toolCall.id,
           ...(toolRequestSequences.get(toolCall.id) !== undefined ? { parentSequence: toolRequestSequences.get(toolCall.id)! } : {}),
         });
+        if (!isError && !["submit_plan", "checkpoint", "record_finding", "record_lesson", "finish_task", "read_shared_evidence", "publish_shared_evidence"].includes(toolCall.name)) {
+          const observation = JSON.stringify({ content: persistedContent, details: persistedDetails });
+          if (observation) {
+            observedToolOutputs.push(observation.slice(0, 12_000));
+            if (observedToolOutputs.length > 32) observedToolOutputs.shift();
+          }
+        }
         if (isError && !["submit_plan", "checkpoint", "record_finding", "record_lesson", "finish_task"].includes(toolCall.name)) {
           state.actionsSinceCheckpoint = runtimeConfig.maxActionsWithoutCheckpoint;
           state.strategyRevisionRequired = true;
@@ -821,11 +860,32 @@ export class XuanShuRuntime {
       const reasoningContext = webReasoning.enabled
         ? await webReasoning.beforeTurn(runtimeConfig.maxTurns - state.turns, runtimeConfig.maxToolCalls - state.toolCalls, toolSet.tools.map((tool) => tool.name))
         : "";
+      let knowledgeContext = "";
+      if (this.overrides.knowledgeStore) {
+        try {
+          const retrieval = await this.overrides.knowledgeStore.searchContext(renderKnowledgeQuery(task), { limit: 5, maxChars: 12_000 });
+          knowledgeContext = retrieval.context;
+          await audit.append("knowledge.retrieved", {
+            resultCount: retrieval.results.length,
+            documents: retrieval.results.map(({ document, score }) => ({ docId: document.docId, score, trust: document.trust, promptInjectionSuspected: document.promptInjectionSuspected })),
+          }, { source: "context", actor: "knowledge-retriever" });
+          await emit("knowledge.retrieved", {
+            resultCount: retrieval.results.length,
+            docIds: retrieval.results.map(({ document }) => document.docId),
+          });
+        } catch (error) {
+          await audit.append("knowledge.retrieval_failed", {
+            reason: error instanceof Error ? error.message : String(error),
+          }, { source: "context", actor: "knowledge-retriever" });
+          await emit("knowledge.retrieval_failed", { reason: "Knowledge retrieval unavailable; continuing without retrieved context" });
+        }
+      }
       const promptSections = [
         { name: "capability-playbook", content: renderCapabilityPlaybook(task.metadata.category ?? (webReasoning.enabled ? "Web" : undefined)) },
         { name: "reasoning-state", content: reasoningContext },
         { name: "verified-experience", content: renderExperienceContext(experience) },
         { name: "memory", content: memoryContext },
+        { name: "knowledge", content: knowledgeContext },
         ...(options.contextSections ?? []).slice(0, 8).map((section) => ({
           name: String(section.name).slice(0, 120),
           content: String(section.content).slice(0, 12_000),
@@ -906,6 +966,14 @@ export class XuanShuRuntime {
             await audit.append("writeup.failed", { error: state.writeupError }, { source: "orchestrator", actor: "writeup-generator" });
           }
         }
+      }
+      state.handoffPath = "handoff.md";
+      try {
+        const handoff = renderRunHandoff(state);
+        await writeFile(join(runDirectory, state.handoffPath), handoff, "utf8");
+        await audit.append("run.handoff_written", { path: state.handoffPath, characters: handoff.length }, { source: "orchestrator", actor: "handoff-writer" });
+      } catch (error) {
+        await audit.append("run.handoff_failed", { reason: error instanceof Error ? error.message : String(error) }, { source: "orchestrator", actor: "handoff-writer" });
       }
       await writeJson(join(runDirectory, "state.json"), state);
       await writeJson(join(runDirectory, "findings.json"), state.findings);

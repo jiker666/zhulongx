@@ -914,6 +914,12 @@ export function createToolSet(context: ToolContext): ToolSet {
         }
         state.strategyRevisionRequired = false;
         delete state.lastFailure;
+        state.lastCheckpoint = {
+          observations: input.observations.slice(0, 12),
+          assessment: input.assessment,
+          nextAction: input.nextAction,
+          updatedAt: now,
+        };
         // A checkpoint records a concrete strategy change. Let the revised
         // strategy revisit an action whose previous signature was exhausted,
         // while keeping the repeated-action guard active within each strategy.
@@ -1780,6 +1786,8 @@ export function createToolSet(context: ToolContext): ToolSet {
         state.summary = input.summary;
         state.verification = [...input.verification];
         state.independentlyVerified = input.independentlyVerified;
+        state.remainingRisks = [...input.remainingRisks].slice(0, 20);
+        state.nextSteps = [...input.nextSteps].slice(0, 20);
         if (input.submission) {
           state.submission = input.submission.trim();
         }

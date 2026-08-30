@@ -48,3 +48,9 @@ docker compose down
 宿主机端口被占用时，使用 `XUANSHU_PORT=17318 ./start.command`（Windows 可在命令提示符中先执行 `set XUANSHU_PORT=17318`）。API 健康地址为 `http://127.0.0.1:<端口>/health`。
 
 Compose 只将 API 端口绑定到 `127.0.0.1`；sandbox 使用 `network_mode: none`，不具备外网访问能力。主动网络能力仍受运行时 `PolicyEngine` 和 operator scope 控制。
+
+## Agent 与知识库
+
+容器启动后，Agent 仍会在每次任务的首次规划前检索挂载的 `workspace/` 知识库。默认 Compose 配置将该目录以只读方式挂载；如果要使用本地知识库语料，请在宿主机项目目录的 `workspace/` 下准备文件，再重新创建容器即可。
+
+对于题库来源任务或显式设置 `submissionPolicy: "strict"` 的任务，Agent 只有在候选值被成功工具输出和独立验证结果同时支撑时才会调用 `finish_task`。每次运行的脱敏交接摘要位于 `.xuan-shu/runs/<run-id>/handoff.md` 对应的数据卷中，可用于恢复任务和排查自动规划过程。

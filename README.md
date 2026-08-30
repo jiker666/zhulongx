@@ -207,11 +207,26 @@ XUANSHU_INSTALL_HEAVY_CTF_TOOLS=true docker compose build ctf-sandbox
 
 中间脚本和转换结果位于 `.xuan-shu/work/runs/<run-id>/`。`.env`、`.xuan-shu/`、`workspace/` 内容、私有配置和本地数据集均被 Git 忽略。
 
+## Agent 运行策略
+
+自主解题 Agent 在每次任务的首次规划前，会根据任务描述检索本地知识库，并将有界、可追溯的检索上下文提供给规划模型。检索失败时会安全降级为无知识库规划，不会阻塞任务启动。
+
+对于 `question-bank` 来源或显式声明 `submissionPolicy: "strict"` 的任务，`finish_task` 需要同时满足以下条件才会提交：
+
+- 提交值必须能在本次运行的成功工具输出中找到，避免凭空猜测或提交内部 ID、凭据等不可验证值。
+- 必须提供独立验证结果，并且验证文本中要出现完全一致的候选答案。
+- 未通过校验时，Agent 会继续保留任务状态，不会伪造成功结果。
+
+每次运行还会在 `.xuan-shu/runs/<run-id>/handoff.md` 写入脱敏的交接摘要，记录计划、假设、检查点、已验证发现、死路、剩余风险和下一步；恢复或继续任务时，这份摘要会作为上下文的一部分重新注入。
+
 ## 项目结构
 
 ```text
 src/
   runtime.ts          自主决策循环、状态与预算
+  knowledge-store.ts  规划前知识库检索与有界上下文
+  submission-policy.ts 严格提交候选与证据校验
+  handoff.ts          脱敏运行交接摘要
   policy.ts           scope、程序、路径和停滞门禁
   tools.ts            模型可调用的有界工具
   sandbox.ts          隔离命令执行协议

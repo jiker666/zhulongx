@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { appendFile, mkdir, readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { verifyAuditChain } from "./audit.js";
+import { renderRunHandoff } from "./handoff.js";
 import { sanitizeSecrets } from "./sanitize.js";
 import { inferTrajectorySource, type TrajectorySource } from "./session-trajectory.js";
 import type { AuditRecord, RunLineage, RunReview, RunState, TaskRequest } from "./types.js";
@@ -380,6 +381,8 @@ export async function prepareRunContinuation(
     `Continuation mode: ${mode}`,
     `Original task: ${scrubReviewText(trace.state.task.task, 4_000)}`,
     instruction ? `Operator continuation request: ${instruction}` : "Operator continuation request: continue from verified public evidence without repeating completed work.",
+    "Structured run handoff:",
+    renderRunHandoff(trace.state).slice(0, 12_000),
     "Public trajectory:",
     ...lines,
     "Hidden reasoning, secrets, authorization material, and image pixels were not inherited.",
