@@ -3,6 +3,37 @@ import { parse } from "yaml";
 import { describe, expect, it } from "vitest";
 
 describe("Docker sandbox wiring", () => {
+  it("builds and serves the production frontend from the API image", async () => {
+    const dockerfile = await readFile("Dockerfile", "utf8");
+    const packageManifest = JSON.parse(await readFile("package.json", "utf8")) as { dependencies?: Record<string, string> };
+    expect(dockerfile).toContain("FROM node:22-bookworm-slim AS frontend-build");
+    expect(dockerfile).toContain("RUN npm run build");
+    expect(dockerfile).toContain("COPY --from=frontend-build /app/frontend/dist ./frontend/dist");
+    expect(packageManifest.dependencies?.typescript).toBe("5.9.3");
+
+    const compose = parse(await readFile("docker-compose.yml", "utf8")) as {
+      services: Record<string, { depends_on?: Record<string, { condition?: string }>; ports?: string[] }>;
+    };
+    expect(compose.services.xuanshu?.depends_on?.["ctf-sandbox"]?.condition).toBe("service_healthy");
+    expect(compose.services.xuanshu?.ports).toContain("127.0.0.1:${XUANSHU_PORT:-7318}:7318");
+  });
+
+  it("provides cross-platform one-click launchers with health checks", async () => {
+    const [unixLauncher, windowsLauncher] = await Promise.all([
+      readFile("start.command", "utf8"),
+      readFile("start.bat", "utf8"),
+    ]);
+    expect(unixLauncher).toContain("$COMPOSE up -d --build");
+    expect(unixLauncher).toContain('COMPOSE="docker-compose"');
+    expect(unixLauncher).toContain('HEALTH_URL="${WEB_URL}health"');
+    expect(unixLauncher).toContain("open \"$WEB_URL\"");
+    expect(windowsLauncher).toContain("%COMPOSE% up -d --build");
+    expect(windowsLauncher).toContain('set "COMPOSE=docker-compose"');
+    expect(windowsLauncher).toContain("Invoke-WebRequest");
+    expect(windowsLauncher).toContain("start \"\" \"%WEB_URL%\"");
+    expect(await readFile("docs/docker-deployment.md", "utf8")).toContain("network_mode: none");
+  });
+
   it("keeps the CTF sandbox sidecar offline with split input/work/socket mounts", async () => {
     const compose = parse(await readFile("docker-compose.yml", "utf8")) as {
       services: Record<string, { network_mode?: string; volumes?: string[] }>;

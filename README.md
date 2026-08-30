@@ -158,12 +158,31 @@ Vite 开发界面默认位于 [http://127.0.0.1:5173](http://127.0.0.1:5173)，�
 
 ## Docker Compose
 
+### 一键启动（推荐）
+
+Docker Desktop 启动后：
+
+- macOS/Linux：执行 `./start.command`（首次使用可先运行 `chmod +x start.command`）。
+- Windows：双击 `start.bat`。
+
+脚本会构建前后端合并镜像、启动 API 与无外网 sandbox、等待健康检查通过，并自动打开浏览器。未设置 `XUANSHU_SERVER_TOKEN` 时，脚本会为本次启动生成临时令牌并打印出来；打开页面后点击右上角钥匙图标输入该令牌。令牌只存在于当前启动进程和浏览器会话中。
+
+### 手动启动
+
 完整启动 API 与无外网 sandbox：
 
 ```bash
 export OPENAI_API_KEY="..."
 export XUANSHU_SERVER_TOKEN="replace-with-a-long-random-value"
-docker compose up --build
+docker compose up -d --build
+```
+
+打开 [http://127.0.0.1:7318](http://127.0.0.1:7318)。Compose 默认只绑定回环地址；可用 `XUANSHU_PORT=17318` 修改宿主机端口。模型密钥也可以在前端“模型设置”页面临时配置，服务不会把密钥写入运行产物。
+
+停止服务：
+
+```bash
+docker compose down
 ```
 
 默认只构建 core sandbox。重型工具会显著增加构建时间和镜像体积，需明确启用：
@@ -173,6 +192,8 @@ XUANSHU_INSTALL_HEAVY_CTF_TOOLS=true docker compose build ctf-sandbox
 ```
 
 已审查的二进制与分析工具、版本固定及构建校验见 [Binary Toolchain](docs/binary-toolchain.md)。安装能力与运行时 allowlist 相互独立。
+
+更多端口、环境变量、诊断和容器边界说明见 [Docker 部署](docs/docker-deployment.md)。
 
 ## 运行产物
 

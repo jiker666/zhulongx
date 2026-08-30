@@ -1,6 +1,7 @@
 .git
 .xuan-shu
 node_modules
+frontend/dist
 test
 workspace
 *.log
