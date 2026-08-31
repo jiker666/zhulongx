@@ -100,6 +100,7 @@ describe("XuanShuRuntime", () => {
       readFile(join(runDirectory, "findings.json"), "utf8"),
       readFile(join(runDirectory, "transcript.json"), "utf8"),
       readFile(join(runDirectory, "audit.jsonl"), "utf8"),
+      readFile(join(runDirectory, "summary.json"), "utf8"),
     ])).join("\n");
 
     expect(persisted).not.toContain("task-sensitive-value");

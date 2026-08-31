@@ -31,6 +31,7 @@ import { createWebReasoningController } from "./web-reasoning/controller.js";
 import { detectWebTask } from "./web-reasoning/task-detector.js";
 import { generateWriteup as generateWriteupDocument } from "./writeup-generator.js";
 import { resolveCtfSkillCategory } from "./skill-catalog.js";
+import { projectRunSummary, RUN_SUMMARY_FILE } from "./run-summary.js";
 
 type SupportedModelApi = "anthropic-messages" | "openai-completions" | "openai-responses";
 const MAX_LENGTH_RECOVERY_ATTEMPTS = 2;
@@ -259,6 +260,11 @@ async function stageAttachmentsOnly(
 
 export async function writeJson(path: string, value: unknown): Promise<void> {
   await writeFile(path, `${JSON.stringify(sanitizeSecrets(value), null, 2)}\n`, "utf8");
+}
+
+export async function writeRunState(runDirectory: string, state: RunState): Promise<void> {
+  await writeJson(join(runDirectory, "state.json"), state);
+  await writeJson(join(runDirectory, RUN_SUMMARY_FILE), projectRunSummary(state));
 }
 
 export interface RunOptions {
@@ -506,11 +512,11 @@ export class XuanShuRuntime {
         correlationId: state.lineage.parentRunId,
       });
     }
-    await writeJson(join(runDirectory, "state.json"), state);
+    await writeRunState(runDirectory, state);
     await emit("run.started", { status: state.status, phase: state.phase });
     const webReasoning = createWebReasoningController(state, audit, this.config.webReasoning);
     await webReasoning.initialize();
-    if (webReasoning.enabled && this.config.webReasoning?.persistState !== false) await writeJson(join(runDirectory, "state.json"), state);
+    if (webReasoning.enabled && this.config.webReasoning?.persistState !== false) await writeRunState(runDirectory, state);
 
     const descriptors = new Map([
       ...toolDescriptorMap().entries(),
@@ -763,9 +769,9 @@ export class XuanShuRuntime {
             createdAt: new Date().toISOString(),
           };
         }
-        await writeJson(join(runDirectory, "state.json"), state);
+        await writeRunState(runDirectory, state);
         await webReasoning.afterToolResult({ toolName: toolCall.name, toolCallId: toolCall.id, args, result: { content: result.content, details: result.details }, isError });
-        if (webReasoning.enabled && this.config.webReasoning?.persistState !== false) await writeJson(join(runDirectory, "state.json"), state);
+        if (webReasoning.enabled && this.config.webReasoning?.persistState !== false) await writeRunState(runDirectory, state);
         await emit("tool.result", { toolName: toolCall.name, isError });
         return undefined;
       },
@@ -975,7 +981,7 @@ export class XuanShuRuntime {
       } catch (error) {
         await audit.append("run.handoff_failed", { reason: error instanceof Error ? error.message : String(error) }, { source: "orchestrator", actor: "handoff-writer" });
       }
-      await writeJson(join(runDirectory, "state.json"), state);
+      await writeRunState(runDirectory, state);
       await writeJson(join(runDirectory, "findings.json"), state.findings);
       await writeJson(join(runDirectory, "transcript.json"), transcript);
       await audit.append("run.settled", {

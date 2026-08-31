@@ -1,8 +1,8 @@
-export type RunStatus = "queued" | "running" | "completed" | "blocked" | "failed" | "aborted";
+export type RunStatus = "queued" | "running" | "completed" | "blocked" | "failed" | "aborted" | "indexing";
 export type RunPhase = "intake" | "planning" | "exploration" | "analysis" | "verification" | "reporting" | "done";
 
 export interface RunLineage { parentRunId: string; boundarySequence: number; mode: "fork" | "resume"; inheritedEventCount: number }
-export interface RunSummary { id: string; status: RunStatus; phase: RunPhase; task: string; category?: string; createdAt: string; finishedAt?: string; turns: number; toolCalls: number; lessons: number; lineage?: RunLineage; }
+export interface RunSummary { id: string; status: RunStatus; phase: RunPhase; task: string; category?: string; createdAt: string; finishedAt?: string; turns: number; toolCalls: number; lessons: number; lineage?: RunLineage; indexPending?: boolean; }
 export interface EvidenceRecord { id: string; summary: string; source: string; lifecycle: string; toolCallId?: string; observationIds?: string[]; hypothesisIds?: string[]; actionIds?: string[]; candidateIds?: string[]; verificationIds?: string[]; createdAt?: string; updatedAt?: string }
 export interface HypothesisRecord { id: string; statement: string; status: string; evidence: string[]; updatedAt?: string }
 export interface FindingRecord { id: string; title: string; severity: string; confidence: number; description?: string; evidence: string[] }

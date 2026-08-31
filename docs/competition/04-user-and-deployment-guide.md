@@ -40,7 +40,23 @@ XUANSHU_SERVER_TOKEN="replace-with-a-long-random-value" npm run serve
 
 默认本地地址为 `http://127.0.0.1:7318/`。这是本机测试地址，不等同于可公开访问的线上服务；在非回环地址启动时必须设置服务令牌。
 
-### 2.4 启动本地 sandbox（可选）
+### 2.4 Docker Compose 一键启动
+
+Docker Desktop 启动后，在项目根目录执行：
+
+```bash
+./start.command
+```
+
+Windows 用户双击 `start.bat`。脚本会自动检查 `docker compose`/`docker-compose`、构建 API + React 合并镜像、启动无外网 `ctf-sandbox`、轮询 `/health`，并打开浏览器。未设置 `XUANSHU_SERVER_TOKEN` 时会生成只用于本次进程的随机令牌并打印；在页面右上角钥匙按钮中输入即可。也可以手动执行：
+
+```bash
+XUANSHU_SERVER_TOKEN="replace-with-a-long-random-value" docker-compose up -d --build
+```
+
+默认访问 `http://127.0.0.1:7318/`，端口占用时使用 `XUANSHU_PORT=17318 ./start.command`。停止服务：`docker-compose down`。Compose 将 `workspace/` 只读挂载，运行数据写入 named volumes，sandbox 使用 `network_mode: none`。
+
+### 2.5 启动本地 sandbox（可选）
 
 ```bash
 mkdir -p workspace .xuan-shu/work
@@ -50,15 +66,25 @@ npm run sandbox-health
 
 sandbox 只执行 operator allowlist 中的结构化程序，并使用独立 scratch；它不直接拥有外网权限。
 
-## 3. 基本操作
+## 3. 控制台操作
 
 1. 在控制台创建或选择运行，填写明确的授权任务目标。
-2. 选择或上传只读附件；每个运行拥有独立输入和 scratch 边界。
+2. 选择或上传只读附件；可点击“添加文件”，也可将文件拖拽到附件投放区。每个运行拥有独立输入和 scratch 边界。
 3. 观察 agent 的任务理解、计划、策略判定、工具结果与 checkpoint。
 4. 需要时停止运行、人工复核证据，或从指定审计事件创建新的分支运行。
 5. 仅在证据、scope 和完成标准满足时接受结论；不要把模型文本当作未经验证的事实。
 
 轨迹界面会以“做什么、为什么、影响、结果、下一步”解释可复核动作。技术事件可以按模型/上下文/策略/工具/子 Agent 来源筛选、检索、回放和分支；隐藏推理和凭据不会显示或保存。
+
+运行记录较多时，审计列表会先读取每次运行保存的轻量摘要；旧运行的摘要在后台补齐，期间卡片会显示“正在索引”。打开具体运行仍会读取完整状态与审计轨迹，历史运行数据不会因列表索引被删改。
+
+### 3.1 模型设置
+
+进入“模型设置”页面，填写 OpenAI-compatible 的 Base URL、API 类型、模型/部署 ID、API Key 和可选网关 AppKey。配置只保存在当前 API 进程内存中，不写入浏览器持久存储、审计链或运行产物；重启服务后需重新填写。无人值守部署请使用被 Git 忽略的私有配置和环境变量。
+
+### 3.2 最终结论与 WP
+
+运行详情页的“运行总结结论”区域会明确展示 `finish_task` 写入的最终提交；识别为 CTF 结果时会以醒目的 `FLAG FOUND` 和 Flag 字段展示。运行有总结时可点击“下载 WP”，已有模型写入的 WP 会直接下载；没有 WP 时，页面会请求 AI 按固定结构生成，并在失败时下载脱敏的结构化兼容报告。报告只使用运行中的公开证据，不从日志猜测答案，也不保存隐藏推理。
 
 ## 4. 二进制与附件分析
 
@@ -69,15 +95,17 @@ sandbox 只执行 operator allowlist 中的结构化程序，并使用独立 scr
 
 ## 5. 托管评测
 
-主办方托管模式应以 `config/container.yaml` 为基础创建被 Git 忽略的私有配置 overlay，并按现场规则填写模型协议、网关地址、环境变量名、scope 与预算。模型 Key、平台 Token 和评测数据地址只通过运行环境注入，不能写入镜像、仓库或运行日志。Docker 镜像的构建和上传不属于本次交付步骤；需要执行时应由团队在本地按主办方要求另行完成。
+主办方托管模式应以 `config/container.yaml` 为基础创建被 Git 忽略的私有配置 overlay，并按现场规则填写模型协议、网关地址、环境变量名、scope 与预算。模型 Key、平台 Token 和评测数据地址只通过运行环境注入，不能写入镜像、仓库或运行日志。交付机应按 [Docker 部署](../docker-deployment.md) 执行构建、健康检查和前端冒烟，并把镜像摘要和环境 manifest 记录到脱敏测试附件。
 
-## 6. 线上测试地址
+## 6. 本地验收入口
 
 ```text
-公开测试地址：[待团队部署后填写]
-访问说明：[待填写]
-测试账号或演示方式：[待填写；不得写入生产密钥]
-部署 commit：[待填写]
+API 健康检查：`http://127.0.0.1:7318/health`
+前端控制台：`http://127.0.0.1:7318/`（Compose 合并镜像）或 `http://127.0.0.1:5173/`（Vite 开发服务器）
+验收版本：`337efb2020e536d2bb9deb7408f2f7d9ece45d03`
+访问方式：使用启动脚本打印的本次 `XUANSHU_SERVER_TOKEN`，在页面钥匙按钮中输入；模型 Key 仅在“模型设置”页临时配置。
+
+这两个地址均为本机回环地址，不是公开线上服务，不提供共享账号或生产凭据。
 ```
 
 ## 7. 常见问题

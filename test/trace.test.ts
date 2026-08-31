@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import { AuditChain } from "../src/audit.js";
 import { appendRunReview, listPersistedRuns, loadDecisionTrace } from "../src/trace.js";
+import { projectRunSummary, RUN_SUMMARY_FILE } from "../src/run-summary.js";
 import type { RunState } from "../src/types.js";
 
 const roots: string[] = [];
@@ -13,6 +14,27 @@ afterEach(async () => {
 });
 
 describe("decision trace", () => {
+  it("lists an existing compact summary without parsing the complete state", async () => {
+    const root = await mkdtemp(join(tmpdir(), "xuan-trace-summary-"));
+    roots.push(root);
+    const runId = "11111111-1111-4111-8111-111111111111";
+    const runRoot = join(root, runId);
+    await mkdir(runRoot, { recursive: true });
+    await writeFile(join(runRoot, "state.json"), "{ incomplete state", "utf8");
+    await writeFile(join(runRoot, RUN_SUMMARY_FILE), JSON.stringify({
+      id: runId,
+      status: "completed",
+      phase: "done",
+      task: "Compact summary fixture",
+      createdAt: "2026-08-31T00:00:00.000Z",
+      turns: 3,
+      toolCalls: 4,
+      lessons: 1,
+    }), "utf8");
+
+    await expect(listPersistedRuns(root)).resolves.toEqual([expect.objectContaining({ id: runId, task: "Compact summary fixture", status: "completed" })]);
+  });
+
   it("builds a hash-verified external trace and attaches human correction", async () => {
     const root = await mkdtemp(join(tmpdir(), "xuan-trace-"));
     roots.push(root);
@@ -70,6 +92,7 @@ describe("decision trace", () => {
       repeatedActions: {},
     } satisfies RunState;
     await writeFile(join(runRoot, "state.json"), JSON.stringify(state), "utf8");
+    await writeFile(join(runRoot, RUN_SUMMARY_FILE), JSON.stringify(projectRunSummary(state)), "utf8");
 
     const review = await appendRunReview(root, runId, {
       sequence: action.sequence,

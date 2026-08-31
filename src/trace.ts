@@ -1,14 +1,30 @@
 import { randomUUID } from "node:crypto";
-import { appendFile, mkdir, readFile, readdir } from "node:fs/promises";
-import { join } from "node:path";
+import { appendFile, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { basename, join } from "node:path";
 import { verifyAuditChain } from "./audit.js";
 import { renderRunHandoff } from "./handoff.js";
 import { sanitizeSecrets } from "./sanitize.js";
+import { isPersistedRunSummary, projectRunSummary, RUN_SUMMARY_FILE, type PersistedRunSummary } from "./run-summary.js";
 import { inferTrajectorySource, type TrajectorySource } from "./session-trajectory.js";
 import type { AuditRecord, RunLineage, RunReview, RunState, TaskRequest } from "./types.js";
 import { createInitialWebReasoningState, normalizeWebReasoningState } from "./web-reasoning/state.js";
 
 const SAFE_RUN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const runSummaryBackfills = new Map<string, Promise<void>>();
+
+export interface PendingRunSummary {
+  id: string;
+  status: "indexing";
+  phase: "intake";
+  task: string;
+  createdAt: string;
+  turns: 0;
+  toolCalls: 0;
+  lessons: 0;
+  indexPending: true;
+}
+
+export type ListedRunSummary = PersistedRunSummary | PendingRunSummary;
 
 export type TraceKind =
   | "turn"
@@ -409,44 +425,66 @@ export async function prepareRunContinuation(
   };
 }
 
-export async function listPersistedRuns(artifactRoot: string): Promise<Array<{
-  id: string;
-  status: RunState["status"];
-  phase: RunState["phase"];
-  task: string;
-  category?: string;
-  createdAt: string;
-  finishedAt?: string;
-  turns: number;
-  toolCalls: number;
-  lessons: number;
-  lineage?: RunLineage;
-}>> {
+async function readStoredRunSummary(directory: string): Promise<PersistedRunSummary | undefined> {
+  try {
+    const parsed = JSON.parse(await readFile(join(directory, RUN_SUMMARY_FILE), "utf8")) as unknown;
+    return isPersistedRunSummary(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function writeStoredRunSummary(directory: string, state: RunState): Promise<void> {
+  const summary = projectRunSummary(state);
+  await writeFile(join(directory, RUN_SUMMARY_FILE), `${JSON.stringify(sanitizeSecrets(summary))}\n`, "utf8");
+}
+
+function queueSummaryBackfill(artifactRoot: string, directories: string[]): void {
+  if (directories.length === 0 || runSummaryBackfills.has(artifactRoot)) return;
+  const task = (async () => {
+    for (const directory of directories) {
+      try {
+        if (await readStoredRunSummary(directory)) continue;
+        const state = JSON.parse(await readFile(join(directory, "state.json"), "utf8")) as RunState;
+        await writeStoredRunSummary(directory, state);
+      } catch {
+        // An explicit run-detail request remains the source of corruption errors.
+      }
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+  })().finally(() => runSummaryBackfills.delete(artifactRoot));
+  runSummaryBackfills.set(artifactRoot, task);
+}
+
+export async function listPersistedRuns(artifactRoot: string): Promise<ListedRunSummary[]> {
   await mkdir(artifactRoot, { recursive: true });
   const entries = await readdir(artifactRoot, { withFileTypes: true });
-  const summaries = [];
-  for (const entry of entries) {
-    if (!entry.isDirectory() || !SAFE_RUN_ID.test(entry.name)) continue;
-    try {
-      const state = JSON.parse(await readFile(join(artifactRoot, entry.name, "state.json"), "utf8")) as RunState;
-      summaries.push({
-        id: state.id,
-        status: state.status,
-        phase: state.phase,
-        task: state.task.task.slice(0, 240),
-        ...(state.task.metadata.category ? { category: state.task.metadata.category } : {}),
-        createdAt: state.createdAt,
-        ...(state.finishedAt ? { finishedAt: state.finishedAt } : {}),
-        turns: state.turns,
-        toolCalls: state.toolCalls,
-        lessons: state.lessons?.length ?? 0,
-        ...(state.lineage ? { lineage: state.lineage } : {}),
-      });
-    } catch {
-      // Ignore incomplete/corrupt directories; the trace endpoint will surface corruption for explicit IDs.
-    }
-  }
-  return summaries.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  const directories = entries
+    .filter((entry) => entry.isDirectory() && SAFE_RUN_ID.test(entry.name))
+    .map((entry) => join(artifactRoot, entry.name));
+  const listed = (await Promise.all(directories.map(async (directory): Promise<{ summary: ListedRunSummary; directory: string } | undefined> => {
+    const summary = await readStoredRunSummary(directory);
+    if (summary) return { summary, directory };
+    let createdAt: string;
+    try { createdAt = (await stat(join(directory, "state.json"))).mtime.toISOString(); } catch { return undefined; }
+    return {
+      directory,
+      summary: {
+        id: basename(directory),
+        status: "indexing",
+        phase: "intake",
+        task: "正在索引历史运行资料…",
+        createdAt,
+        turns: 0,
+        toolCalls: 0,
+        lessons: 0,
+        indexPending: true,
+      },
+    };
+  }))).filter((item): item is { summary: ListedRunSummary; directory: string } => item !== undefined);
+  const pendingDirectories = listed.filter((item) => item.summary.status === "indexing").map((item) => item.directory);
+  queueSummaryBackfill(artifactRoot, pendingDirectories);
+  return listed.map((item) => item.summary).sort((left, right) => right.createdAt.localeCompare(left.createdAt));
 }
 
 export async function loadPersistedRun(artifactRoot: string, runId: string): Promise<RunState | undefined> {

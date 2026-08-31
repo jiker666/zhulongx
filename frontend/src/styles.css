@@ -551,6 +551,11 @@ a {
   animation: run-pulse 1.8s ease-in-out infinite;
 }
 
+.run-card-indexing .run-status-pulse {
+  background: var(--amber);
+  animation: run-pulse 1.8s ease-in-out infinite;
+}
+
 .run-card-failed .run-status-pulse,
 .run-card-aborted .run-status-pulse {
   background: var(--danger);

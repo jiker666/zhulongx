@@ -3,6 +3,7 @@ import { Badge, Card } from "./ui";
 import type { RunSummary } from "../types/api";
 
 const statusLabels: Record<string, string> = {
+  indexing: "正在索引",
   queued: "排队中",
   running: "运行中",
   completed: "已完成",

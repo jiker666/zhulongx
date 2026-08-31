@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { AuditChain } from "./audit.js";
 import { sanitizeSecrets } from "./sanitize.js";
+import { isPersistedRunSummary, projectRunSummary, RUN_SUMMARY_FILE } from "./run-summary.js";
 import { readAuditRecords } from "./trace.js";
 import type { AuditRecord, RunState } from "./types.js";
 
@@ -44,6 +45,23 @@ function recoveredState(state: RunState, record: AuditRecord): RunState {
   };
 }
 
+async function hasCurrentTerminalSummary(directory: string, statePath: string): Promise<boolean> {
+  try {
+    const summaryPath = join(directory, RUN_SUMMARY_FILE);
+    const [content, summaryStats, stateStats] = await Promise.all([
+      readFile(summaryPath, "utf8"),
+      stat(summaryPath),
+      stat(statePath),
+    ]);
+    const summary = JSON.parse(content) as unknown;
+    return isPersistedRunSummary(summary)
+      && !ACTIVE_STATUSES.has(summary.status)
+      && summaryStats.mtimeMs >= stateStats.mtimeMs;
+  } catch {
+    return false;
+  }
+}
+
 export async function recoverInterruptedRuns(artifactRoot: string): Promise<RunRecoveryResult> {
   await mkdir(artifactRoot, { recursive: true });
   const entries = await readdir(artifactRoot, { withFileTypes: true });
@@ -53,6 +71,12 @@ export async function recoverInterruptedRuns(artifactRoot: string): Promise<RunR
     if (!entry.isDirectory() || !SAFE_RUN_ID.test(entry.name)) continue;
     const directory = join(artifactRoot, entry.name);
     const statePath = join(directory, "state.json");
+    // A newer terminal summary is a safe fast path. Active or stale summaries
+    // always fall through to the full state before restart recovery decides.
+    if (await hasCurrentTerminalSummary(directory, statePath)) {
+      inspected += 1;
+      continue;
+    }
     let state: RunState;
     try {
       state = JSON.parse(await readFile(statePath, "utf8")) as RunState;
@@ -78,7 +102,9 @@ export async function recoverInterruptedRuns(artifactRoot: string): Promise<RunR
         recoveryPolicy: "no-replay",
       });
     }
-    await writeJsonAtomic(statePath, recoveredState(state, record));
+    const recoveredRun = recoveredState(state, record);
+    await writeJsonAtomic(statePath, recoveredRun);
+    await writeJsonAtomic(join(directory, RUN_SUMMARY_FILE), projectRunSummary(recoveredRun));
     recovered.push(entry.name);
   }
   return { inspected, recovered };

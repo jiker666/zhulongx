@@ -8,7 +8,7 @@ import { dashboardHtml } from "./dashboard.js";
 import { ExperienceStore, type ExperienceUpdate } from "./experience.js";
 import { RunManager } from "./run-manager.js";
 import { recoverInterruptedRuns } from "./run-recovery.js";
-import { XuanShuRuntime, writeJson, type RuntimeModelSessionConfig } from "./runtime.js";
+import { XuanShuRuntime, writeRunState, type RuntimeModelSessionConfig } from "./runtime.js";
 import { inferTrajectorySource } from "./session-trajectory.js";
 import { appendRunReview, listPersistedRuns, loadDecisionTrace, loadPersistedRun, prepareRunContinuation, readAuditRecords, truncateTraceData } from "./trace.js";
 import { ManualJobManager, validateManualJobInput } from "./manual-jobs.js";
@@ -870,13 +870,13 @@ export function createApiServer(config: AppConfig, dependencies: ApiServerDepend
           state.writeup = generatedWriteup;
           delete state.writeupError;
           await new AuditChain(join(config.runtime.artifactRoot, id, "audit.jsonl"), id).append("writeup.generated", { characters: generatedWriteup.length, source: "operator_request" }, { source: "orchestrator", actor: "writeup-generator" });
-          await writeJson(join(config.runtime.artifactRoot, id, "state.json"), state);
+          await writeRunState(join(config.runtime.artifactRoot, id), state);
           json(response, 200, { writeup: state.writeup, state });
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           state.writeupError = sanitizeSensitiveText(message).slice(0, 600);
           await new AuditChain(join(config.runtime.artifactRoot, id, "audit.jsonl"), id).append("writeup.failed", { error: state.writeupError, source: "operator_request" }, { source: "orchestrator", actor: "writeup-generator" });
-          await writeJson(join(config.runtime.artifactRoot, id, "state.json"), state);
+          await writeRunState(join(config.runtime.artifactRoot, id), state);
           json(response, 400, { error: state.writeupError, state });
         } finally { request.off("aborted", abort); }
         return;

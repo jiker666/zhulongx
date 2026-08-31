@@ -22,6 +22,10 @@ npm --prefix frontend ci --ignore-scripts
 | 路径 | 责任 |
 | --- | --- |
 | `src/runtime.ts` | 生命周期、状态转换、持久化与 tool cleanup |
+| `src/run-summary.ts` | 运行列表轻量摘要投影；完整状态仅由详情接口读取 |
+| `src/knowledge-store.ts` | 首次规划前的本地知识检索、来源/信任标记和有界上下文 |
+| `src/submission-policy.ts` | 题库/严格任务的候选提交格式、证据 grounding 和独立验证闸门 |
+| `src/handoff.ts` | 脱敏运行交接摘要，支持恢复、人工交接和故障复盘 |
 | `src/policy.ts` | scope、路径/主机/端口/程序、预算与停滞门禁 |
 | `src/tools.ts` | 有界 AgentTool 与结构化工具总线 |
 | `src/artifact-tools.ts` | ZIP 解压和二进制字节搜索等本地受限材料工具 |
@@ -30,6 +34,8 @@ npm --prefix frontend ci --ignore-scripts
 | `src/session-trajectory.ts`、`src/trace.ts` | 轨迹事件、上下文投影、初学者行动说明 |
 | `src/tool-catalog.ts` | 工具描述、策略元数据和模型可见目录 |
 | `frontend/src/features/decision-stream/` | 审计事件到前端决策流的投影、实时合并与可读标签 |
+| `frontend/src/features/writeup/` | 结构化 WP 渲染、Flag/最终提交和可下载报告 |
+| `frontend/src/pages/ModelSettingsPage.tsx` | 当前 API 进程的 OpenAI-compatible 模型临时配置 |
 | `test/` | 确定性 faux-model 与策略、预算、审计、运行时回归测试 |
 
 ## 3. 新增工具的工程门禁
@@ -56,17 +62,22 @@ npm --prefix frontend ci --ignore-scripts
 ## 5. 本地开发与验证
 
 ```bash
-# 后端静态检查、lint、单元测试与构建；这是合并门禁
+# 后端静态检查、lint、串行确定性测试与构建；这是合并门禁
 npm run check
 
 # 前端构建
 npm --prefix frontend run build
+
+# Docker Compose 语法校验（需要 docker-compose 或 docker compose）
+XUANSHU_SERVER_TOKEN=validation-only docker-compose config
 
 # 启动审计台（仅在已配置本地环境变量时）
 npm run serve
 ```
 
 开发时优先使用 faux-model 测试覆盖编排行为。真实模型或真实目标的验证属于显式 opt-in 评测，不应成为默认回归测试的一部分。
+
+`npm test` 使用 `--no-file-parallelism` 顺序执行测试文件。sandbox 测试包含 500ms 级别的受控探针，串行运行可以避免并发启动抖动造成非确定性超时；测试逻辑本身仍保持并行安全。
 
 ## 6. 提交前检查
 

@@ -21,7 +21,7 @@ export function RunsPage() {
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<RunSort>("newest");
   const [pageNumber, setPageNumber] = useState(1);
-  const query = useQuery({ queryKey: ["runs"], queryFn: ({ signal }) => getRuns(signal), refetchInterval: (state) => state.state.data?.runs.some((run) => run.status === "running" || run.status === "queued") ? 5_000 : false });
+  const query = useQuery({ queryKey: ["runs"], queryFn: ({ signal }) => getRuns(signal), refetchInterval: (state) => state.state.data?.runs.some((run) => run.status === "running" || run.status === "queued") ? 5_000 : state.state.data?.runs.some((run) => run.indexPending) ? 2_000 : false });
   const runs = query.data?.runs ?? [];
   const running = runs.filter((run) => run.status === "running" || run.status === "queued").length;
   const completed = runs.filter((run) => run.status === "completed").length;

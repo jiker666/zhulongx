@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import { AuditChain, verifyAuditChain } from "../src/audit.js";
 import { recoverInterruptedRuns, RESTART_RECOVERY_EVENT, RESTART_RECOVERY_REASON } from "../src/run-recovery.js";
+import { projectRunSummary, RUN_SUMMARY_FILE } from "../src/run-summary.js";
 import { readAuditRecords } from "../src/trace.js";
 import type { RunState } from "../src/types.js";
 
@@ -43,6 +44,22 @@ function runningState(root: string, id: string): RunState {
 }
 
 describe("run restart recovery", () => {
+  it("uses a current terminal summary without parsing the full state", async () => {
+    const root = await mkdtemp(join(tmpdir(), "xuan-recovery-summary-"));
+    roots.push(root);
+    const runId = "66666666-6666-4666-8666-666666666666";
+    const runRoot = join(root, runId);
+    await mkdir(runRoot, { recursive: true });
+    await writeFile(join(runRoot, "state.json"), "{ incomplete state", "utf8");
+    await writeFile(join(runRoot, RUN_SUMMARY_FILE), JSON.stringify(projectRunSummary({
+      ...runningState(root, runId),
+      status: "completed",
+      phase: "done",
+    })), "utf8");
+
+    await expect(recoverInterruptedRuns(root)).resolves.toEqual({ inspected: 1, recovered: [] });
+  });
+
   it("settles an interrupted run without replaying work and only appends once", async () => {
     const root = await mkdtemp(join(tmpdir(), "xuan-recovery-"));
     roots.push(root);

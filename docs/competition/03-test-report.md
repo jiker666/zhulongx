@@ -8,30 +8,35 @@
 
 | 项目 | 说明 |
 | --- | --- |
-| 代码版本 | 本仓库 `main` 分支的提交版本（打包时填入 commit SHA） |
-| 后端运行时 | Node.js `>=22.19.0` |
+| 代码版本 | `337efb2020e536d2bb9deb7408f2f7d9ece45d03`（`main`） |
+| 执行日期 | 2026-08-31（UTC） |
+| 后端运行时 | Node.js `v26.3.0`（满足 `>=22.19.0`） |
 | 前端构建 | `frontend/` 的生产构建 |
 | 测试框架 | Vitest、TypeScript、ESLint |
 | 模型依赖 | 默认测试使用确定性 faux-model，不发起真实模型请求 |
 
 ## 3. 已执行的回归验证
 
-在本次二进制分析能力与竞赛材料整理完成后，已执行：
+在同步 GitHub 最新源码、修正测试文件并行启动抖动后，已执行：
 
 ```text
 npm run check
 结果：通过
 覆盖：typecheck、lint、Vitest 单元测试、后端构建
-测试：359 passed，1 skipped（现有可选浏览器测试）
+测试文件：61 passed，1 skipped
+测试用例：387 passed，1 skipped（可选浏览器测试）
 
 npm --prefix frontend run build
 结果：通过
 
 git diff --check
-结果：通过
+结果：通过（本次材料修改后再次执行）
+
+XUANSHU_SERVER_TOKEN=validation-only docker-compose config
+结果：通过（Compose 配置可解析；本机使用独立 `docker-compose` 命令）
 ```
 
-最终打包前必须在干净工作区重新运行以上命令，并把当次命令输出、执行日期、Node 版本和 commit SHA 写入随包测试记录。任何依赖升级、配置改变或重建 sandbox 后均应重新验证。
+本次 `npm run check` 的测试命令固定使用 `--no-file-parallelism`，以避免 sandbox 进程探针因并行启动抖动误判超时。当前机器未提供可用的 Docker daemon，因此未宣称完成镜像构建或容器启动；在交付机上应继续执行 `docker-compose build`、`docker-compose up -d`、API `/health` 和前端冒烟验证，并记录镜像摘要。任何依赖升级、配置改变或重建 sandbox 后均应重新验证。
 
 ## 4. 覆盖重点
 
@@ -44,6 +49,8 @@ git diff --check
 | 二进制工具链 | Radare2/JADX 固定版本和 SHA-256 校验、能力清单与配置 allowlist | 不可复现依赖、未声明程序 |
 | 前端投影 | 轨迹事件合并、策略状态、可读标签和二进制事件展示 | 初学者无法理解 agent 行为 |
 | 前端构建 | 生产打包 | 交付界面不可用 |
+| 历史运行列表 | 摘要索引优先、历史状态后台回填、详情仍读取完整状态 | 大量运行产物阻塞审计台 |
+| Compose 配置 | 服务依赖、回环端口、named volume、sandbox `network_mode: none` | 一键部署配置错误 |
 
 ## 5. 验收标准
 
@@ -52,6 +59,7 @@ git diff --check
 3. 所有阻塞型工具必须可由 `AbortSignal` 终止，输出受配置上限约束。
 4. 运行产物不得出现模型密钥、Authorization、Cookie 或隐藏推理。
 5. 前端生产构建必须成功，轨迹中能解释“做什么、为什么、影响、结果、下一步”。
+6. 交付机必须完成 Compose 镜像构建、健康检查和本地前端冒烟；若 Docker daemon 不可用，应在测试记录中明确标记为未执行。
 
 ## 6. 后续实战评测记录模板
 
