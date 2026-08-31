@@ -1,38 +1,69 @@
 # XH-202609 竞赛交付包
 
-本目录对应 `XH-202609 具备自主决策能力的通用网络安全智能体技术研究` 的程序、文档与声明材料。源码位于仓库根目录；本文档只描述当前仓库可复核的实现与提交组织方式，不将模型密钥、平台令牌、Cookie、授权头、题目答案或隐藏推理纳入交付物。
+本目录是“烛龙·玄枢——具备自主决策能力的通用网络安全智能体”的比赛交付索引。源码位于仓库根目录，核心技术材料均以当前 `main` 的 `723f047` 为可复核基线。所有材料遵循同一安全边界：不纳入模型密钥、平台令牌、Cookie、Authorization、未公开题目答案、真实目标信息或隐藏推理。
 
-## 交付物索引
+本次交付范围是源码、方案设计、开发、测试、用户部署和技术报告。**不以 PPT 或演示视频作为本轮开发和交付要求**；仓库中已有的历史文件仅作保留，不作为本索引的完成项或验收条件。
 
-| 类别 | 仓库内材料 | 状态 |
-| --- | --- | --- |
-| 编译前源代码 | 仓库根目录 `src/`、`frontend/`、`test/`、`tools/`、`config/` | 已提供 |
-| 本地部署手册 | [04-user-and-deployment-guide.md](04-user-and-deployment-guide.md) | 已提供 |
-| 方案设计 | [01-solution-design.md](01-solution-design.md) | 不在本次交付范围 |
-| 开发文档 | [02-development-guide.md](02-development-guide.md) | 已提供 |
-| 测试文档 | [03-test-report.md](03-test-report.md) | 已提供 |
-| 用户手册 | [04-user-and-deployment-guide.md](04-user-and-deployment-guide.md) | 已提供 |
-| 技术报告 | [05-technical-report.md](05-technical-report.md) | 已提供 |
-| 原创性及保密性声明 | [07-originality-and-confidentiality.md](07-originality-and-confidentiality.md) | 待签字/盖章 |
-| 报名与邮件提交模板 | [08-submission-application-template.md](08-submission-application-template.md) | 待填写 |
+## 核心交付物
 
-## 打包前清单
+| 类别 | 仓库内材料 | 状态 | 用途 |
+| --- | --- | --- | --- |
+| 编译前源代码 | 根目录 `src/`、`frontend/`、`test/`、`tools/`、`config/` | 已完成 | 可构建、可审计的完整实现 |
+| 方案设计文档 | [01-solution-design.md](01-solution-design.md) | 已完成 | 目标、架构、决策闭环、安全控制与需求追溯 |
+| 开发文档 | [02-development-guide.md](02-development-guide.md) | 已完成 | 环境、模块边界、扩展门禁、调试和提交规范 |
+| 测试报告 | [03-test-report.md](03-test-report.md) | 已完成 | 验收基线、执行结果、覆盖范围、限制和复测清单 |
+| 用户与部署手册 | [04-user-and-deployment-guide.md](04-user-and-deployment-guide.md) | 已完成 | 本地/Docker 启动、控制台、模型设置、Flag/WP 与现场操作 |
+| 技术报告 | [05-technical-report.md](05-technical-report.md) | 已完成 | 技术路线、实现、创新点、验证和局限 |
 
-1. 在干净目录克隆本仓库，按部署手册完成 `npm run check` 和前端构建；记录最终 commit SHA。
-2. 删除 `.env`、`.xuan-shu/`、本地运行产物、模型密钥、平台令牌、Cookie、授权头和私有题目材料。仓库的 `.gitignore` 已排除主要运行目录，但打包前仍须人工复核。
-3. 完成 [07-originality-and-confidentiality.md](07-originality-and-confidentiality.md) 的团队信息、签字与学校/单位盖章。
-4. 从报名系统下载审核通过的申报表，按主办方要求加盖公章并扫描为 PDF；该文件由报名系统生成，不能由本仓库代替。
-5. 将源码与本目录材料上传百度网盘，填写网盘链接、提取码并截取包含上传时间的文件列表截图。
-6. 按 [08-submission-application-template.md](08-submission-application-template.md) 的邮件主题与附件清单向主办方指定邮箱发送。
+## 支撑材料
+
+| 材料 | 说明 |
+| --- | --- |
+| [系统架构](../architecture.md) | 完整模块职责、威胁模型、隔离和恢复语义 |
+| [工具副作用与审计契约](../tool-side-effects.md) | 工具读写、网络、预算和审计边界 |
+| [评测协议](../evaluation.md) | 泛化、鲁棒性、消融和评测账本方法 |
+| [Docker 部署](../docker-deployment.md) | Compose、端口、环境变量与诊断细节 |
+| [模型设置](../model-settings.md) | 临时模型接入与凭据不持久化约束 |
+| [WP 生成](../writeup-generation.md) | 终态 WP 输入、格式、验证和失败降级规则 |
+| [原创性及保密性声明](07-originality-and-confidentiality.md) | 待团队核实、签字和盖章的正式声明模板 |
+| [报名与邮件提交模板](08-submission-application-template.md) | 待按主办方最新规则填写的外部行政材料 |
+
+## 交付验证
+
+本次文档记录的工程验证基线为：
+
+```text
+commit: 723f0475fbbde81af8ab8056668f17df4da7ff2e
+npm run check: 通过（61 个测试文件通过，1 个跳过；387 个用例通过，1 个跳过）
+npm --prefix frontend run build: 通过
+XUANSHU_SERVER_TOKEN=validation-only docker-compose config: 通过
+```
+
+该基线不宣称已在当前机器完成 Docker 镜像构建、容器运行、真实模型或真实比赛平台评测。交付机应依次执行：
+
+```bash
+git diff --check
+npm run check
+npm --prefix frontend run build
+XUANSHU_SERVER_TOKEN=validation-only docker-compose config
+```
+
+在具备 Docker daemon 的现场环境，还应完成 Compose 构建、`/health`、令牌登录、附件上传和只读任务冒烟，并将镜像摘要和结果另存为脱敏测试证据。
+
+## 打包与赛前行政动作
+
+以下事项依赖团队身份、主办方系统或单位流程，不能由源码仓库代替。它们不是核心技术文档的未完成项：
+
+1. 由团队核实并签署 [原创性及保密性声明](07-originality-and-confidentiality.md)，按要求盖章并导出扫描件。
+2. 按主办方最新通知填写报名系统，下载审核通过的申报表并完成盖章流程。
+3. 打包前从工作目录排除 `.env`、`.xuan-shu/`、`workspace/` 私有材料、`node_modules/`、模型密钥、令牌、Cookie、Authorization、未公开题目附件和真实 Flag。
+4. 固定最终 commit SHA，保存 `npm run check`、前端构建、Compose 验证与 Docker 现场复测的脱敏记录。
+5. 按主办方当期规则上传源码与本目录文档；不要将历史 PPT 或演示视频列为本次必交开发产物。
 
 ## 可复核入口
 
-- 运行时和安全边界：[../architecture.md](../architecture.md)
-- 工具副作用与审计事件：[../tool-side-effects.md](../tool-side-effects.md)
-- 二进制/逆向/PWN 工具链：[../binary-toolchain.md](../binary-toolchain.md)
-- 评测与实验方法：[../evaluation.md](../evaluation.md)
-- 参考项目与追加式轨迹设计：[../reference-agent-study.md](../reference-agent-study.md)
-
-## 版本与边界
-
-本文档对应仓库当前 `main` 分支的提交版本。系统仅面向明确授权的竞赛、教学靶场、实验室和安全研究环境；默认 scope 为观察模式，所有主动网络能力必须经过 `PolicyEngine` 和 operator-owned scope 配置。单次运行只能收窄配置范围，不能扩大权限。
+- 代码和运行时边界：[README.md](../../README.md)、[系统架构](../architecture.md)
+- 实际工具副作用：[工具副作用与审计契约](../tool-side-effects.md)
+- 评测与反过拟合方法：[评测协议](../evaluation.md)
+- 终态结论、Flag 和 WP 交付：[用户与部署手册](04-user-and-deployment-guide.md)
+- 一键启动和现场部署：[Docker 部署](../docker-deployment.md)

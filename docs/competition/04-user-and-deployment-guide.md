@@ -1,62 +1,74 @@
-# 用户与部署手册
+# XH-202609 用户与部署手册
 
-## 1. 适用范围
+| 项目 | 内容 |
+| --- | --- |
+| 文档编号 | XH-202609-04 |
+| 版本 | 1.0 |
+| 对应代码基线 | `723f047`（`main`） |
+| 读者 | 参赛队员、现场操作员、部署维护人员 |
+| 编制日期 | 2026-08-31 |
 
-本手册用于本地开发、授权实验室、教学靶场和主办方受控评测环境。使用者必须拥有目标和模型服务的合法授权。系统默认 `scope.mode=observe` 且无授权主机，主动网络能力不会因模型请求而自动开启。
+## 1. 使用范围与安全前提
 
-## 2. 本地部署
+烛龙·玄枢仅用于明确授权的竞赛、教学靶场、实验室与安全研究环境。使用者对目标、模型服务和附件材料的授权负责。系统默认 `scope.mode=observe` 且不配置授权主机；模型请求本身不会开启网络或命令权限。
 
-### 2.1 前置条件
+请在操作前确认：
+
+1. 已取得主办方或环境所有者对任务、目标和数据的明确授权。
+2. operator 已配置最小必要 scope、主机、端口、程序 allowlist 和预算。
+3. 现场使用的模型 Key、服务令牌和网关参数只存在于私有环境或当前进程，不进入仓库、截图、运行描述和比赛压缩包。
+4. 单次运行 scope override 只能收窄既有范围，不能增加主机、程序、路径或将 `observe` 提升为 `controlled`。
+
+## 2. 部署方式概览
+
+| 方式 | 适用场景 | 访问地址 | 特点 |
+| --- | --- | --- | --- |
+| 本地开发模式 | 联调、前端开发、源码调试 | API `http://127.0.0.1:7318/`；Vite `http://127.0.0.1:5173/` | 前后端分开运行，便于定位问题 |
+| Docker Compose | 比赛现场、演示、可重复部署 | `http://127.0.0.1:7318/` | API 与已构建前端合并，配套无外网 sandbox |
+| 主办方托管环境 | 按主办方规则部署 | 由现场配置决定 | 使用私有配置 overlay，不提交敏感参数 |
+
+## 3. 本地开发模式
+
+### 3.1 前置条件
 
 - Node.js `>=22.19.0`
 - npm
-- 已获授权的模型服务环境变量
-- 运行 sandbox 或平台适配时所需的 operator-owned 配置
+- 已授权的模型服务配置（仅在需要真实模型时）
+- 需要命令分析时，准备 Docker 或本地 CTF sandbox
 
-### 2.2 安装与配置
+### 3.2 安装与基础验证
 
 ```bash
 git clone https://github.com/jiker666/zhulong-xuanshu.git
 cd zhulong-xuanshu
-npm install --legacy-peer-deps --ignore-scripts
+npm ci --legacy-peer-deps --ignore-scripts
 npm --prefix frontend ci --ignore-scripts
 cp .env.example .env
-```
 
-在 `.env` 中填写所选模型供应商的 Key。不要把 `.env`、模型密钥、平台令牌、Cookie 或 Authorization 头提交到 Git、截图或比赛压缩包。
-
-先验证工程：
-
-```bash
 npm run check
 npm --prefix frontend run build
 ```
 
-### 2.3 启动审计台
+在 `.env` 或私有环境中设置所需变量，切勿将真实值复制到公共配置：
 
-```bash
-XUANSHU_SERVER_TOKEN="replace-with-a-long-random-value" npm run serve
+```text
+OPENAI_API_KEY=<仅保存在本机私有环境中>
+XUANSHU_SERVER_TOKEN=<本地控制面令牌>
 ```
 
-默认本地地址为 `http://127.0.0.1:7318/`。这是本机测试地址，不等同于可公开访问的线上服务；在非回环地址启动时必须设置服务令牌。
-
-### 2.4 Docker Compose 一键启动
-
-Docker Desktop 启动后，在项目根目录执行：
+启动后端和前端：
 
 ```bash
-./start.command
+# 终端 1：API
+XUANSHU_SERVER_TOKEN="<本地随机令牌>" npm run serve
+
+# 终端 2：Vite 前端
+npm --prefix frontend run dev
 ```
 
-Windows 用户双击 `start.bat`。脚本会自动检查 `docker compose`/`docker-compose`、构建 API + React 合并镜像、启动无外网 `ctf-sandbox`、轮询 `/health`，并打开浏览器。未设置 `XUANSHU_SERVER_TOKEN` 时会生成只用于本次进程的随机令牌并打印；在页面右上角钥匙按钮中输入即可。也可以手动执行：
+服务默认在回环地址监听。通过 `http://127.0.0.1:7318/health` 检查 API，通过 `http://127.0.0.1:5173/` 打开开发控制台。不要将此默认本地地址理解为公开线上服务。
 
-```bash
-XUANSHU_SERVER_TOKEN="replace-with-a-long-random-value" docker-compose up -d --build
-```
-
-默认访问 `http://127.0.0.1:7318/`，端口占用时使用 `XUANSHU_PORT=17318 ./start.command`。停止服务：`docker-compose down`。Compose 将 `workspace/` 只读挂载，运行数据写入 named volumes，sandbox 使用 `network_mode: none`。
-
-### 2.5 启动本地 sandbox（可选）
+### 3.3 可选本地 sandbox
 
 ```bash
 mkdir -p workspace .xuan-shu/work
@@ -64,56 +76,155 @@ sh tools/ctf/run-local-sandbox.sh
 npm run sandbox-health
 ```
 
-sandbox 只执行 operator allowlist 中的结构化程序，并使用独立 scratch；它不直接拥有外网权限。
+sandbox 只执行 operator allowlist 中的结构化程序，输入只读，结果写入逐运行 scratch。它不应通过命令行作为绕过网络策略的通道。
 
-## 3. 控制台操作
+## 4. Docker Compose 一键启动
 
-1. 在控制台创建或选择运行，填写明确的授权任务目标。
-2. 选择或上传只读附件；可点击“添加文件”，也可将文件拖拽到附件投放区。每个运行拥有独立输入和 scratch 边界。
-3. 观察 agent 的任务理解、计划、策略判定、工具结果与 checkpoint。
-4. 需要时停止运行、人工复核证据，或从指定审计事件创建新的分支运行。
-5. 仅在证据、scope 和完成标准满足时接受结论；不要把模型文本当作未经验证的事实。
+### 4.1 macOS / Linux
 
-轨迹界面会以“做什么、为什么、影响、结果、下一步”解释可复核动作。技术事件可以按模型/上下文/策略/工具/子 Agent 来源筛选、检索、回放和分支；隐藏推理和凭据不会显示或保存。
+启动 Docker Desktop 后，在项目根目录执行：
 
-运行记录较多时，审计列表会先读取每次运行保存的轻量摘要；旧运行的摘要在后台补齐，期间卡片会显示“正在索引”。打开具体运行仍会读取完整状态与审计轨迹，历史运行数据不会因列表索引被删改。
-
-### 3.1 模型设置
-
-进入“模型设置”页面，填写 OpenAI-compatible 的 Base URL、API 类型、模型/部署 ID、API Key 和可选网关 AppKey。配置只保存在当前 API 进程内存中，不写入浏览器持久存储、审计链或运行产物；重启服务后需重新填写。无人值守部署请使用被 Git 忽略的私有配置和环境变量。
-
-### 3.2 最终结论与 WP
-
-运行详情页的“运行总结结论”区域会明确展示 `finish_task` 写入的最终提交；识别为 CTF 结果时会以醒目的 `FLAG FOUND` 和 Flag 字段展示。运行有总结时可点击“下载 WP”，已有模型写入的 WP 会直接下载；没有 WP 时，页面会请求 AI 按固定结构生成，并在失败时下载脱敏的结构化兼容报告。报告只使用运行中的公开证据，不从日志猜测答案，也不保存隐藏推理。
-
-## 4. 二进制与附件分析
-
-- 对 ZIP 附件，`extract_archive` 只解压到当前 run scratch，拒绝路径穿越与符号链接。
-- 对二进制/文本材料，`search_artifact` 可进行受限 UTF-8 或十六进制字节搜索。
-- 完整 sandbox 中的 Radare2、JADX、Pwntools、`gdb-multiarch`、`ltrace` 和 binutils 由运行前能力协商和 allowlist 控制。
-- 网络交互仍需使用 scope 内的 HTTP/TCP/Browser 工具；不得以 sandbox 命令绕过网络策略。
-
-## 5. 托管评测
-
-主办方托管模式应以 `config/container.yaml` 为基础创建被 Git 忽略的私有配置 overlay，并按现场规则填写模型协议、网关地址、环境变量名、scope 与预算。模型 Key、平台 Token 和评测数据地址只通过运行环境注入，不能写入镜像、仓库或运行日志。交付机应按 [Docker 部署](../docker-deployment.md) 执行构建、健康检查和前端冒烟，并把镜像摘要和环境 manifest 记录到脱敏测试附件。
-
-## 6. 本地验收入口
-
-```text
-API 健康检查：`http://127.0.0.1:7318/health`
-前端控制台：`http://127.0.0.1:7318/`（Compose 合并镜像）或 `http://127.0.0.1:5173/`（Vite 开发服务器）
-验收版本：`337efb2020e536d2bb9deb7408f2f7d9ece45d03`
-访问方式：使用启动脚本打印的本次 `XUANSHU_SERVER_TOKEN`，在页面钥匙按钮中输入；模型 Key 仅在“模型设置”页临时配置。
-
-这两个地址均为本机回环地址，不是公开线上服务，不提供共享账号或生产凭据。
+```bash
+./start.command
 ```
 
-## 7. 常见问题
+首次缺少执行权限时：
 
-| 现象 | 排查方式 |
-| --- | --- |
-| 工具被拒绝 | 检查 operator scope、程序 allowlist、路径、主机、端口和预算；不能用 per-run override 扩权 |
-| 运行停止或超时 | 查看 checkpoint、错误分类与审计链；优先调整计划或配置，不要盲目重复 |
-| 前端无实时更新 | 检查服务令牌、SSE 连接和运行状态；历史事件可从 audit 轨迹回放 |
-| sandbox 不可用 | 运行 `npm run sandbox-health`，核对 sidecar 与能力清单；不要临时放开程序白名单 |
-| 模型或平台限流 | 查看模型速率门控和退避记录，降低并发或等待额度恢复 |
+```bash
+chmod +x start.command
+./start.command
+```
+
+### 4.2 Windows
+
+启动 Docker Desktop 后，双击 `start.bat`。也可以在命令提示符中从项目根目录运行该脚本。
+
+### 4.3 脚本行为
+
+两个脚本都会：
+
+1. 检查 `docker compose` 或兼容的 `docker-compose`；
+2. 在未设置 `XUANSHU_SERVER_TOKEN` 时生成一次性随机令牌；
+3. 构建 API 与 React 前端合并镜像，并启动 `xuanshu` 与 `ctf-sandbox`；
+4. 最多等待 120 秒轮询 `/health`；
+5. 服务健康后自动打开 `http://127.0.0.1:<端口>/`；
+6. 将本次生成的服务令牌打印到终端，供控制台右上角钥匙按钮输入。
+
+默认端口为 `7318`。端口被占用时：
+
+```bash
+XUANSHU_PORT=17318 ./start.command
+```
+
+手工启动示例：
+
+```bash
+XUANSHU_SERVER_TOKEN="<现场随机令牌>" docker compose up -d --build
+```
+
+当前机器仅有独立命令时，将 `docker compose` 替换为 `docker-compose`。停止服务：
+
+```bash
+docker compose ps
+docker compose logs --tail=100 xuanshu ctf-sandbox
+docker compose down
+```
+
+### 4.4 容器边界
+
+Compose 仅将 API 端口绑定至 `127.0.0.1`；`workspace/` 以只读方式挂载；运行数据写入 named volumes；`ctf-sandbox` 使用 `network_mode: none`。网络工具仍由 API 进程中的 `PolicyEngine` 与 scope 控制，安装更多 sandbox 工具不会增加网络权限。
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `XUANSHU_SERVER_TOKEN` | 启动脚本临时生成 | 控制面 Bearer 令牌；手动启动时必须设置 |
+| `XUANSHU_PORT` | `7318` | 宿主机回环端口 |
+| `OPENAI_API_KEY` | 空 | operator 管理的默认模型密钥 |
+| `XUANSHU_INSTALL_HEAVY_CTF_TOOLS` | `false` | 是否构建扩展工具；会增加构建时间和镜像体积 |
+
+## 5. 控制台操作指南
+
+### 5.1 创建任务和添加附件
+
+1. 打开控制台，在右上角钥匙按钮输入本次 API 服务令牌。
+2. 创建运行，填写明确、可授权的任务目标。
+3. 添加附件：可点击“添加文件”，也可将文件直接拖拽到附件投放区。
+4. 确认任务描述、附件和授权范围后启动运行。
+
+上传文件进入本次运行的只读输入边界。不要上传无权使用的生产数据、真实凭据、个人信息或含密钥的配置文件。ZIP 解压和二进制搜索均有条目、字节、模式和输出限制。
+
+### 5.2 阅读 Decision Observatory
+
+运行详情以事实投影展示自主决策闭环，而不是展示模型隐藏思维。可见信息包括：
+
+| 区域 | 含义 | 操作建议 |
+| --- | --- | --- |
+| Mission Control | 状态、阶段、回合、工具、策略和审计完整性 | 先确认是否仍在运行、阻塞或已终态 |
+| Current Decision / Timeline | 公开的行动、理由、影响、结果和下一步 | 将其作为证据导向的操作解释，不视为隐藏推理 |
+| Hypothesis / Evidence Graph | 假设状态、来源、支持与矛盾证据 | 关注是否存在独立验证，而非单一文本结论 |
+| Policy Details | 允许或拒绝的具体原因 | 被拒绝时检查 scope、allowlist、预算或重复动作 |
+| Replay / Fork / Resume | 按审计序号回放、创建分支或继续任务 | 分支只继承公开且已脱敏的轨迹；父运行不变 |
+| Human Review | 对事实作正确/错误/不确定标注 | 人工复核不覆盖原审计链 |
+
+连续无证据、重复动作或工具失败接近阈值时，运行会要求 checkpoint 和策略修订。应查看失败分类与下一步依据，不能通过反复点击或扩大单次 scope 强行绕过该门禁。
+
+### 5.3 模型设置
+
+进入“模型设置”，可填写 OpenAI-compatible Base URL、API 类型、模型/部署 ID、API Key、可选 AppKey 和推理格式。配置只保存于当前 API 进程内存：
+
+- 不写入浏览器 `localStorage` 或 `sessionStorage`；
+- 不由设置读取接口回显 API Key；
+- 不写入 audit、state、transcript 或 WP；
+- 服务重启后自动清除，需重新配置。
+
+无人值守或比赛现场长期部署时，使用被 Git 忽略的私有配置和环境变量。页面内不得粘贴或截图公开任何真实密钥。
+
+### 5.4 最终结论、Flag 与 WP 下载
+
+终态运行的“运行总结结论”区域显示结构化 summary。存在 CTF submission 时，页面会以醒目的 `FLAG FOUND` 与独立 Flag 字段展示最终值。该值来自 `finish_task` 和验证记录，系统不会从模型聊天文本或日志中猜测 Flag。
+
+点击“下载 WP”后：
+
+1. 已持久化 WP 直接下载；
+2. 没有 WP 时，系统请求独立生成步骤；
+3. 生成器只使用运行的公开、脱敏事实，输出固定结构的竞赛 WP；
+4. 生成失败时下载结构化兼容报告，并显示受限错误原因；不会编造解题脚本、证据或答案。
+
+WP 生成只允许在 `completed`、`blocked`、`failed` 或 `aborted` 等终态运行上发起。严格提交任务仍以独立验证闸门为准，人工应在提交平台前复核最终结论和授权范围。
+
+## 6. 现场运行检查清单
+
+比赛或演示开始前：
+
+1. 固定 Git commit，运行 `npm run check`、前端构建和 Compose 配置检查。
+2. 有 Docker daemon 时，完成 Compose 构建、`/health`、令牌登录和只读附件冒烟。
+3. 以最小 scope 准备现场目标；确认主机、端口、工具白名单和预算。
+4. 使用本次启动生成的服务令牌；模型密钥留在私有环境中。
+5. 验证可拖拽附件、可查看决策轨迹、可显示最终结论/Flag、可下载 WP。
+6. 准备脱敏的测试证据，避免屏幕录像、截图或导出中含 Key、Cookie、Authorization、真实目标信息或未公开答案。
+
+比赛结束后：停止容器或本地服务，清理临时 `.xuan-shu/` 运行产物和私有 `.env`，仅保留脱敏、可提交的文档与验证记录。
+
+## 7. 备份、恢复与停机
+
+| 对象 | 位置 | 说明 |
+| --- | --- | --- |
+| 完整运行状态 | `.xuan-shu/runs/<run-id>/state.json` 或 Docker 数据卷 | 仅用于详情和恢复；含任务信息，应按敏感级别保存 |
+| 审计与人工复核 | `audit.jsonl`、`reviews.jsonl` | 审计链追加，人工复核不改写原始事件 |
+| 交接摘要 | `handoff.md` | 脱敏、限长，供恢复与人工交接参考 |
+| 运行列表索引 | `summary.json` | 可由完整状态后台补齐，不代替完整事实 |
+
+服务重启后，未完成运行会按 no-replay 语义结算，避免自动重复副作用。需要继续分析时，请在控制台使用 Resume 或从指定审计序号 Fork，在新的独立 run 中审查范围和下一步；不要手工复制旧命令进行未经复核的重放。
+
+## 8. 常见问题
+
+| 现象 | 原因或检查项 | 处理方式 |
+| --- | --- | --- |
+| 无法访问控制台 | API 未健康、端口被占用或令牌错误 | 检查 `/health`、启动脚本输出、`docker compose ps` 和端口 |
+| 工具被策略拒绝 | scope、主机/端口、程序、路径、预算或重复动作不满足 | 查看 Policy Details；由 operator 调整完整配置，不能使用 run override 扩权 |
+| 运行停止或要求修订 | checkpoint、工具失败、无证据或重复动作阈值触发 | 阅读失败分类、计划变化与证据，再决定是否继续 |
+| 前端不实时刷新 | SSE、服务令牌或后端连接异常 | 刷新后使用审计回放；检查 API 与浏览器控制台 |
+| 历史运行显示“正在索引” | 老运行尚未生成 `summary.json` | 等待后台回填；详情仍可读取完整状态 |
+| WP 无法生成 | 运行未终态、模型未配置、公开事实不足或格式校验失败 | 先终态化并检查 writeup 事件；不手工补造答案/脚本 |
+| sandbox 不可用 | Docker/socket/能力清单或 allowlist 不匹配 | 查看 `npm run sandbox-health` 和容器日志；不要放开网络或程序白名单 |
+
+部署细节见 [Docker 部署](../docker-deployment.md)，模型配置边界见 [模型设置](../model-settings.md)，工具副作用见 [工具副作用与审计契约](../tool-side-effects.md)。

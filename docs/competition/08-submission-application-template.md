@@ -27,12 +27,11 @@
 
 ```text
 01_source/                         # 本仓库源码，排除 .env/.xuan-shu/node_modules
-02_documents/                      # docs/competition/ 全部文档与 PPT
-03_demo/                           # 脱敏演示视频
-04_deployment/                     # 部署说明、环境依赖、配置样例（不含密钥）
-05_test-evidence/                  # npm run check、前端构建、脱敏测试记录
-06_declarations/                   # 已签字/盖章的原创性保密声明扫描件
-07_application/                    # 审核通过的盖章报名表 PDF
+02_documents/                      # 方案、开发、测试、用户部署、技术报告与声明模板
+03_deployment/                     # 部署说明、环境依赖、配置样例（不含密钥）
+04_test-evidence/                  # npm run check、前端构建、脱敏测试记录
+05_declarations/                   # 已签字/盖章的原创性保密声明扫描件
+06_application/                    # 审核通过的盖章报名表 PDF
 ```
 
 ```text
@@ -85,7 +84,7 @@
 ## 4. 发送前最终核验
 
 - 申报表所有信息与报名系统严格一致。
-- 网盘内含源码、部署手册、文档、PPT、视频、测试证据和声明。
+- 网盘内含源码、部署手册、核心技术文档、测试证据和声明。
 - 压缩包、截图、视频、文档中没有密钥、令牌、Cookie、授权头、真实攻击目标或题目答案。
 - 网盘链接、提取码、上传时间截图、联系电话和邮件主题均已核验。
 - 已保留本地发送记录和最终 commit SHA。
