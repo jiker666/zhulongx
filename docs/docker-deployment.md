@@ -1,21 +1,31 @@
-# Docker 部署
+# 容器化部署（Podman / Docker Compose）
 
-本项目的 Compose 部署包含两个容器：`xuanshu` 提供 API 和已构建的 React 前端，`ctf-sandbox` 提供无外网的命令执行隔离环境。运行数据写入 Docker named volumes，不会写回源码目录；`workspace/` 以只读方式挂载给两个容器。
+本项目使用标准 Compose 文件，可通过 Podman Compose 或 Docker Compose 部署。部署包含两个容器：`xuanshu` 提供 API 和已构建的 React 前端，`ctf-sandbox` 提供无外网的命令执行隔离环境。运行数据写入 named volumes，不会写回源码目录；`workspace/` 以只读方式挂载给两个容器。
 
 ## 一键启动
 
-确保 Docker Desktop 正在运行，然后在项目根目录执行：
+在项目根目录执行：
 
 ```bash
 ./start.command
 ```
 
-Windows 用户双击 `start.bat`。两个脚本都会：
+Windows 用户双击 `start.bat`。两个脚本会优先使用 Podman；未安装 Podman 时才使用可连接的 Docker 引擎。脚本都会：
 
-1. 检查 Docker Compose（兼容 `docker compose` 和 `docker-compose`）。
-2. 构建前后端合并镜像并启动 sandbox。
-3. 等待 `ctf-sandbox` 和 API 健康检查完成。
-4. 打开 `http://127.0.0.1:7318/`。
+1. 检查容器引擎和 Compose provider（`podman compose`、`podman-compose`、`docker compose` 或 `docker-compose`）。
+2. 若本机已有 Podman machine 但未启动，尝试启动它；未初始化时给出准确提示。
+3. 构建前后端合并镜像并启动 sandbox。
+4. 等待 `ctf-sandbox` 和 API 健康检查完成。
+5. 打开 `http://127.0.0.1:7318/`。
+
+macOS 首次使用 Podman 时先执行：
+
+```bash
+podman machine init
+podman machine start
+```
+
+Podman Compose 需要可用 provider。若 `podman compose version` 不可用，请安装 `podman-compose` 或按 Podman 的 provider 配置完成安装后再运行启动脚本。
 
 如果没有设置 `XUANSHU_SERVER_TOKEN`，脚本会为本次容器启动生成随机令牌并打印一次。打开页面后使用右上角钥匙图标输入令牌。令牌不会写入仓库、运行产物或浏览器持久存储。
 
@@ -32,17 +42,17 @@ Windows 用户双击 `start.bat`。两个脚本都会：
 
 ```bash
 XUANSHU_SERVER_TOKEN="replace-with-a-long-random-value" \
-  docker compose up -d --build
+  podman compose up -d --build
 ```
 
-当前安装只有独立 `docker-compose` 命令时，将上面的命令替换为 `docker-compose` 即可。
+如果本机使用的是 `podman-compose`、`docker compose` 或独立的 `docker-compose`，将命令前缀替换为可用 provider。启动脚本会自动完成这一选择。
 
 ## 停止与诊断
 
 ```bash
-docker compose ps
-docker compose logs --tail=100 xuanshu ctf-sandbox
-docker compose down
+podman compose ps
+podman compose logs --tail=100 xuanshu ctf-sandbox
+podman compose down
 ```
 
 宿主机端口被占用时，使用 `XUANSHU_PORT=17318 ./start.command`（Windows 可在命令提示符中先执行 `set XUANSHU_PORT=17318`）。API 健康地址为 `http://127.0.0.1:<端口>/health`。

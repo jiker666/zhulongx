@@ -156,11 +156,20 @@ npm run dev
 
 Vite 开发界面默认位于 [http://127.0.0.1:5173](http://127.0.0.1:5173)，并代理 `/v1` 与 `/health` 到本地 API。
 
-## Docker Compose
+## 容器化部署（Podman / Docker Compose）
 
 ### 一键启动（推荐）
 
-Docker Desktop 启动后：
+推荐使用 Podman 或 Docker Compose。`start.command` / `start.bat` 会优先选择可连接的 Podman 引擎及其 Compose provider，其次使用可连接的 Docker 引擎。
+
+macOS 首次使用 Podman：
+
+```bash
+podman machine init
+podman machine start
+```
+
+Podman 还需要可用 Compose provider（`podman compose` 或 `podman-compose`）。准备完成后：
 
 - macOS/Linux：执行 `./start.command`（首次使用可先运行 `chmod +x start.command`）。
 - Windows：双击 `start.bat`。
@@ -169,12 +178,12 @@ Docker Desktop 启动后：
 
 ### 手动启动
 
-完整启动 API 与无外网 sandbox：
+完整启动 API 与无外网 sandbox（以下以 Podman Compose 为例）：
 
 ```bash
 export OPENAI_API_KEY="..."
 export XUANSHU_SERVER_TOKEN="replace-with-a-long-random-value"
-docker compose up -d --build
+podman compose up -d --build
 ```
 
 打开 [http://127.0.0.1:7318](http://127.0.0.1:7318)。Compose 默认只绑定回环地址；可用 `XUANSHU_PORT=17318` 修改宿主机端口。模型密钥也可以在前端“模型设置”页面临时配置，服务不会把密钥写入运行产物。
@@ -182,13 +191,13 @@ docker compose up -d --build
 停止服务：
 
 ```bash
-docker compose down
+podman compose down
 ```
 
 默认只构建 core sandbox。重型工具会显著增加构建时间和镜像体积，需明确启用：
 
 ```bash
-XUANSHU_INSTALL_HEAVY_CTF_TOOLS=true docker compose build ctf-sandbox
+XUANSHU_INSTALL_HEAVY_CTF_TOOLS=true podman compose build ctf-sandbox
 ```
 
 已审查的二进制与分析工具、版本固定及构建校验见 [Binary Toolchain](docs/binary-toolchain.md)。安装能力与运行时 allowlist 相互独立。

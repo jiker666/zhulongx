@@ -14,7 +14,7 @@ before the runtime adds a program to the agent prompt.
   reproducible payload construction.
 - Common helpers: `addr2line`, `c++filt`, `objcopy`, `patchelf`,
   `gdb-multiarch`, binutils, GDB, checksec, ROPgadget, ropper, one_gadget,
-  seccomp-tools, qemu-user, strace, and ltrace.
+  seccomp-tools, qemu-user, and strace.
 
 ## Agent Routing
 

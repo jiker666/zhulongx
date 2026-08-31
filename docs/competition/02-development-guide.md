@@ -23,7 +23,7 @@
 | 后端 | TypeScript、ESM、Node HTTP 服务 |
 | 前端 | React 19、TypeScript、Vite、React Router、TanStack Query、XYFlow、Lucide、原生 CSS |
 | 测试 | Vitest、TypeScript、ESLint；默认无真实模型请求 |
-| 可选隔离环境 | Docker / Docker Compose，提供无外网 CTF sandbox |
+| 可选隔离环境 | Podman / Docker Compose，提供无外网 CTF sandbox |
 
 安装依赖：
 
@@ -125,7 +125,7 @@ npm --prefix frontend run build
 XUANSHU_SERVER_TOKEN=validation-only docker-compose config
 ```
 
-有 Docker daemon 的交付环境还应完成 `docker compose up -d --build`、sandbox/API health、页面登录和一次只读运行的冒烟测试，并记录镜像摘要。不要把配置解析成功表述为镜像构建或容器启动成功。
+有可连接容器引擎的交付环境还应完成 `podman compose up -d --build`（或等价 Compose provider）、sandbox/API health、页面登录和一次只读运行的冒烟测试，并记录镜像摘要。不要把配置解析成功表述为镜像构建或容器启动成功。
 
 ## 8. 调试与故障定位
 

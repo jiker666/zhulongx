@@ -12,7 +12,7 @@
 
 烛龙·玄枢是面向明确授权网络安全任务的自主决策智能体运行时。系统将大模型限定为任务理解、计划、假设生成和下一步行动选择组件，以 `PolicyEngine`、operator-owned scope、资源预算、结构化工具协议、逐运行隔离和追加式审计链定义不可由模型绕过的工程边界。针对安全任务中输入异构、失败恢复困难、结论难以复核和执行风险高的问题，项目构建了计划先行、策略逐次判定、证据驱动修订、严格提交验证和可回放观测的统一闭环。
 
-当前版本实现了前端 Decision Observatory、结构化最终结论与 Flag 展示、终态运行的可下载 WP、拖拽附件、进程内临时模型配置、持久化运行摘要索引、Docker Compose 及一键启动脚本。确定性回归、前后端构建和 Compose 配置解析均已通过；该结论仅说明工程基线满足交付门禁，不把一次运行或本地演示误表述为真实比赛成功率。
+当前版本实现了前端 Decision Observatory、结构化最终结论与 Flag 展示、终态运行的可下载 WP、拖拽附件、进程内临时模型配置、持久化运行摘要索引、兼容 Podman/Docker Compose 的一键启动脚本。确定性回归、前后端构建和 Compose 配置解析均已通过；该结论仅说明工程基线满足交付门禁，不把一次运行或本地演示误表述为真实比赛成功率。
 
 **关键词：** 安全智能体；自主决策；策略引擎；最小权限；可解释审计；CTF Write-up；运行时治理
 
@@ -62,7 +62,7 @@ flowchart TD
 
 所有主动网络能力必须通过 `PolicyEngine` 和 operator-owned scope。单次运行 override 只能收窄既有范围。`run_command` 经 Unix socket 发往 sandbox sidecar，以程序与参数的结构化形式启动，不经过 Shell；每个 run 拥有独立 scratch、`HOME` 和 `TMPDIR`，附件为只读输入。Compose 中 sandbox 使用 `network_mode: none`，主动网络仅可通过受 scope 控制的 HTTP/TCP/Browser 工具完成。
 
-工具协议要求 TypeBox 输入模式、有界输出、`AbortSignal`、预算、审计与确定性测试。二进制方向提供受限 ZIP 解压和字节搜索，分别限制解压条目/总量及扫描前缀/模式/命中/上下文；Radare2、JADX、Pwntools、`gdb-multiarch`、`ltrace` 等只可在固定能力清单、镜像、健康检查和 operator allowlist 同时满足时使用。
+工具协议要求 TypeBox 输入模式、有界输出、`AbortSignal`、预算、审计与确定性测试。二进制方向提供受限 ZIP 解压和字节搜索，分别限制解压条目/总量及扫描前缀/模式/命中/上下文；Radare2、JADX、Pwntools、`gdb-multiarch`、`strace` 等只可在固定能力清单、镜像、健康检查和 operator allowlist 同时满足时使用。
 
 ### 3.3 追加式事实链与决策可解释性
 
@@ -92,7 +92,7 @@ Run Detail 将终态的 summary 和结构化 submission 作为“运行总结结
 | 事实统一 | 一条追加审计链支撑技术审计、可读轨迹、回放、恢复和分支 | 减少日志、UI 和恢复状态彼此矛盾 |
 | 工具可治理 | 新工具的输入、预算、取消、审计、测试与副作用文档门槛 | 能力扩展不牺牲可控性 |
 | 竞赛结果表达 | 严格 submission、明确 Flag、终态 WP 与下载 | 将解题结论与公开证据、完整脚本关联 |
-| 工程可用性 | Docker Compose、一键脚本、内存模型设置、拖拽附件、摘要索引 | 降低现场部署与长历史运行的操作成本 |
+| 工程可用性 | Podman/Docker Compose、一键脚本、内存模型设置、拖拽附件、摘要索引 | 降低现场部署与长历史运行的操作成本 |
 
 ## 6. 局限与边界
 

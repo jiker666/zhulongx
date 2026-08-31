@@ -29,7 +29,6 @@
         "john",
         "jq",
         "libimage-exiftool-perl",
-        "ltrace",
         "libsox-fmt-all",
         "minimodem",
         "multimon-ng",
@@ -62,6 +61,7 @@
         "xxd",
         "xz-utils",
         "zbar-tools",
+        "z3",
         "zip",
         "zstd"
       ],
@@ -72,7 +72,7 @@
         "forensics": ["binwalk", "dcfldd", "exiftool", "fls", "foremost", "fsstat", "icat", "mmls", "scalpel", "testdisk", "tshark", "tsk_recover", "vol", "xfs_db", "xfs_repair"],
         "misc": ["base32", "convert", "ffprobe", "gifsicle", "identify", "minimodem", "multimon-ng", "outguess", "pickora", "pngcheck", "sox", "soxi", "steghide", "stegsnow", "tesseract", "zbarimg", "zsteg"],
         "pwn": ["checksec", "g++", "gcc", "gdb", "gdb-multiarch", "make", "nm", "objdump", "patchelf", "pwn", "python3", "readelf", "ROPgadget", "ropper"],
-        "reverse": ["addr2line", "apktool", "c++filt", "file", "gdb-multiarch", "jadx", "java", "ltrace", "nm", "objcopy", "objdump", "qemu-aarch64", "qemu-arm", "qemu-i386", "qemu-x86_64", "r2", "rabin2", "rafind2", "ragg2", "rax2", "readelf", "strings", "strace"],
+        "reverse": ["addr2line", "apktool", "c++filt", "file", "gdb-multiarch", "jadx", "java", "nm", "objcopy", "objdump", "qemu-aarch64", "qemu-arm", "qemu-i386", "qemu-x86_64", "r2", "rabin2", "rafind2", "ragg2", "rax2", "readelf", "strings", "strace"],
         "web": ["curl", "flask-unsign", "jq", "python3", "sqlmap"]
       },
       "pythonModules": ["Crypto", "cysignals", "fpylll", "gmpy2", "mmh3", "numpy", "ortools", "pickora", "pycosat", "sympy", "tqdm", "volatility3", "z3"],
@@ -86,7 +86,7 @@
         "reverse": [
           "Static baseline: file, rabin2, readelf, strings, nm, objdump, checksec, inspect_artifact.",
           "Use r2/rabin2 for disassembly, cross-references, function metadata, and binary format questions; use jadx only for APK, DEX, or Java bytecode evidence.",
-          "Dynamic cross-check: gdb/gdb-multiarch for state/control flow, strace/ltrace for observable boundaries, qemu-user for foreign architectures."
+          "Dynamic cross-check: gdb/gdb-multiarch for state/control flow, strace for observable boundaries, qemu-user for foreign architectures."
         ],
         "pwn": [
           "Baseline: checksec plus ELF metadata, then reproduce the input/crash path locally before payload construction.",

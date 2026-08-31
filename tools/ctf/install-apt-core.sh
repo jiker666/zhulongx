@@ -41,7 +41,6 @@ apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
   libmpfr-dev \
   libsox-fmt-all \
   libyara-dev \
-  ltrace \
   minimodem \
   multimon-ng \
   nmap \
@@ -77,6 +76,7 @@ apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
   xxd \
   xz-utils \
   zbar-tools \
+  z3 \
   zip \
   zstd
 rm -rf /var/lib/apt/lists/*

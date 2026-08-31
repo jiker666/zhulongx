@@ -5,18 +5,48 @@ set -eu
 PROJECT_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cd "$PROJECT_ROOT"
 
-if ! command -v docker >/dev/null 2>&1; then
-  echo "Docker is required. Install Docker Desktop and run this script again."
-  exit 1
+COMPOSE=""
+CONTAINER_ENGINE=""
+
+# Prefer Podman when it is installed. On macOS, Podman needs a running
+# machine; starting an existing machine is safe and keeps the one-click
+# workflow usable without Docker Desktop.
+if command -v podman >/dev/null 2>&1; then
+  if ! podman info >/dev/null 2>&1; then
+    echo "Podman is installed but its engine is not running. Attempting to start the Podman machine..."
+    podman machine start >/dev/null 2>&1 || true
+  fi
+  if podman info >/dev/null 2>&1; then
+    if podman compose version >/dev/null 2>&1; then
+      COMPOSE="podman compose"
+      CONTAINER_ENGINE="Podman Compose"
+    elif command -v podman-compose >/dev/null 2>&1 && podman-compose version >/dev/null 2>&1; then
+      COMPOSE="podman-compose"
+      CONTAINER_ENGINE="podman-compose"
+    else
+      echo "Podman is running, but no Compose provider is available."
+      echo "Install podman-compose or configure a Podman Compose provider, then run this script again."
+      exit 1
+    fi
+  else
+    echo "Podman is installed but unavailable. Docker Compose will be used if its engine is running."
+    echo "To use Podman instead, run: podman machine init && podman machine start"
+  fi
 fi
 
-if docker compose version >/dev/null 2>&1; then
-  COMPOSE="docker compose"
-elif command -v docker-compose >/dev/null 2>&1 && docker-compose version >/dev/null 2>&1; then
-  COMPOSE="docker-compose"
-else
-  echo "Docker Compose is required (docker compose or docker-compose)."
-  echo "Install or update Docker Desktop, then run this script again."
+if [ -z "$COMPOSE" ] && command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  if docker compose version >/dev/null 2>&1; then
+    COMPOSE="docker compose"
+    CONTAINER_ENGINE="Docker Compose"
+  elif command -v docker-compose >/dev/null 2>&1 && docker-compose version >/dev/null 2>&1; then
+    COMPOSE="docker-compose"
+    CONTAINER_ENGINE="docker-compose"
+  fi
+fi
+
+if [ -z "$COMPOSE" ]; then
+  echo "A running Podman/Docker engine with a Compose provider is required."
+  echo "For Podman on macOS: podman machine init && podman machine start, then install/configure podman-compose."
   exit 1
 fi
 
@@ -39,7 +69,7 @@ export XUANSHU_PORT="${XUANSHU_PORT:-7318}"
 WEB_URL="http://127.0.0.1:${XUANSHU_PORT}/"
 HEALTH_URL="${WEB_URL}health"
 
-echo "Building and starting ZhuLong XuanShu..."
+echo "Building and starting ZhuLong XuanShu with $CONTAINER_ENGINE..."
 $COMPOSE up -d --build
 
 ready=0

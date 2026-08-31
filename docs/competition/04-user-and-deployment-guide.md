@@ -24,7 +24,7 @@
 | 方式 | 适用场景 | 访问地址 | 特点 |
 | --- | --- | --- | --- |
 | 本地开发模式 | 联调、前端开发、源码调试 | API `http://127.0.0.1:7318/`；Vite `http://127.0.0.1:5173/` | 前后端分开运行，便于定位问题 |
-| Docker Compose | 比赛现场、演示、可重复部署 | `http://127.0.0.1:7318/` | API 与已构建前端合并，配套无外网 sandbox |
+| Podman / Docker Compose | 比赛现场、演示、可重复部署 | `http://127.0.0.1:7318/` | API 与已构建前端合并，配套无外网 sandbox |
 | 主办方托管环境 | 按主办方规则部署 | 由现场配置决定 | 使用私有配置 overlay，不提交敏感参数 |
 
 ## 3. 本地开发模式
@@ -34,7 +34,7 @@
 - Node.js `>=22.19.0`
 - npm
 - 已授权的模型服务配置（仅在需要真实模型时）
-- 需要命令分析时，准备 Docker 或本地 CTF sandbox
+- 需要命令分析时，准备 Podman、Docker 或本地 CTF sandbox
 
 ### 3.2 安装与基础验证
 
@@ -78,11 +78,11 @@ npm run sandbox-health
 
 sandbox 只执行 operator allowlist 中的结构化程序，输入只读，结果写入逐运行 scratch。它不应通过命令行作为绕过网络策略的通道。
 
-## 4. Docker Compose 一键启动
+## 4. Podman / Docker Compose 一键启动
 
 ### 4.1 macOS / Linux
 
-启动 Docker Desktop 后，在项目根目录执行：
+在项目根目录执行：
 
 ```bash
 ./start.command
@@ -97,18 +97,28 @@ chmod +x start.command
 
 ### 4.2 Windows
 
-启动 Docker Desktop 后，双击 `start.bat`。也可以在命令提示符中从项目根目录运行该脚本。
+准备好 Podman 或 Docker 引擎后，双击 `start.bat`。也可以在命令提示符中从项目根目录运行该脚本。
 
 ### 4.3 脚本行为
 
 两个脚本都会：
 
-1. 检查 `docker compose` 或兼容的 `docker-compose`；
-2. 在未设置 `XUANSHU_SERVER_TOKEN` 时生成一次性随机令牌；
-3. 构建 API 与 React 前端合并镜像，并启动 `xuanshu` 与 `ctf-sandbox`；
-4. 最多等待 120 秒轮询 `/health`；
-5. 服务健康后自动打开 `http://127.0.0.1:<端口>/`；
-6. 将本次生成的服务令牌打印到终端，供控制台右上角钥匙按钮输入。
+1. 优先检查 `podman compose` 或 `podman-compose`，其次检查可连接的 Docker Compose；
+2. 在 macOS Podman machine 未启动时尝试启动，未初始化时给出 `podman machine init && podman machine start` 提示；
+3. 在未设置 `XUANSHU_SERVER_TOKEN` 时生成一次性随机令牌；
+4. 构建 API 与 React 前端合并镜像，并启动 `xuanshu` 与 `ctf-sandbox`；
+5. 最多等待 120 秒轮询 `/health`；
+6. 服务健康后自动打开 `http://127.0.0.1:<端口>/`；
+7. 将本次生成的服务令牌打印到终端，供控制台右上角钥匙按钮输入。
+
+macOS 首次使用 Podman：
+
+```bash
+podman machine init
+podman machine start
+```
+
+还需要可用的 Compose provider。执行 `podman compose version`；若无 provider，安装 `podman-compose` 或按 Podman 的 provider 配置完成安装。provider 可以是外部 Compose 可执行文件；只要由 `podman compose` 调用且 Podman engine 已连接，容器仍由 Podman 运行。脚本会在 provider 缺失时停止并提示，避免错误地改用不可用的 Docker 引擎。
 
 默认端口为 `7318`。端口被占用时：
 
@@ -119,15 +129,15 @@ XUANSHU_PORT=17318 ./start.command
 手工启动示例：
 
 ```bash
-XUANSHU_SERVER_TOKEN="<现场随机令牌>" docker compose up -d --build
+XUANSHU_SERVER_TOKEN="<现场随机令牌>" podman compose up -d --build
 ```
 
-当前机器仅有独立命令时，将 `docker compose` 替换为 `docker-compose`。停止服务：
+当前机器使用 `podman-compose`、`docker compose` 或独立 `docker-compose` 时，将命令前缀替换为实际可用 provider。停止服务：
 
 ```bash
-docker compose ps
-docker compose logs --tail=100 xuanshu ctf-sandbox
-docker compose down
+podman compose ps
+podman compose logs --tail=100 xuanshu ctf-sandbox
+podman compose down
 ```
 
 ### 4.4 容器边界
@@ -196,7 +206,7 @@ WP 生成只允许在 `completed`、`blocked`、`failed` 或 `aborted` 等终态
 比赛或演示开始前：
 
 1. 固定 Git commit，运行 `npm run check`、前端构建和 Compose 配置检查。
-2. 有 Docker daemon 时，完成 Compose 构建、`/health`、令牌登录和只读附件冒烟。
+2. 有可连接的 Podman 或 Docker 容器引擎时，完成 Compose 构建、`/health`、令牌登录和只读附件冒烟。
 3. 以最小 scope 准备现场目标；确认主机、端口、工具白名单和预算。
 4. 使用本次启动生成的服务令牌；模型密钥留在私有环境中。
 5. 验证可拖拽附件、可查看决策轨迹、可显示最终结论/Flag、可下载 WP。
@@ -208,7 +218,7 @@ WP 生成只允许在 `completed`、`blocked`、`failed` 或 `aborted` 等终态
 
 | 对象 | 位置 | 说明 |
 | --- | --- | --- |
-| 完整运行状态 | `.xuan-shu/runs/<run-id>/state.json` 或 Docker 数据卷 | 仅用于详情和恢复；含任务信息，应按敏感级别保存 |
+| 完整运行状态 | `.xuan-shu/runs/<run-id>/state.json` 或容器数据卷 | 仅用于详情和恢复；含任务信息，应按敏感级别保存 |
 | 审计与人工复核 | `audit.jsonl`、`reviews.jsonl` | 审计链追加，人工复核不改写原始事件 |
 | 交接摘要 | `handoff.md` | 脱敏、限长，供恢复与人工交接参考 |
 | 运行列表索引 | `summary.json` | 可由完整状态后台补齐，不代替完整事实 |
@@ -219,12 +229,12 @@ WP 生成只允许在 `completed`、`blocked`、`failed` 或 `aborted` 等终态
 
 | 现象 | 原因或检查项 | 处理方式 |
 | --- | --- | --- |
-| 无法访问控制台 | API 未健康、端口被占用或令牌错误 | 检查 `/health`、启动脚本输出、`docker compose ps` 和端口 |
+| 无法访问控制台 | API 未健康、端口被占用、令牌错误或 Podman machine 未启动 | 检查 `/health`、启动脚本输出、`podman compose ps`、`podman machine list` 和端口 |
 | 工具被策略拒绝 | scope、主机/端口、程序、路径、预算或重复动作不满足 | 查看 Policy Details；由 operator 调整完整配置，不能使用 run override 扩权 |
 | 运行停止或要求修订 | checkpoint、工具失败、无证据或重复动作阈值触发 | 阅读失败分类、计划变化与证据，再决定是否继续 |
 | 前端不实时刷新 | SSE、服务令牌或后端连接异常 | 刷新后使用审计回放；检查 API 与浏览器控制台 |
 | 历史运行显示“正在索引” | 老运行尚未生成 `summary.json` | 等待后台回填；详情仍可读取完整状态 |
 | WP 无法生成 | 运行未终态、模型未配置、公开事实不足或格式校验失败 | 先终态化并检查 writeup 事件；不手工补造答案/脚本 |
-| sandbox 不可用 | Docker/socket/能力清单或 allowlist 不匹配 | 查看 `npm run sandbox-health` 和容器日志；不要放开网络或程序白名单 |
+| sandbox 不可用 | Podman/Docker 引擎、socket、能力清单或 allowlist 不匹配 | 查看 `npm run sandbox-health` 和容器日志；不要放开网络或程序白名单 |
 
-部署细节见 [Docker 部署](../docker-deployment.md)，模型配置边界见 [模型设置](../model-settings.md)，工具副作用见 [工具副作用与审计契约](../tool-side-effects.md)。
+部署细节见 [容器化部署](../docker-deployment.md)，模型配置边界见 [模型设置](../model-settings.md)，工具副作用见 [工具副作用与审计契约](../tool-side-effects.md)。

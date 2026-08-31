@@ -128,10 +128,10 @@ flowchart LR
 - Web/API：HTTP 工具、curl/sqlmap/flask-unsign/requests/jq。
 - Pwn：pwntools、ROPgadget、ropper、gdb/gdb-multiarch、checksec、seccomp-tools、one_gadget、patchelf、qemu-user、binutils。
 - Crypto：pycryptodome、sympy、gmpy2、py_ecc、hashpumpy、pycosat；`fpylll+cysignals` 提供可用的 LLL/BKZ 基础，Z3/OR-Tools 提供 SMT 与 CP-SAT，`ecm`、`gp`、`gap`、`factor`、`bc` 提供有界的整数分解、代数和数论 CLI。Host-backed sandbox 会在隔离 `HOME` 下验证这些 Python 模块，避免误用 operator 用户目录中的依赖。
-- Reverse/Malware：固定版本的 Radare2、JADX、file/strings/xxd/binutils、gdb-multiarch、ltrace、capstone、unicorn、lief、pefile、yara、oletools、apktool。
+- Reverse/Malware：固定版本的 Radare2、JADX、file/strings/xxd/binutils、gdb-multiarch、strace、capstone、unicorn、lief、pefile、yara、oletools、apktool。
 - Forensics/Misc/OSINT：binwalk、foremost、scalpel、exiftool、tshark、sleuthkit、ffmpeg/ffprobe、ImageMagick、SoX、minimodem、multimon-ng、zbar/qrencode、Tesseract、pngcheck/gifsicle、steghide/outguess/stegsnow、Pickora、Pillow/numpy/matplotlib。Pwn 额外提供 `patchelf` 修补解释器和依赖路径。
 
-Core profile 固定安装并 smoke-test Radare2 6.2.0、JADX 1.5.5、Pwntools、gdb-multiarch、ltrace 与 binutils 辅助程序；两个发行包在镜像构建期下载并校验 SHA-256。Heavy profile 通过 `INSTALL_HEAVY=true` 可选安装 angr、qiling、frida-tools、torch、transformers、SageMath、RsaCtfTool、CADO-NFS、flatter、额外的 radare2 源码构建和 stegseek。源码工具固定到 `capabilities.json` 中的 commit，并由 `verify-heavy-tools.sh` 做构建期 smoke test；Ghidra、UPX 和 GPU hashcat 调优仍作为人工确认的重型扩展。`crypto-attacks`、`gf2bv`、`lll_cvp`、`lattice-based-cryptanalysis` 与 `cuso` 只记录在 operator-managed 审查清单，不是默认镜像能力；许可证、安装入口或确定性调用样例未完成前不会进入 allowlist。
+Core profile 固定安装并 smoke-test Radare2 6.2.0、JADX 1.5.5、Pwntools、gdb-multiarch、strace 与 binutils 辅助程序；两个发行包在镜像构建期下载并校验 SHA-256。`ltrace` 因 Debian ARM64 基础镜像没有稳定包而不纳入跨架构 core profile。Heavy profile 通过 `INSTALL_HEAVY=true` 可选安装 angr、qiling、frida-tools、torch、transformers、SageMath、RsaCtfTool、CADO-NFS、flatter、额外的 radare2 源码构建和 stegseek。源码工具固定到 `capabilities.json` 中的 commit，并由 `verify-heavy-tools.sh` 做构建期 smoke test；Ghidra、UPX 和 GPU hashcat 调优仍作为人工确认的重型扩展。`crypto-attacks`、`gf2bv`、`lll_cvp`、`lattice-based-cryptanalysis` 与 `cuso` 只记录在 operator-managed 审查清单，不是默认镜像能力；许可证、安装入口或确定性调用样例未完成前不会进入 allowlist。
 
 这些能力是 sandbox programs，不是新的核心 AgentTool。它们只在无外网 sidecar 内通过 `run_command` 执行，并接受 `PolicyEngine` 的 operator-owned 程序白名单、总工具调用预算、重复动作与 checkpoint 门禁。读取型命令只观察输入；转换、OCR、隐写提取和 Pickora 可在本次运行的 scratch 命名空间内创建文件；分解、约束、OCR、音频和密码尝试可能消耗较多 CPU。所有命令受统一超时、AbortSignal 终止和 stdout/stderr 字节上限约束，每次调用都会写入 `policy.decision` 与 `tool.result` 审计事件。
 

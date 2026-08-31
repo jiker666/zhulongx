@@ -3,16 +3,62 @@ setlocal EnableExtensions
 
 cd /d "%~dp0"
 
-set "COMPOSE=docker compose"
-docker compose version >nul 2>&1
-if errorlevel 1 (
-  docker-compose version >nul 2>&1
+set "COMPOSE="
+set "CONTAINER_ENGINE="
+
+where podman >nul 2>&1
+if not errorlevel 1 (
+  podman info >nul 2>&1
   if errorlevel 1 (
-    echo Docker Compose is required. Install or update Docker Desktop.
-    pause
-    exit /b 1
+    echo Podman is installed but its engine is not running. Attempting to start the Podman machine...
+    podman machine start >nul 2>&1
   )
-  set "COMPOSE=docker-compose"
+  podman info >nul 2>&1
+  if errorlevel 1 (
+    echo Podman is unavailable. Docker Compose will be used if its engine is running.
+    echo To use Podman instead, run: podman machine init ^&^& podman machine start
+  ) else (
+    podman compose version >nul 2>&1
+    if not errorlevel 1 (
+      set "COMPOSE=podman compose"
+      set "CONTAINER_ENGINE=Podman Compose"
+    ) else (
+      podman-compose version >nul 2>&1
+      if not errorlevel 1 (
+        set "COMPOSE=podman-compose"
+        set "CONTAINER_ENGINE=podman-compose"
+      ) else (
+        echo Podman is running, but no Compose provider is available.
+        echo Install podman-compose or configure a Podman Compose provider, then run this script again.
+        pause
+        exit /b 1
+      )
+    )
+  )
+)
+
+if not defined COMPOSE (
+  docker info >nul 2>&1
+  if not errorlevel 1 (
+    docker compose version >nul 2>&1
+    if not errorlevel 1 (
+      set "COMPOSE=docker compose"
+      set "CONTAINER_ENGINE=Docker Compose"
+    ) else (
+      docker-compose version >nul 2>&1
+      if not errorlevel 1 (
+        set "COMPOSE=docker-compose"
+        set "CONTAINER_ENGINE=docker-compose"
+      )
+    )
+  )
+)
+
+if not defined COMPOSE (
+  echo A running Podman/Docker engine with a Compose provider is required.
+  echo For Podman: start its machine and install/configure podman-compose.
+  pause
+  exit /b 1
 )
 
 if not defined XUANSHU_SERVER_TOKEN (
@@ -25,10 +71,10 @@ if not defined XUANSHU_PORT set "XUANSHU_PORT=7318"
 set "WEB_URL=http://127.0.0.1:%XUANSHU_PORT%/"
 set "HEALTH_URL=%WEB_URL%health"
 
-echo Building and starting ZhuLong XuanShu...
+echo Building and starting ZhuLong XuanShu with %CONTAINER_ENGINE%...
 %COMPOSE% up -d --build
 if errorlevel 1 (
-  echo Docker Compose failed to start the services.
+  echo Container Compose failed to start the services.
   %COMPOSE% ps
   %COMPOSE% logs --tail=100 xuanshu ctf-sandbox
   pause

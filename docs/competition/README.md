@@ -14,6 +14,7 @@
 | 测试报告 | [03-test-report.md](03-test-report.md) | 已完成 | 验收基线、执行结果、覆盖范围、限制和复测清单 |
 | 用户与部署手册 | [04-user-and-deployment-guide.md](04-user-and-deployment-guide.md) | 已完成 | 本地/Docker 启动、控制台、模型设置、Flag/WP 与现场操作 |
 | 技术报告 | [05-technical-report.md](05-technical-report.md) | 已完成 | 技术路线、实现、创新点、验证和局限 |
+| Word 正式版 | [docx/README.md](docx/README.md) 下的 `00` 至 `05` 六份 `.docx` | 已完成 | 可直接随比赛材料上传的正式版；Markdown 保留为可追溯源稿 |
 
 ## 支撑材料
 
@@ -22,7 +23,7 @@
 | [系统架构](../architecture.md) | 完整模块职责、威胁模型、隔离和恢复语义 |
 | [工具副作用与审计契约](../tool-side-effects.md) | 工具读写、网络、预算和审计边界 |
 | [评测协议](../evaluation.md) | 泛化、鲁棒性、消融和评测账本方法 |
-| [Docker 部署](../docker-deployment.md) | Compose、端口、环境变量与诊断细节 |
+| [容器化部署](../docker-deployment.md) | Podman/Docker Compose、端口、环境变量与诊断细节 |
 | [模型设置](../model-settings.md) | 临时模型接入与凭据不持久化约束 |
 | [WP 生成](../writeup-generation.md) | 终态 WP 输入、格式、验证和失败降级规则 |
 | [原创性及保密性声明](07-originality-and-confidentiality.md) | 待团队核实、签字和盖章的正式声明模板 |
@@ -48,7 +49,7 @@ npm --prefix frontend run build
 XUANSHU_SERVER_TOKEN=validation-only docker-compose config
 ```
 
-在具备 Docker daemon 的现场环境，还应完成 Compose 构建、`/health`、令牌登录、附件上传和只读任务冒烟，并将镜像摘要和结果另存为脱敏测试证据。
+在具备已连接 Podman 或 Docker 引擎的现场环境，还应完成 Compose 构建、`/health`、令牌登录、附件上传和只读任务冒烟，并将镜像摘要和结果另存为脱敏测试证据。
 
 ## 打包与赛前行政动作
 
@@ -60,10 +61,12 @@ XUANSHU_SERVER_TOKEN=validation-only docker-compose config
 4. 固定最终 commit SHA，保存 `npm run check`、前端构建、Compose 验证与 Docker 现场复测的脱敏记录。
 5. 按主办方当期规则上传源码与本目录文档；不要将历史 PPT 或演示视频列为本次必交开发产物。
 
+上传时优先使用 `docx/` 下的 Word 正式版，并同时保留对应 Markdown 源稿。请勿将本机运行产物、模型配置或任何私有附件打包进比赛材料。
+
 ## 可复核入口
 
 - 代码和运行时边界：[README.md](../../README.md)、[系统架构](../architecture.md)
 - 实际工具副作用：[工具副作用与审计契约](../tool-side-effects.md)
 - 评测与反过拟合方法：[评测协议](../evaluation.md)
 - 终态结论、Flag 和 WP 交付：[用户与部署手册](04-user-and-deployment-guide.md)
-- 一键启动和现场部署：[Docker 部署](../docker-deployment.md)
+- 一键启动和现场部署：[容器化部署](../docker-deployment.md)

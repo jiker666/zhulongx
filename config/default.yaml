@@ -135,7 +135,6 @@ scope:
     - c++filt
     - gdb-multiarch
     - jadx
-    - ltrace
     - objcopy
     - pwn
     - rabin2
