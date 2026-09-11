@@ -206,7 +206,7 @@ export interface ToolCallPipeline {
  * classification, state persistence, and web-reasoning bookkeeping.
  */
 export function createToolCallPipeline(deps: ToolCallPipelineDeps): ToolCallPipeline {
-  const { state, runtime, audit, policy, descriptors, webReasoning, emit } = deps;
+  const { state, audit, policy, descriptors, webReasoning, emit } = deps;
   const toolRequestSequences = new Map<string, number>();
   const observedToolOutputs: Array<{ toolCallId: string; output: string }> = [];
   let settled = false;
@@ -270,7 +270,6 @@ export function createToolCallPipeline(deps: ToolCallPipelineDeps): ToolCallPipe
       if (!decision.allowed) {
         webReasoning.markPolicyRejected(toolCall.toolCallId, decision.reason);
         if (state.plan && !REVISION_EXCLUDED_TOOLS.has(toolCall.toolName)) {
-          state.actionsSinceCheckpoint = runtime.maxActionsWithoutCheckpoint;
           state.strategyRevisionRequired = true;
           state.lastFailure = {
             classification: "policy",
@@ -329,7 +328,6 @@ export function createToolCallPipeline(deps: ToolCallPipelineDeps): ToolCallPipe
         }
       }
       if (isError && !FAILURE_EXCLUDED_TOOLS.has(toolCall.toolName)) {
-        state.actionsSinceCheckpoint = runtime.maxActionsWithoutCheckpoint;
         state.strategyRevisionRequired = true;
         state.lastFailure = {
           classification: "tool",

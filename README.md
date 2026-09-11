@@ -6,7 +6,7 @@
 
 ## 为什么做这个项目
 
-模型适合提出下一步行动，但不应成为安全边界。玄枢把决策与执行分开：模型负责基于证据规划和调整策略，运行时负责作用域、预算、隔离、审计与停止条件。
+模型适合提出下一步行动，但不应成为安全边界。玄枢把决策与执行分开：模型负责基于证据规划和调整策略，运行时负责隔离、审计与停止条件。作用域与预算限制当前处于关闭状态（permissive 模式，见安全模型一节）。
 
 ```mermaid
 flowchart LR
@@ -29,7 +29,7 @@ flowchart LR
 ## 核心能力
 
 - **自主任务循环**：计划、假设、行动、checkpoint、证据验证与明确终止状态。
-- **策略控制**：所有主动网络请求必须同时通过 `PolicyEngine` 和 operator-owned scope。
+- **策略决策记录**：`PolicyEngine` 校验参数形状并把每个决定写入审计链；作用域、预算与顺序门禁已关闭（permissive 模式）。
 - **最小权限工具**：只读输入、有界图片观察、scratch 文件、结构化命令、HTTP、TCP 与受控浏览器。
 - **隔离执行**：命令使用 `spawn(program, args)`，不经过 shell；Docker sidecar 默认无外网。
 - **可复核审计**：运行事件写入 SHA-256 前向哈希链，并投影为时间线、策略决定和证据关系。
@@ -39,12 +39,12 @@ flowchart LR
 
 ## 安全模型
 
-玄枢默认使用 `observe` 模式，此时没有主动网络权限。启用网络能力必须在完整配置中显式设置 `scope.mode: controlled` 并列出精确主机；单次运行的 `--scope` 文件只能进一步收窄，不能扩大主机、程序或工作区范围。
+策略与预算执行当前处于 **permissive 模式**（为比赛冲刺移除）：`PolicyEngine` 不再按 scope 主机/程序 allowlist、预算、计划顺序或重复动作拒绝调用，HTTP/TCP/Browser 可访问任意主机，`run_command` 可执行任意已安装程序。参数形状校验（URL 协议、TCP 端口、null 字节）与全部审计记录保留；严格提交门独立保留。审计链、脱敏与产物红线不受影响。
 
-| 边界 | 默认行为 |
+| 边界 | 当前行为（permissive） |
 | --- | --- |
-| 网络 | `allowedHosts: []`，主动 HTTP/TCP/Browser 被拒绝 |
-| 命令 | 仅允许运营方配置的程序，不解析 shell 字符串 |
+| 网络 | 任意主机；URL 仅做协议形状校验 |
+| 命令 | 任意程序，仍不解析 shell 字符串 |
 | 文件 | workspace 只读，生成内容写入逐运行 scratch |
 | 资源 | 轮次、工具调用、请求、字节、文件大小和运行时间均有上限 |
 | 取消 | 可能阻塞的能力接收 `AbortSignal` |
@@ -122,9 +122,9 @@ npm run dev -- run \
 
 网络行为约束：
 
-- `http_request` 不自动跟随重定向，主机和请求次数都受策略检查。
-- `tcp_*` 只连接精确授权的 `host:port`，并限制会话数和总字节数。
-- Browser 使用逐运行上下文，导航仍受同一 scope 约束。
+- `http_request` 不自动跟随重定向（防环上限 5 跳）；主机与请求次数不再受限。
+- `tcp_*` 可连接任意 `host:port`，会话数与字节数不再受限。
+- Browser 使用逐运行上下文，导航不再做 scope/private 网段拦截。
 - Sandbox 不直接出网；安装更多工具不会扩大网络或程序权限。
 
 本地开发时也可以通过 operator 环境变量临时启用明确的受控主机范围：
@@ -247,7 +247,7 @@ src/
   knowledge-store.ts  规划前知识库检索与有界上下文
   submission-policy.ts 严格提交候选与证据校验
   handoff.ts          脱敏运行交接摘要
-  policy.ts           scope、程序、路径和停滞门禁
+  policy.ts           参数形状校验 + 决策审计记录（permissive）
   tools.ts            模型可调用的有界工具
   sandbox.ts          隔离命令执行协议
   audit.ts            哈希链审计
@@ -269,11 +269,11 @@ npm run check
 
 这是合并门禁，依次执行类型检查、ESLint、确定性测试和生产构建。编排行为必须使用 faux model 测试；真实模型测试应放入显式启用的评测套件。
 
-新增工具必须同时提供策略测试、预算行为、审计事件、`AbortSignal` 支持、输出上限和副作用文档。请先阅读 [CONTRIBUTING.md](CONTRIBUTING.md) 和 [SECURITY.md](SECURITY.md)。
+新增工具必须同时提供参数校验测试、审计事件、`AbortSignal` 支持、输出上限和副作用文档。请先阅读 [CONTRIBUTING.md](CONTRIBUTING.md) 和 [SECURITY.md](SECURITY.md)。
 
 ## 使用边界
 
-仅在你拥有或明确获准测试的系统和材料上使用本项目。使用者负责配置精确作用域、请求预算和停止条件，并遵守适用法律与目标系统规则。安全问题请按 [SECURITY.md](SECURITY.md) 私下报告，不要在公开 Issue 中提交凭据或可直接利用的细节。
+仅在你拥有或明确获准测试的系统和材料上使用本项目。策略执行已关闭，目标边界完全由使用者自律维护；请遵守适用法律与目标系统规则。安全问题请按 [SECURITY.md](SECURITY.md) 私下报告，不要在公开 Issue 中提交凭据或可直接利用的细节。
 
 ## License
 

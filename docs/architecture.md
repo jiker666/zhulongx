@@ -2,14 +2,13 @@
 
 ## 设计目标
 
-玄枢把模型视为“可替换的决策部件”，而不是安全边界。模型决定下一步做什么；运行时决定该动作是否在授权范围内、是否还有预算、结果如何持久化以及何时必须停止。
+玄枢把模型视为“可替换的决策部件”，而不是安全边界。模型决定下一步做什么；运行时决定结果如何持久化以及何时必须停止。作用域与预算门禁当前处于 permissive 模式：`PolicyEngine` 只做参数形状校验并记录决策，不再拒绝调用。
 
 ```mermaid
 flowchart LR
     I["任务与附件"] --> N["输入归一化"]
     N --> A["嵌入式 Agent SDK 会话（CLI 子进程）"]
-    A --> G["规划与 checkpoint 门禁"]
-    G --> P["PolicyEngine"]
+    A --> G["PolicyEngine（参数校验 + 决策审计）"]
     P -->|允许| T["工具注册表"]
     P -->|拒绝及原因| A
     T --> S["CTF sandbox sidecar"]
@@ -41,11 +40,11 @@ flowchart LR
 | 模块 | 职责 | 不负责 |
 | --- | --- | --- |
 | `input.ts` | 解析任务、文件、目录与 ZIP，限制资源占用 | 不执行附件内容 |
-| `runtime.ts` | 驱动嵌入式 Agent SDK 会话、状态转换、预算、持久化、工具 cleanup | 不绕过策略执行工具 |
+| `runtime.ts` | 驱动嵌入式 Agent SDK 会话、状态转换、持久化、工具 cleanup | 不绕过参数校验执行工具 |
 | `executor.ts` / `connector.ts` | 统一命令与文件执行契约；管理反向 Connector 心跳、generation、租约和有界结果 | 不允许 Connector 自报程序或网络权限 |
 | `session-trajectory.ts` / `runtime-events.ts` | 为追加事件标注来源、执行者、关联 ID 与父序号；记录脱敏限长的模型可见上下文 | 不删除原始审计事件，不把隐藏推理、凭据或图片像素持久化 |
 | `run-recovery.ts` | 服务启动时结算未完成运行、续接审计链并禁止副作用重放 | 不自动重试或重放旧工具调用 |
-| `policy.ts` | 计划门禁、路径/主机/端口/程序范围、停滞与预算控制 | 不相信模型自报范围 |
+| `policy.ts` | 参数形状校验（URL/TCP/浏览器动作/null 字节）+ 决策审计记录；permissive 模式下不拒绝调用 | 不相信模型自报范围 |
 | `tools.ts` | 只读输入、有限图片观察、scratch 写入、sandbox 命令、HTTP/TCP、发现与终止 | 不在 API/model 进程内执行 CTF 命令 |
 | `sandbox.ts` | Unix socket sidecar 协议、结构化命令执行、输出和超时上限 | 不持有模型密钥或出网授权 |
 | `audit.ts` | 顺序化写入和 SHA-256 前向哈希校验 | 不替代外部不可篡改存储 |

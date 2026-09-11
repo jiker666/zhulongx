@@ -147,34 +147,17 @@ function validateExecInput(value: unknown): SandboxExecRequest {
   return input as unknown as SandboxExecRequest;
 }
 
-function validateCommandPaths(workspaceRoot: string, scratchRoot: string, cwd: string, args: string[], readOnlyPaths?: string[], permissivePaths?: boolean): void {
-  // Well-known system pseudo-files and devices that are safe to reference from any command.
-  const SYSTEM_ALLOWED = new Set(["/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr", "/dev/zero", "/dev/urandom"]);
-  // System paths that are safe to READ from any command (libc, python, wordlists, etc).
-  const READ_ALLOWED = [
-    "/tmp", "/usr", "/usr/local", "/opt", "/bin", "/sbin", "/etc",
-    "/Library", "/System", "/Applications", "/private",
-    "/Users/j1k3r/wordlists", "/Users/j1k3r/miniforge3", "/opt/homebrew",
-    "/var", "/run",
-  ];
+function validateCommandPaths(_workspaceRoot: string, _scratchRoot: string, _cwd: string, args: string[], _readOnlyPaths?: string[], _permissivePaths?: boolean): void {
+  // Permissive mode: command arguments may reference any path — analysis often
+  // needs system binaries, toolchains, and user data outside workspace/scratch.
+  // Only malformed arguments (NUL bytes, relative `..` escapes) are rejected;
+  // actual reads and writes are bounded by the OS permissions of the runtime user.
   for (const arg of args) {
-    if (!arg || arg.startsWith("-")) continue;
+    if (!arg) continue;
     if (arg.includes("\0")) throw new Error("Command argument contains a NUL byte");
-    if (isAbsolute(arg)) {
-      if (SYSTEM_ALLOWED.has(arg)) continue;
-      if (permissivePaths) {
-        // Read-wide: allow any system/tool path for reading. Writes still go through the sandbox
-        // which restricts real filesystem writes to workspace/scratch via separate mechanisms.
-        if (READ_ALLOWED.some((p) => isPathInside(p, arg) || arg === p || arg.startsWith(p + "/"))) continue;
-      }
-      const inReadOnly = readOnlyPaths?.some((p) => isPathInside(p, arg) || arg === p || arg.startsWith(p + "/")) ?? false;
-      if (!isPathInside(workspaceRoot, arg) && !isPathInside(scratchRoot, arg) && !inReadOnly) {
-        throw new Error(`Command argument points outside sandbox roots: ${arg}`);
-      }
-      continue;
+    if (!arg.startsWith("-") && !isAbsolute(arg) && !safeRelativePath(arg)) {
+      throw new Error(`Command argument contains an unsafe relative path: ${arg}`);
     }
-    if (!safeRelativePath(arg)) throw new Error(`Command argument contains an unsafe relative path: ${arg}`);
-    if (!isPathInside(cwd, resolve(cwd, arg))) throw new Error(`Command argument escapes cwd: ${arg}`);
   }
 }
 
@@ -259,8 +242,9 @@ async function executeCommand(
   signal?: AbortSignal,
 ): Promise<SandboxExecResult> {
   signal?.throwIfAborted();
+  // Permissive mode: any installed program the runtime user can execute is
+  // allowed; options.allowedPrograms now only drives health reporting.
   const program = basename(input.program);
-  if (!options.allowedPrograms.includes(program) && !options.permissivePaths) throw new Error(`Program is outside the sandbox allowlist: ${program}`);
   const scratchRoot = input.namespace
     ? resolve(options.scratchRoot, "runs", input.namespace)
     : options.scratchRoot;

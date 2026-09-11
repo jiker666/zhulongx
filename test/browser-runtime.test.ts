@@ -12,11 +12,13 @@ function fakeRun(): RunState {
 }
 
 describe("controlled browser runtime boundaries", () => {
-  it("allows only explicitly scoped HTTP origins and rejects unsafe schemes", () => {
+  it("allows any HTTP(S) origin and rejects only unsafe schemes or malformed URLs", () => {
     const scope = { mode: "controlled" as const, workspaceRoot: process.cwd(), allowedHosts: ["127.0.0.1:3000"], allowedPrograms: [] };
     expect(evaluateNavigation({ targetUrl: "http://127.0.0.1:3000/", allowedOrigins: scope.allowedHosts, taskScope: scope, redirectDepth: 0 }).decision).toBe("allow");
+    expect(evaluateNavigation({ targetUrl: "http://127.0.0.1:4000/", allowedOrigins: scope.allowedHosts, taskScope: scope, redirectDepth: 0 }).decision).toBe("allow");
+    expect(evaluateNavigation({ targetUrl: "http://10.0.0.5:8080/", allowedOrigins: scope.allowedHosts, taskScope: scope, redirectDepth: 0 }).decision).toBe("allow");
     expect(evaluateNavigation({ targetUrl: "javascript:alert(1)", allowedOrigins: scope.allowedHosts, taskScope: scope, redirectDepth: 0 }).decision).toBe("reject_scheme");
-    expect(evaluateNavigation({ targetUrl: "http://127.0.0.1:4000/", allowedOrigins: scope.allowedHosts, taskScope: scope, redirectDepth: 0 }).decision).toBe("reject_out_of_scope");
+    expect(evaluateNavigation({ targetUrl: "::not a url", allowedOrigins: scope.allowedHosts, taskScope: scope, redirectDepth: 0 }).decision).toBe("reject_invalid_url");
   });
 
   it("degrades safely when Chromium is unavailable without fabricating a result", async () => {
@@ -28,7 +30,7 @@ describe("controlled browser runtime boundaries", () => {
     expect(state.browser?.sessions.every((session) => session.status !== "active")).toBe(true);
   });
 
-  it("keeps browser authorization in PolicyEngine and blocks only popup actions", () => {
+  it("keeps browser argument validation in PolicyEngine with every known action allowed", () => {
     const scope = { mode: "controlled" as const, workspaceRoot: process.cwd(), allowedHosts: ["127.0.0.1:3000"], allowedPrograms: [] };
     const policy = new PolicyEngine(scope, { maxToolCalls: 10, maxActionsWithoutCheckpoint: 5, maxRepeatedAction: 2 } as never);
     expect(policy.evaluate("browser", { action: "capture_dom" }, fakeRun()).allowed).toBe(true);
@@ -38,7 +40,8 @@ describe("controlled browser runtime boundaries", () => {
     expect(policy.evaluate("browser", { action: "upload", path: "shell.png" }, fakeRun()).allowed).toBe(true);
     expect(policy.evaluate("browser", { action: "download" }, fakeRun()).allowed).toBe(true);
     expect(policy.evaluate("browser", { action: "capture_screenshot" }, fakeRun()).allowed).toBe(true);
-    // popup remains disabled: it bridges into host browser privileges.
-    expect(policy.evaluate("browser", { action: "popup" }, fakeRun()).allowed).toBe(false);
+    // Permissive mode: popup passes policy; unsupported actions fail at the runtime instead.
+    expect(policy.evaluate("browser", { action: "popup" }, fakeRun()).allowed).toBe(true);
+    expect(policy.evaluate("browser", { action: "exfiltrate_dom" }, fakeRun()).allowed).toBe(false);
   });
 });

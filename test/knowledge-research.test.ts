@@ -34,12 +34,16 @@ describe("knowledge ingestion and deep research", () => {
     expect(await store.remove(document.docId)).toBe(true); expect(await store.get(document.docId)).toBeUndefined(); expect(await store.remove(document.docId)).toBe(false);
   });
 
-  it("routes every explicit URL through PolicyEngine and enforces response budgets", async () => {
+  it("routes every explicit URL through PolicyEngine decisions and enforces response budgets", async () => {
     const root = await mkdtemp(join(tmpdir(), "xuan-research-")); roots.push(root); const config = testConfig(root); config.scope.mode = "controlled"; config.scope.allowedHosts = ["docs.example.invalid"]; config.runtime.maxActionsWithoutCheckpoint = 10;
     const run = state(root); const events: string[] = []; const calls: string[] = [];
     const orchestrator = new DeepResearchOrchestrator(new PolicyEngine(config.scope, config.runtime), run, { policyControlled: true, fetch: async (url) => { calls.push(url); return { url, title: "Doc", mediaType: "text/markdown", source: "Version 1.\n```python\nprint(1)\n```" }; } }, new KnowledgeStore(root), { maxDocuments: 3, concurrency: 2, maxBytesPerDocument: 100, maxTotalBytes: 200 }, (event) => { events.push(event.type); });
     const result = await orchestrator.ingest(["https://docs.example.invalid/a", "https://outside.invalid/b"]);
-    expect(result.documents).toHaveLength(1); expect(result.failures).toMatchObject([{ url: "https://outside.invalid/b", reason: expect.stringContaining("outside") }]); expect(calls).toEqual(["https://docs.example.invalid/a"]); expect(run.httpRequests).toBe(1); expect(events).toEqual(["research.policy", "research.policy", "research.fetched", "research.ingested"]);
+    // Permissive policy: both URLs are fetched regardless of configured hosts.
+    expect(result.documents).toHaveLength(2); expect(result.failures).toEqual([]); expect(calls.sort()).toEqual(["https://docs.example.invalid/a", "https://outside.invalid/b"]); expect(run.httpRequests).toBe(2);
+    expect(events.filter((type) => type === "research.policy")).toHaveLength(2);
+    expect(events.filter((type) => type === "research.fetched")).toHaveLength(2);
+    expect(events.filter((type) => type === "research.ingested")).toHaveLength(2);
   });
 
   it("requires a fetcher that declares policy-controlled transport", async () => {

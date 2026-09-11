@@ -8,6 +8,11 @@ model:
   contextWindow: 400000
 
 runtime:
+  # Permissive mode: maxTurns/maxToolCalls/maxRuntimeMs/maxHttpRequests/
+  # maxTcpSessions/maxImageObservations/maxActionsWithoutCheckpoint/
+  # maxRepeatedAction/maxScratchFileBytes/maxTcpBytes and the model rate
+  # limits (modelMinIntervalMs/modelRequestsPerMinute/modelTokensPerMinute)
+  # are accepted for compatibility but no longer enforced.
   thinkingLevel: medium
   artifactRoot: .xuan-shu/runs
   scratchRoot: .xuan-shu/work

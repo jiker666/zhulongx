@@ -30,6 +30,16 @@ import { projectRunSummary, RUN_SUMMARY_FILE } from "./run-summary.js";
 
 export type { RuntimeModelSessionConfig } from "./types.js";
 
+/**
+ * Rate limiting disabled: the gateway still serializes requests and accounts
+ * actual token usage, but never delays or rejects them.
+ */
+const UNLIMITED_MODEL_LIMITS = {
+  minimumIntervalMs: 0,
+  requestsPerMinute: Number.POSITIVE_INFINITY,
+  tokensPerMinute: Number.POSITIVE_INFINITY,
+};
+
 export interface RuntimeModelStatus {
   configured: boolean;
   source: "session" | "environment" | "missing";
@@ -77,8 +87,7 @@ async function writeupLooksComplete(value: string | undefined): Promise<boolean>
     && /```[A-Za-z0-9_+-]+\n[\s\S]*?```/.test(text);
 }
 
-function publicContent(content: unknown[]): unknown[] {
-  return content.flatMap((block) => {
+function publicContent(content: unknown[]): unknown[] {  return content.flatMap((block) => {
     if (!block || typeof block !== "object") return [block];
     const value = block as { type?: string; data?: unknown; mimeType?: unknown; content?: unknown };
     if (value.type === "thinking") return [];
@@ -246,11 +255,9 @@ export class XuanShuRuntime {
     const writeupKey = `${state.id}:writeup:manual`;
     gateway.setRoute(writeupKey, {
       upstream: this.buildUpstream(modelConfig, apiKey, headers),
-      limits: {
-        minimumIntervalMs: this.config.runtime.modelMinIntervalMs,
-        requestsPerMinute: this.config.runtime.modelRequestsPerMinute,
-        tokensPerMinute: this.config.runtime.modelTokensPerMinute,
-      },
+      // Rate limiting is disabled: no minimum interval or RPM/TPM caps. The
+      // gateway still audits every request and accounts actual token usage.
+      limits: UNLIMITED_MODEL_LIMITS,
     });
     try {
       const result = await generateWriteupDocument({
@@ -283,18 +290,9 @@ export class XuanShuRuntime {
       : "";
     const runDirectory = join(this.config.runtime.artifactRoot, id);
     const runScratchRoot = join(this.config.runtime.scratchRoot, "runs", id);
-    // Native reversing often needs one extra evidence/verification cycle after
-    // a parser correction. Keep this bounded and category-driven rather than
-    // embedding any challenge-specific assumptions in the core loop.
     const runtimeConfig = {
       ...this.config.runtime,
       scratchRoot: runScratchRoot,
-      ...(taskCategory === "reverse"
-        ? {
-            maxTurns: Math.max(this.config.runtime.maxTurns, 40),
-            maxToolCalls: Math.max(this.config.runtime.maxToolCalls, 100),
-          }
-        : {}),
     };
     const workspaceMode = options.workspaceMode ?? "configured";
     const isolatedInputRoot = join(runScratchRoot, "inputs");
@@ -454,11 +452,9 @@ export class XuanShuRuntime {
     const submissionPolicy = submissionPolicyFor(task);
     const gateway = await this.ensureGateway();
     const runKey = id;
-    const limits = {
-      minimumIntervalMs: runtimeConfig.modelMinIntervalMs,
-      requestsPerMinute: runtimeConfig.modelRequestsPerMinute,
-      tokensPerMinute: runtimeConfig.modelTokensPerMinute,
-    };
+    // Rate limiting is disabled: no minimum interval or RPM/TPM caps. The
+    // gateway still audits every request and accounts actual token usage.
+    const limits = UNLIMITED_MODEL_LIMITS;
     // The gateway numbers requests `${runKey}:request:N`; contextMeta fires
     // exactly once per request, so this mirror yields the live correlation id.
     let gatewayRequestCount = 0;
@@ -509,13 +505,6 @@ export class XuanShuRuntime {
         state.updatedAt = new Date().toISOString();
         await audit.append("turn.started", { turn: state.turns });
         await emit("turn.started", { turn: state.turns });
-        if (state.turns > runtimeConfig.maxTurns) {
-          if (webReasoning.enabled) await webReasoning.beforeFinalization(0);
-          state.stopReason = "Turn budget exhausted";
-          session?.abort("Turn budget exhausted");
-        } else if (webReasoning.enabled && state.turns >= Math.max(1, runtimeConfig.maxTurns - webReasoning.config.finalizationRoundReserve)) {
-          await webReasoning.beforeFinalization(runtimeConfig.maxTurns - state.turns);
-        }
       } else if (type === "assistant.message") {
         await audit.append("assistant.message", publicMessage(data), { source: "model", actor: "primary-agent", ...(activeModelRequestId ? { correlationId: activeModelRequestId } : {}) });
       } else if (type === "tool.started") {
@@ -567,10 +556,6 @@ export class XuanShuRuntime {
     options.signal?.addEventListener("abort", abortRun, { once: true });
 
     state.phase = "planning";
-    const timer = setTimeout(() => {
-      state.stopReason = "Runtime budget exhausted";
-      session?.abort("Runtime budget exhausted");
-    }, runtimeConfig.maxRuntimeMs);
     const limiter = this.sdkLimiter(runtimeConfig.maxConcurrentSdkSessions);
 
     try {
@@ -579,7 +564,7 @@ export class XuanShuRuntime {
         throw new Error(this.overrides.sessionModel ? "Missing model credential for the active model session" : `Missing model credential in environment variable ${modelConfig.apiKeyEnv}`);
       }
       const reasoningContext = webReasoning.enabled
-        ? await webReasoning.beforeTurn(runtimeConfig.maxTurns - state.turns, runtimeConfig.maxToolCalls - state.toolCalls, toolSet.tools.map((tool) => tool.name))
+        ? await webReasoning.beforeTurn(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, toolSet.tools.map((tool) => tool.name))
         : "";
       let knowledgeContext = "";
       if (this.overrides.knowledgeStore) {
@@ -672,7 +657,6 @@ export class XuanShuRuntime {
       state.providerError = classifyProviderError(error);
       await audit.append("run.error", { message: state.stopReason, providerError: state.providerError });
     } finally {
-      clearTimeout(timer);
       options.signal?.removeEventListener("abort", abortRun);
       gateway.releaseRoute(runKey);
       this.overrides.permissionGate?.cancelSession?.(id);

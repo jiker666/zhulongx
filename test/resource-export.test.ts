@@ -82,9 +82,8 @@ describe("resource export", () => {
     expect(report.failed).toEqual([]);
   });
 
-  it("honors the HTTP budget and reports remaining IDs without issuing requests", async () => {
+  it("issues every export request without an HTTP budget cap and reports failures", async () => {
     const { config, audit } = await setup();
-    config.runtime.maxHttpRequests = 1;
     let calls = 0;
     const fetchImpl: typeof fetch = async () => {
       calls += 1;
@@ -102,10 +101,11 @@ describe("resource export", () => {
       audit,
       fetchImpl,
     });
-    expect(calls).toBe(1);
+    // Permissive policy: two ids × three accept attempts all reach the wire.
+    expect(calls).toBe(6);
     expect(report.successful).toEqual([]);
     expect(report.failed).toHaveLength(2);
-    expect(report.failed[0]?.reason).toContain("HTTP request budget exhausted");
+    expect(report.failed[0]?.reason).toContain("HTTP 503");
     expect(report.warning).toBe("部分资源失败，请检查网络或联系管理员");
   });
 

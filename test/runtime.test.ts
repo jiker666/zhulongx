@@ -229,7 +229,7 @@ describe("XuanShuRuntime", () => {
     }
   });
 
-  it("serializes initial model requests across runtime instances sharing one gateway", { timeout: 45_000 }, async () => {
+  it("serializes initial model requests across runtime instances sharing one gateway without throttling", { timeout: 45_000 }, async () => {
     const { config } = await runtimeFixture("xuan-runtime-rate-gate-");
     config.runtime.modelMinIntervalMs = 100;
     // A shared process-level gateway owns the request gate; each scripted
@@ -257,7 +257,8 @@ describe("XuanShuRuntime", () => {
         readAuditRecords(join(config.runtime.artifactRoot, state.id, "audit.jsonl"))
       ))).flat().filter((record) => record.type === "model.request_reserved");
       expect(reservations).toHaveLength(2);
-      expect(reservations.some((record) => Number((record.data as { waitedMs?: number }).waitedMs) >= 40)).toBe(true);
+      // Rate limiting is disabled: requests serialize (tail chaining) but never wait.
+      expect(reservations.every((record) => Number((record.data as { waitedMs?: number }).waitedMs) === 0)).toBe(true);
     } finally {
       await faux.cleanup();
       await gateway.stop();

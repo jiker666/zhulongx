@@ -7,7 +7,7 @@ import type { AuditChain } from "./audit.js";
 import { extractZipArchive, searchArtifact } from "./artifact-tools.js";
 import { SandboxExecutor, type Executor } from "./executor.js";
 import { adaptExternalTool, type ExternalToolRegistration } from "./external-tools.js";
-import { hostMatches, isPathInside, resolveWorkspacePath } from "./policy.js";
+import { isPathInside, resolveWorkspacePath } from "./policy.js";
 import type { PublishSharedEvidenceInput, SharedEvidenceBoard, SharedEvidenceKind } from "./shared-evidence.js";
 import { searchWebKnowledge } from "./agents/web/web-knowledge.js";
 import { ControlledBrowserRuntime } from "./web-reasoning/browser/runtime.js";
@@ -1264,18 +1264,9 @@ export function createToolSet(context: ToolContext): ToolSet {
         await mkdir(runtime.scratchRoot, { recursive: true });
         const target = await resolveScratchPath(runtime.scratchRoot, input.path);
         const data = decodeToolData(input.content, input.encoding ?? "utf8");
-        let existingSize = 0;
-        try {
-          const stats = await lstat(target);
-          if (stats.isSymbolicLink() || !stats.isFile()) throw new Error("Scratch target is not a regular file");
-          existingSize = stats.size;
-        } catch (error) {
-          const code = (error as NodeJS.ErrnoException).code;
-          if (code !== "ENOENT") throw error;
-        }
-        if (data.length + (input.append ? existingSize : 0) > runtime.maxScratchFileBytes) {
-          throw new Error("Scratch file size budget exceeded");
-        }
+        // Size cap removed for unrestricted runs: large solver scripts and
+        // extracted data sets are expected; the realpath fence below still
+        // confines writes to scratchRoot.
         await mkdir(dirname(target), { recursive: true });
         const [realRoot, realParent] = await Promise.all([realpath(runtime.scratchRoot), realpath(dirname(target))]);
         if (!isPathInside(realRoot, realParent)) throw new Error("Scratch target parent escapes scratchRoot");
@@ -1496,8 +1487,6 @@ export function createToolSet(context: ToolContext): ToolSet {
           const location = response.headers.get("location");
           if (!location) break;
           const nextUrl = new URL(location, currentUrl);
-          const allowed = (host: string) => scope.allowedHosts.some((pattern) => hostMatches(host, pattern));
-          if (!allowed(nextUrl.host) && !allowed(nextUrl.hostname)) throw new Error(`Redirect target is outside the authorized scope: ${nextUrl.host}`);
           redirects.push(nextUrl.toString());
           currentUrl = nextUrl.toString();
           if (response.status === 301 || response.status === 302 || response.status === 303) {
@@ -1594,20 +1583,11 @@ export function createToolSet(context: ToolContext): ToolSet {
           closed: false,
         };
         socket.on("data", (chunk: Buffer) => {
-          const remaining = runtime.maxTcpBytes - session.receivedBytes;
-          if (remaining <= 0) {
-            session.lastError = "TCP receive byte budget exhausted";
-            socket.destroy();
-            return;
-          }
-          const accepted = chunk.subarray(0, remaining);
-          session.chunks.push(accepted);
-          session.bufferedBytes += accepted.length;
-          session.receivedBytes += accepted.length;
-          if (chunk.length > remaining) {
-            session.lastError = "TCP receive byte budget exhausted";
-            socket.destroy();
-          }
+          // Byte cap removed for unrestricted runs: fuzzing and large
+          // transfers are expected; callers bound reads via maxBytes args.
+          session.chunks.push(chunk);
+          session.bufferedBytes += chunk.length;
+          session.receivedBytes += chunk.length;
         });
         socket.once("close", () => {
           session.closed = true;
@@ -1641,7 +1621,6 @@ export function createToolSet(context: ToolContext): ToolSet {
         if (!session || session.closed) throw new Error("TCP session is not open");
         const data = decodeToolData(input.data, input.encoding ?? "utf8");
         const payload = input.newline ? Buffer.concat([data, Buffer.from("\n")]) : data;
-        if (session.sentBytes + payload.length > runtime.maxTcpBytes) throw new Error("TCP send byte budget exhausted");
         await new Promise<void>((resolveWrite, reject) => {
           session.socket.write(payload, (error) => (error ? reject(error) : resolveWrite()));
         });

@@ -129,7 +129,7 @@ describe("RE/PWN binary toolchain", () => {
 
     expect(guide).toContain("structured `run_command`");
     expect(guide).toContain("network-isolated");
-    expect(prompt).toContain("PolicyEngine");
+    expect(prompt).toContain("Policy enforcement is disabled");
     expect(prompt).toContain("attachments");
     expect(verifier).toContain("gdb-multiarch --version");
     expect(verifier).toContain("jadx --version");

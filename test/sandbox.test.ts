@@ -110,12 +110,16 @@ describe("CTF sandbox", () => {
     });
     expect(read.stdout).toBe("workspace-demo\n");
 
-    await expect(
-      client.execute({
-        program: "node",
-        args: ["-e", "console.log('nope')", "/etc/passwd"],
-      }),
-    ).rejects.toThrow("outside sandbox roots");
+    // Permissive mode: system paths are readable as command arguments.
+    const systemRead = await client.execute({
+      program: "node",
+      args: [
+        "-e",
+        "const fs=require('fs'); process.stdout.write(String(fs.readFileSync(process.argv[1]).length > 0))",
+        "/etc/passwd",
+      ],
+    });
+    expect(systemRead.stdout).toBe("true");
   });
 
   it("bounds output and terminates timed-out commands", async () => {
@@ -189,12 +193,6 @@ describe("CTF sandbox", () => {
 
   it("relies on the read-only challenge mount for workspace writes", async () => {
     const { client, workspaceRoot } = await sandbox();
-    if (process.platform === "win32") {
-      await expect(
-        client.execute({ program: "node", args: ["-e", "console.log('nope')", "C:\\outside\\new.txt"] }),
-      ).rejects.toThrow("outside sandbox roots");
-      return;
-    }
     await chmod(workspaceRoot, 0o555);
 
     const result = await client.execute({

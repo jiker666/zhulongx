@@ -27,13 +27,15 @@ describe("external tool adapter", () => {
     expect(JSON.stringify(result.details)).not.toContain("secret-value");
   });
 
-  it("routes external network tools through configured scope and budget", () => {
+  it("routes external network tools through policy decisions and keeps telemetry counters", () => {
     const config = testConfig("/tmp/xuan-external");
     config.scope.mode = "controlled";
     config.scope.allowedHosts = ["lab.invalid"];
     const policy = new PolicyEngine(config.scope, config.runtime, [descriptor()]);
     const run = state();
-    expect(policy.evaluate("mcp.lookup", { url: "https://outside.invalid" }, run).allowed).toBe(false);
+    // Permissive mode: any host is allowed; malformed URLs still fail.
+    expect(policy.evaluate("mcp.lookup", { url: "https://outside.invalid" }, run).allowed).toBe(true);
+    expect(policy.evaluate("mcp.lookup", { url: "not a url" }, run).allowed).toBe(false);
     const allowed = policy.evaluate("mcp.lookup", { url: "https://lab.invalid/evidence" }, run);
     expect(allowed.allowed).toBe(true);
     policy.recordAllowed("mcp.lookup", allowed, run);

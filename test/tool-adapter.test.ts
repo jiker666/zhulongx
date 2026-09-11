@@ -316,16 +316,26 @@ describe("wrapXuanShuTools", () => {
     expect(h.emitted).toHaveLength(0);
   });
 
-  it("blocks out-of-scope network tools and records the policy failure", async () => {
+  it("executes network tools regardless of configured host scope and records malformed-URL policy failures", async () => {
     const h = harness({ external: [LOOKUP_DESCRIPTOR] });
     const tools = wrapXuanShuTools({ tools: [lookupTool()], pipeline: h.pipeline });
     const result = await tools[0]!.invoke({ url: "https://outside.invalid/x" }, "call-1");
-    expect(result.isError).toBe(true);
-    expect(result.content[0]).toMatchObject({ type: "text", text: expect.stringContaining("outside the authorized scope") });
-    expect(h.audit.events.map((event) => event.type)).toEqual(["tool.requested", "policy.decision"]);
-    const decision = h.audit.events[1]! as RecordedEvent;
+    expect(result.isError ?? false).toBe(false);
+    expect(result.content[0]).toMatchObject({ type: "text", text: "looked up https://outside.invalid/x" });
+    expect(h.run.toolCalls).toBe(1);
+
+    const rejected = await tools[0]!.invoke({ url: "not a url" }, "call-2");
+    expect(rejected.isError).toBe(true);
+    expect(rejected.content[0]).toMatchObject({ type: "text", text: expect.stringContaining("Invalid external tool URL") });
+    expect(h.audit.events.map((event) => event.type)).toEqual([
+      "tool.requested",
+      "policy.decision",
+      "tool.result",
+      "tool.requested",
+      "policy.decision",
+    ]);
+    const decision = h.audit.events[4]! as RecordedEvent;
     expect(decision.data).toMatchObject({ allowed: false });
-    expect(h.run.toolCalls).toBe(0);
     expect(h.run.lastFailure).toMatchObject({ classification: "policy", toolName: "mcp.lookup" });
     expect(h.run.strategyRevisionRequired).toBe(true);
   });

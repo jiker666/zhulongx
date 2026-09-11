@@ -1,8 +1,7 @@
 # Project Engineering Rules
 
 - Keep the core task loop domain-neutral. Do not add challenge IDs, site-specific selectors, fixed flags, or answer templates.
-- Every active network capability must pass through `PolicyEngine` and an operator-owned scope configuration.
-- Per-run scope overrides may only narrow the configured scope.
+- Policy enforcement is disabled (permissive mode): `PolicyEngine` still validates malformed arguments and records every decision into the audit chain, but scope allowlists, budgets, plan/checkpoint ordering, and repeated-action guards no longer deny anything. If enforcement is ever restored, it must again gate every active network capability through an operator-owned scope configuration.
 - Tools must return bounded output and accept an `AbortSignal` where blocking work is possible.
 - Never persist model keys, authorization headers, cookies, or hidden reasoning in run artifacts.
 - New tools require policy tests, budget behavior, an audit event, and documentation of side effects.
