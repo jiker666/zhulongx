@@ -1,8 +1,7 @@
-import type { Context, Message, Model, SimpleStreamOptions, Usage } from "@earendil-works/pi-ai";
-
 const RATE_WINDOW_MS = 60_000;
 const CHARS_PER_TOKEN = 4;
 const ESTIMATED_IMAGE_TOKENS = 1_200;
+const DEFAULT_OUTPUT_TOKEN_BUDGET = 4_096;
 
 export interface ModelRequestLimits {
   minimumIntervalMs: number;
@@ -12,6 +11,7 @@ export interface ModelRequestLimits {
 }
 
 export interface ModelRequestReservation {
+  entryId: string;
   estimatedTokens: number;
   startedAt: number;
   waitedMs: number;
@@ -23,8 +23,47 @@ interface ModelRequestGateOptions {
 }
 
 interface ModelRequestEntry {
+  id: string;
   startedAt: number;
   tokens: number;
+}
+
+// Structural subsets of the legacy agent-loop message shapes still consumed by
+// runtime.ts. They carry no framework dependency and disappear with the legacy
+// loop; the gateway estimates from raw request bodies instead.
+export interface EstimateModel {
+  maxTokens?: number;
+}
+
+export interface EstimateUsage {
+  input?: number;
+  output?: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+  totalTokens?: number;
+}
+
+export interface EstimateContentBlock {
+  type?: string;
+  text?: string;
+  thinking?: string;
+  data?: unknown;
+  name?: string;
+  arguments?: unknown;
+}
+
+export interface EstimateMessage {
+  role: string;
+  content: string | EstimateContentBlock[];
+  usage?: EstimateUsage;
+  timestamp?: number;
+  stopReason?: string;
+}
+
+export interface EstimateContext {
+  systemPrompt?: string;
+  messages: EstimateMessage[];
+  tools?: unknown[];
 }
 
 function safeJsonStringify(value: unknown): string {
@@ -35,36 +74,42 @@ function safeJsonStringify(value: unknown): string {
   }
 }
 
-function estimateContentTokens(content: Message["content"]): number {
+function estimateContentTokens(content: EstimateMessage["content"]): number {
   if (typeof content === "string") return Math.ceil(content.length / CHARS_PER_TOKEN);
   let tokens = 0;
   for (const block of content) {
-    if (block.type === "text") tokens += Math.ceil(block.text.length / CHARS_PER_TOKEN);
-    else if (block.type === "image") tokens += ESTIMATED_IMAGE_TOKENS;
-    else if (block.type === "thinking") tokens += Math.ceil(block.thinking.length / CHARS_PER_TOKEN);
-    else tokens += Math.ceil((block.name.length + safeJsonStringify(block.arguments).length) / CHARS_PER_TOKEN);
+    if (block?.type === "text") tokens += Math.ceil(String(block.text ?? "").length / CHARS_PER_TOKEN);
+    else if (block?.type === "image") tokens += ESTIMATED_IMAGE_TOKENS;
+    else if (block?.type === "thinking") tokens += Math.ceil(String(block.thinking ?? "").length / CHARS_PER_TOKEN);
+    else tokens += Math.ceil((String(block?.name ?? "").length + safeJsonStringify(block?.arguments).length) / CHARS_PER_TOKEN);
   }
   return tokens;
 }
 
-function reportedContextTokens(usage: Usage): number {
-  return usage.totalTokens || usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+function reportedContextTokens(usage: EstimateUsage): number {
+  return usage.totalTokens
+    || (usage.input ?? 0) + (usage.output ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
 }
 
-function estimateContextInputTokens(context: Context): number {
+function estimateContextInputTokens(context: EstimateContext): number {
   let lastUsageIndex = -1;
   let lastUsageTokens = 0;
   let latestPrefixTimestamp = Number.NEGATIVE_INFINITY;
 
   for (const [index, message] of context.messages.entries()) {
     if (message.role === "assistant") {
-      const tokens = reportedContextTokens(message.usage);
-      if (message.timestamp >= latestPrefixTimestamp && tokens > 0 && !["aborted", "error"].includes(message.stopReason)) {
+      const tokens = message.usage ? reportedContextTokens(message.usage) : 0;
+      if (
+        typeof message.timestamp === "number"
+        && message.timestamp >= latestPrefixTimestamp
+        && tokens > 0
+        && !["aborted", "error"].includes(String(message.stopReason ?? ""))
+      ) {
         lastUsageIndex = index;
         lastUsageTokens = tokens;
       }
     }
-    latestPrefixTimestamp = Math.max(latestPrefixTimestamp, message.timestamp);
+    if (typeof message.timestamp === "number") latestPrefixTimestamp = Math.max(latestPrefixTimestamp, message.timestamp);
   }
 
   if (lastUsageIndex >= 0) {
@@ -83,12 +128,62 @@ function estimateContextInputTokens(context: Context): number {
 }
 
 export function estimateModelRequestTokens(
-  model: Model<string>,
-  context: Context,
-  options?: SimpleStreamOptions,
+  model: EstimateModel,
+  context: EstimateContext,
+  options?: { maxTokens?: number },
 ): number {
   const inputTokens = estimateContextInputTokens(context);
-  const outputBudget = options?.maxTokens ?? model.maxTokens;
+  const outputBudget = options?.maxTokens ?? model.maxTokens ?? DEFAULT_OUTPUT_TOKEN_BUDGET;
+  return Math.max(1, Math.ceil(Math.max(inputTokens, outputBudget)));
+}
+
+/**
+ * Estimate the token footprint of a raw Anthropic Messages API request body.
+ * This is the gateway admission estimate: serialized characters / 4 plus a
+ * fixed allowance per image, floored by the requested output budget, matching
+ * the legacy estimator's admission policy. Actual usage from the response
+ * true-ups the rolling window via ModelRequestGate.recordActualTokens.
+ */
+export function estimateAnthropicRequestTokens(request: unknown, fallbackOutputTokens = DEFAULT_OUTPUT_TOKEN_BUDGET): number {
+  if (!request || typeof request !== "object") return fallbackOutputTokens;
+  const body = request as Record<string, unknown>;
+  let chars = 0;
+  let images = 0;
+  const addText = (value: unknown): void => {
+    if (typeof value === "string") chars += value.length;
+  };
+  const walkContent = (content: unknown): void => {
+    if (typeof content === "string") {
+      addText(content);
+      return;
+    }
+    if (!Array.isArray(content)) {
+      chars += safeJsonStringify(content).length;
+      return;
+    }
+    for (const block of content) {
+      if (!block || typeof block !== "object") continue;
+      const part = block as Record<string, unknown>;
+      if (part.type === "text") addText(part.text);
+      else if (part.type === "thinking") addText(part.thinking);
+      else if (part.type === "image") images += 1;
+      else if (part.type === "tool_use") chars += String(part.name ?? "").length + safeJsonStringify(part.input).length;
+      else if (part.type === "tool_result") walkContent(part.content);
+      else chars += safeJsonStringify(part).length;
+    }
+  };
+  if (typeof body.system === "string") addText(body.system);
+  else if (Array.isArray(body.system)) walkContent(body.system);
+  if (Array.isArray(body.messages)) {
+    for (const message of body.messages) {
+      if (message && typeof message === "object") walkContent((message as Record<string, unknown>).content);
+    }
+  }
+  if (Array.isArray(body.tools)) chars += safeJsonStringify(body.tools).length;
+  const inputTokens = Math.ceil(chars / CHARS_PER_TOKEN) + images * ESTIMATED_IMAGE_TOKENS;
+  const outputBudget = typeof body.max_tokens === "number" && Number.isFinite(body.max_tokens) && body.max_tokens > 0
+    ? body.max_tokens
+    : fallbackOutputTokens;
   return Math.max(1, Math.ceil(Math.max(inputTokens, outputBudget)));
 }
 
@@ -132,6 +227,7 @@ export class ModelRequestGate {
   private readonly now: () => number;
   private readonly sleep: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
   private readonly requests: ModelRequestEntry[] = [];
+  private entryCounter = 0;
   private tail: Promise<void> = Promise.resolve();
   private lastStartedAt = Number.NEGATIVE_INFINITY;
 
@@ -167,14 +263,26 @@ export class ModelRequestGate {
         );
         if (waitMs <= 0) {
           this.lastStartedAt = now;
-          this.requests.push({ startedAt: now, tokens: estimatedTokens });
-          return { estimatedTokens, startedAt: now, waitedMs: Math.max(0, now - queuedAt) };
+          const entryId = `model-request-${this.requests.length + 1}-${++this.entryCounter}`;
+          this.requests.push({ id: entryId, startedAt: now, tokens: estimatedTokens });
+          return { entryId, estimatedTokens, startedAt: now, waitedMs: Math.max(0, now - queuedAt) };
         }
         await this.sleep(Math.max(1, Math.ceil(waitMs)), signal);
       }
     } finally {
       release();
     }
+  }
+
+  /**
+   * Replace a reservation's estimate with the usage the provider actually
+   * reported, keeping the rolling token window honest. Late true-ups for
+   * entries that already fell out of the window are no-ops.
+   */
+  recordActualTokens(entryId: string, actualTokens: number): void {
+    if (!Number.isFinite(actualTokens) || actualTokens <= 0) return;
+    const entry = this.requests.find((request) => request.id === entryId);
+    if (entry) entry.tokens = Math.ceil(actualTokens);
   }
 
   private prune(now: number): void {

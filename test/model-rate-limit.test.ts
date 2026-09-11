@@ -1,19 +1,11 @@
-import type { Context, Model } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
-import { estimateModelRequestTokens, ModelRequestGate } from "../src/model-rate-limit.js";
+import {
+  estimateAnthropicRequestTokens,
+  estimateModelRequestTokens,
+  ModelRequestGate,
+} from "../src/model-rate-limit.js";
 
-const model: Model<string> = {
-  id: "rate-limit-test",
-  name: "Rate Limit Test",
-  api: "openai-completions",
-  provider: "faux",
-  baseUrl: "http://localhost:0",
-  reasoning: false,
-  input: ["text"],
-  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-  contextWindow: 32_000,
-  maxTokens: 4_096,
-};
+const model = { maxTokens: 4_096 };
 
 function gateWithClock() {
   let now = 0;
@@ -25,7 +17,7 @@ function gateWithClock() {
       now += milliseconds;
     },
   });
-  return { gate, sleeps };
+  return { gate, sleeps, advance: (milliseconds: number) => { now += milliseconds; } };
 }
 
 describe("ModelRequestGate", () => {
@@ -75,32 +67,58 @@ describe("ModelRequestGate", () => {
 
     await expect(blocked).rejects.toThrow("operator stopped the run");
   });
+
+  it("true-ups the rolling token window with actual provider usage", async () => {
+    const { gate, sleeps } = gateWithClock();
+    const limits = { minimumIntervalMs: 0, requestsPerMinute: 0, tokensPerMinute: 100, estimatedTokens: 10 };
+
+    const first = await gate.wait(limits);
+    expect(first.estimatedTokens).toBe(10);
+
+    gate.recordActualTokens(first.entryId, 85);
+    // 85 + 10 fits, so the second request is admitted without waiting.
+    await gate.wait(limits);
+    // The estimate was 10 but the window now holds 85 + 10 actual/estimated
+    // tokens, so a third request has to wait for the trued-up entry to expire.
+    await gate.wait(limits);
+
+    expect(sleeps).toEqual([60_000]);
+  });
+
+  it("ignores true-ups for entries outside the rolling window", async () => {
+    const { gate, sleeps, advance } = gateWithClock();
+    const limits = { minimumIntervalMs: 0, requestsPerMinute: 0, tokensPerMinute: 100, estimatedTokens: 10 };
+
+    const first = await gate.wait(limits);
+    advance(60_001);
+    gate.recordActualTokens(first.entryId, 1_000);
+    const third = await gate.wait(limits);
+
+    expect(third.waitedMs).toBe(0);
+    expect(sleeps).toEqual([]);
+  });
 });
 
-describe("estimateModelRequestTokens", () => {
+describe("estimateModelRequestTokens (legacy context shapes)", () => {
   it("reserves at least the configured output budget for a small initial request", () => {
-    const context: Context = { systemPrompt: "system", messages: [], tools: [] };
+    const context = { systemPrompt: "system", messages: [], tools: [] };
     expect(estimateModelRequestTokens(model, context)).toBe(4_096);
   });
 
   it("uses reported usage plus trailing tool output for a growing context", () => {
-    const context: Context = {
+    const context = {
       systemPrompt: "system",
       tools: [],
       messages: [
         {
           role: "assistant",
           content: [{ type: "text", text: "analysis" }],
-          api: "openai-completions",
-          provider: "faux",
-          model: model.id,
           usage: {
             input: 18_000,
             output: 2_000,
             cacheRead: 0,
             cacheWrite: 0,
             totalTokens: 20_000,
-            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
           },
           stopReason: "toolUse",
           timestamp: 1,
@@ -108,7 +126,6 @@ describe("estimateModelRequestTokens", () => {
         {
           role: "toolResult",
           toolCallId: "call-1",
-          toolName: "read_file",
           content: [{ type: "text", text: "x".repeat(400) }],
           isError: false,
           timestamp: 2,
@@ -117,5 +134,51 @@ describe("estimateModelRequestTokens", () => {
     };
 
     expect(estimateModelRequestTokens(model, context)).toBe(20_100);
+  });
+});
+
+describe("estimateAnthropicRequestTokens", () => {
+  it("floors the estimate at the requested output budget", () => {
+    expect(estimateAnthropicRequestTokens({ model: "m", max_tokens: 8_192, messages: [] })).toBe(8_192);
+  });
+
+  it("estimates text, tool calls, and tool results from a raw request body", () => {
+    const request = {
+      system: "system prompt (20 chars)",
+      max_tokens: 16,
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "text", text: "x".repeat(400) }],
+        },
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "t1", name: "run_command", input: { program: "python3", args: ["-c", "print(1)"] } }],
+        },
+        {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "t1", content: "y".repeat(80) }],
+        },
+      ],
+      tools: [{ name: "run_command", description: "bounded execution", input_schema: { type: "object" } }],
+    };
+    const estimate = estimateAnthropicRequestTokens(request);
+    // 400 text chars + tool call + tool result + serialized tools + system,
+    // divided by 4 — comfortably above the 16-token output floor.
+    expect(estimate).toBeGreaterThan(100);
+    expect(estimate).toBeLessThan(400);
+  });
+
+  it("counts images at a fixed allowance and falls back to a default output budget", () => {
+    const request = {
+      max_tokens: 100,
+      messages: [{ role: "user", content: [{ type: "image", source: { type: "base64", data: "a".repeat(2_000) } }] }],
+    };
+    expect(estimateAnthropicRequestTokens(request)).toBe(1_200);
+  });
+
+  it("returns the fallback budget for non-object bodies", () => {
+    expect(estimateAnthropicRequestTokens(null)).toBe(4_096);
+    expect(estimateAnthropicRequestTokens("nope", 128)).toBe(128);
   });
 });

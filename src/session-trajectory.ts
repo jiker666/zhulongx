@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import type { Context } from "@earendil-works/pi-ai";
 import { sanitizeSecrets } from "./sanitize.js";
 
 export type TrajectorySource = "operator" | "orchestrator" | "model" | "context" | "policy" | "tool" | "agent" | "system";
@@ -9,6 +8,17 @@ export interface AuditEventMetadata {
   actor?: string;
   correlationId?: string;
   parentSequence?: number;
+}
+
+/**
+ * Neutral view of an outgoing model request. The model gateway builds this from
+ * the parsed Anthropic-protocol request body; nothing here depends on a client
+ * framework's context shape.
+ */
+export interface ModelContextView {
+  systemPrompt?: string;
+  messages: Array<{ role: string; content: unknown }>;
+  tools?: Array<{ name: string; description: string; parameters: unknown }>;
 }
 
 const MAX_STRING_CHARS = 16_000;
@@ -81,7 +91,7 @@ export function publicMessageForArtifacts(message: unknown): unknown {
   });
 }
 
-export function modelContextSnapshot(context: Context): Record<string, unknown> {
+export function modelContextSnapshot(context: ModelContextView): Record<string, unknown> {
   const visibleMessages = context.messages.slice(-MAX_CONTEXT_MESSAGES).map(publicMessageForArtifacts);
   const snapshot = boundedPublicValue({
     systemPrompt: context.systemPrompt ?? "",
