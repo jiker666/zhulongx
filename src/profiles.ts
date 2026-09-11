@@ -21,11 +21,6 @@ export function defaultAgentProfile(config: AppConfig): ResolvedAgentProfile {
       "http_request", "browser", "tcp_open", "tcp_send", "tcp_receive", "tcp_close",
       "read_shared_evidence", "publish_shared_evidence",
     ])],
-    contextPolicy: {
-      compactAtRatio: 0.75,
-      keepRecentTokens: Math.max(2_000, Math.floor(config.model.contextWindow * 0.25)),
-      maxSummaryChars: 12_000,
-    },
   };
 }
 

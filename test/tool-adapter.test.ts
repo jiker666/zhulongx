@@ -1,3 +1,6 @@
+import { createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -7,6 +10,7 @@ import { PolicyEngine } from "../src/policy.js";
 import {
   createToolCallPipeline,
   createXuanShuMcpServer,
+  toolParameterDefaults,
   toolParametersToZodShape,
   wrapXuanShuTools,
   XUANSHU_MCP_SERVER_NAME,
@@ -57,8 +61,9 @@ function echoTool(): ToolShape {
       times: Type.Optional(Type.Integer({ minimum: 1, maximum: 5, default: 1 })),
     }),
     async execute(_id, params) {
-      const input = params as { text: string; times?: number };
-      return { content: [{ type: "text" as const, text: input.text.repeat(input.times ?? 1) }], details: { apiKey: "super-secret-key" } };
+      // No ?? fallback: the wrapper must supply the typebox default.
+      const input = params as { text: string; times: number };
+      return { content: [{ type: "text" as const, text: input.text.repeat(input.times) }], details: { apiKey: "super-secret-key" } };
     },
   };
 }
@@ -190,7 +195,7 @@ function harness(options: HarnessOptions = {}) {
 }
 
 describe("toolParametersToZodShape", () => {
-  const shape = toolParametersToZodShape(Type.Object({
+  const schema = Type.Object({
     name: Type.String({ minLength: 2, maxLength: 10 }),
     mode: Type.Optional(Type.Union([Type.Literal("fast"), Type.Literal("slow")])),
     count: Type.Optional(Type.Integer({ minimum: 0, maximum: 9, default: 4 })),
@@ -200,12 +205,15 @@ describe("toolParametersToZodShape", () => {
     nested: Type.Optional(Type.Object({ inner: Type.Optional(Type.String()) })),
     index: Type.Optional(Type.Record(Type.String(), Type.Integer())),
     extra: Type.Optional(Type.Unknown()),
-  }));
+  });
+  const shape = toolParametersToZodShape(schema);
+  const defaults = toolParameterDefaults(schema);
+  const parse = (input: unknown): unknown => ({ ...defaults, ...z.object(shape).parse(input) });
 
-  it("parses valid input and applies defaults", () => {
-    const validator = z.object(shape);
-    expect(validator.parse({ name: "ab" })).toEqual({ name: "ab", count: 4 });
-    expect(validator.parse({
+  it("parses valid input and applies typebox defaults after the raw parse", () => {
+    expect(z.object(shape).parse({ name: "ab" })).toEqual({ name: "ab" });
+    expect(parse({ name: "ab" })).toEqual({ name: "ab", count: 4 });
+    expect(parse({
       name: "abcd",
       mode: "fast",
       ratio: 0.5,
@@ -240,6 +248,38 @@ describe("toolParametersToZodShape", () => {
     expect(() => toolParametersToZodShape(Type.String())).toThrow("Type.Object");
     expect(() => toolParametersToZodShape(Type.Object({ value: Type.Null() }))).toThrow("Unsupported typebox schema");
     expect(() => toolParametersToZodShape(Type.Object({ value: Type.Union([]) }))).toThrow("empty union");
+  });
+
+  it("converts cleanly through the Agent SDK's own registration, listing, and validation path", { timeout: 10_000 }, async () => {
+    // Regression contract for SDK/zod copy drift: the SDK's bundled zod build
+    // rejects absent ZodDefault fields ("expected nonoptional") and its
+    // zod→JSON-Schema conversion crashes on foreign ZodRecord instances. The
+    // converted shape must survive both paths.
+    const server = createSdkMcpServer({
+      name: XUANSHU_MCP_SERVER_NAME,
+      version: "1.0.0",
+      alwaysLoad: true,
+      tools: [{
+        name: "matrix",
+        description: "SDK compatibility probe",
+        inputSchema: shape,
+        handler: async () => ({ content: [{ type: "text", text: "ok" }] }),
+      }],
+    });
+    const client = new Client({ name: "probe", version: "0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.instance.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const list = await client.listTools();
+      expect(list.tools.map((tool) => tool.name)).toEqual(["matrix"]);
+      const admitted = await client.callTool({ name: "matrix", arguments: { name: "ab" } });
+      expect(admitted.isError).toBeUndefined();
+      const rejected = await client.callTool({ name: "matrix", arguments: { name: "a" } });
+      expect(rejected.isError).toBe(true);
+    } finally {
+      await client.close();
+    }
   });
 });
 

@@ -1,8 +1,7 @@
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { describe, expect, it } from "vitest";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider, streamSimple, type FauxProviderRegistration } from "@earendil-works/pi-ai/compat";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { AuditChain } from "../src/audit.js";
 import { ActionDeduplicator } from "../src/web-reasoning/action-deduplicator.js";
 import { evaluateProgress } from "../src/web-reasoning/evaluator.js";
@@ -15,6 +14,7 @@ import { detectWebTask } from "../src/web-reasoning/task-detector.js";
 import type { RunState } from "../src/types.js";
 import { XuanShuRuntime } from "../src/runtime.js";
 import { testConfig } from "./helpers.js";
+import { agentToolStep, registerFauxCli, successResult } from "./faux-cli.js";
 import { sanitizeSecrets } from "../src/sanitize.js";
 import { WebActionGuard } from "../src/web-reasoning/action-guard.js";
 import { createWebReasoningController } from "../src/web-reasoning/controller.js";
@@ -25,6 +25,16 @@ function run(): RunState {
 }
 
 describe("Web Reasoning Engine", () => {
+  beforeAll(() => {
+    // The integration test drives the embedded runtime, which requires a model
+    // credential even when every model turn is scripted through the faux CLI.
+    process.env.XUANSHU_TEST_API_KEY = "unit-test-faux-key";
+  });
+
+  afterAll(() => {
+    delete process.env.XUANSHU_TEST_API_KEY;
+  });
+
   it("detects explicit and URL Web tasks without false-positive weak words", () => {
     expect(detectWebTask({ task: "web", attachments: [], metadata: { category: "Crypto" } }).isWeb).toBe(false);
     expect(detectWebTask({ task: "inspect http://lab.example.invalid/", attachments: [], metadata: {} }).isWeb).toBe(true);
@@ -103,18 +113,19 @@ describe("Web Reasoning Engine", () => {
     }
   });
 
-  it("integrates detection, policy-gated tool execution, evidence, persistence, and finalization", async () => {
+  it("integrates detection, policy-gated tool execution, evidence, persistence, and finalization", { timeout: 30_000 }, async () => {
     const root = await mkdtemp(join(tmpdir(), "xuan-web-runtime-"));
-    let faux: FauxProviderRegistration | undefined;
+    const faux = await registerFauxCli([
+      agentToolStep("plan-web", "submit_plan", { goal: "Inspect the authorized Web target", assumptions: [], hypotheses: [], steps: [{ id: "web", objective: "Read bounded Web knowledge", successCriteria: ["Knowledge is returned"], tools: ["web_knowledge_lookup"] }] }),
+      agentToolStep("knowledge-web", "web_knowledge_lookup", { query: "response comparison" }),
+      agentToolStep("finish-web", "finish_task", { status: "blocked", summary: "No candidate was produced by the bounded integration fixture", evidence: [], remainingRisks: ["A live target was not contacted"], nextSteps: ["Supply an authorized target response"], confidence: 0.2, verification: ["The fixture only verified tool orchestration"], independentlyVerified: true }),
+      successResult("done"),
+    ]);
     try {
       const config = testConfig(root);
-      faux = registerFauxProvider();
-      faux.setResponses([
-        fauxAssistantMessage(fauxToolCall("submit_plan", { goal: "Inspect the authorized Web target", assumptions: [], hypotheses: [], steps: [{ id: "web", objective: "Read bounded Web knowledge", successCriteria: ["Knowledge is returned"], tools: ["web_knowledge_lookup"] }] }, { id: "plan-web" }), { stopReason: "toolUse" }),
-        fauxAssistantMessage(fauxToolCall("web_knowledge_lookup", { query: "response comparison" }, { id: "knowledge-web" }), { stopReason: "toolUse" }),
-        fauxAssistantMessage(fauxToolCall("finish_task", { status: "blocked", summary: "No candidate was produced by the bounded integration fixture", evidence: [], remainingRisks: ["A live target was not contacted"], nextSteps: ["Supply an authorized target response"], confidence: 0.2, verification: ["The fixture only verified tool orchestration"], independentlyVerified: true }, { id: "finish-web" }), { stopReason: "toolUse" }),
-      ]);
-      const runtime = new XuanShuRuntime(config, { streamFn: streamSimple, model: faux.getModel() });
+      config.runtime.maxRuntimeMs = 30_000;
+      await mkdir(root, { recursive: true });
+      const runtime = new XuanShuRuntime(config, { sdk: { pathToClaudeCodeExecutable: faux.executablePath, env: faux.env } });
       const state = await runtime.run({ task: "Authorized Web CTF target: https://lab.example.invalid/" });
       expect(state.webReasoning?.taskClassification.isWeb).toBe(true);
       expect(state.evidence?.length).toBeGreaterThan(0);
@@ -123,7 +134,7 @@ describe("Web Reasoning Engine", () => {
       expect(state.status).toBe("blocked");
       expect(state.webReasoning?.phase).toBe("blocked");
     } finally {
-      faux?.unregister();
+      await faux.cleanup();
       await rm(root, { recursive: true, force: true });
     }
   });

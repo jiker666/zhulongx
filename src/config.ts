@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { parse } from "yaml";
 import { hostMatches, isPathInside } from "./policy.js";
-import type { AppConfig, ModelThinkingFormat, ScopeConfig, WebReasoningConfig } from "./types.js";
+import type { AppConfig, ScopeConfig, WebReasoningConfig } from "./types.js";
 
 const DEFAULT_CONFIG_PATH = resolve("config/default.yaml");
 
@@ -71,35 +71,22 @@ function validateConfig(value: unknown, configPath: string): AppConfig {
   }
   const mode = requireString(scope.mode, "scope.mode");
   if (mode !== "observe" && mode !== "controlled") throw new Error("scope.mode must be observe or controlled");
-  const api = requireString(model.api, "model.api");
-  if (api !== "anthropic-messages" && api !== "openai-completions" && api !== "openai-responses") {
-    throw new Error("model.api must be anthropic-messages, openai-completions, or openai-responses");
+  const authScheme = model.authScheme === undefined ? undefined : requireString(model.authScheme, "model.authScheme");
+  if (authScheme !== undefined && authScheme !== "bearer" && authScheme !== "api-key") {
+    throw new Error("model.authScheme must be bearer or api-key");
   }
-  const thinkingFormat = model.thinkingFormat === undefined ? undefined : requireString(model.thinkingFormat, "model.thinkingFormat");
-  const validThinkingFormats: ModelThinkingFormat[] = ["openai", "openrouter", "deepseek", "together", "zai", "qwen", "chat-template", "qwen-chat-template", "string-thinking", "ant-ling"];
-  if (thinkingFormat !== undefined && !validThinkingFormats.includes(thinkingFormat as ModelThinkingFormat)) {
-    throw new Error("model.thinkingFormat is invalid");
-  }
-  if (model.supportsReasoningEffort !== undefined && typeof model.supportsReasoningEffort !== "boolean") {
-    throw new Error("model.supportsReasoningEffort must be a boolean");
-  }
+  const contextWindow = model.contextWindow === undefined ? undefined : requireNumber(model.contextWindow, "model.contextWindow");
 
   const result: AppConfig = {
     model: {
       provider: requireString(model.provider, "model.provider"),
       id: requireString(model.id, "model.id"),
       name: requireString(model.name, "model.name"),
-      api,
       baseUrl: requireString(model.baseUrl, "model.baseUrl").replace(/\/$/, ""),
       apiKeyEnv: requireString(model.apiKeyEnv, "model.apiKeyEnv"),
-      reasoning: Boolean(model.reasoning),
-      ...(thinkingFormat ? { thinkingFormat: thinkingFormat as ModelThinkingFormat } : {}),
-      ...(model.supportsReasoningEffort === undefined ? {} : { supportsReasoningEffort: model.supportsReasoningEffort }),
-      contextWindow: requireNumber(model.contextWindow, "model.contextWindow"),
-      maxTokens: requireNumber(model.maxTokens, "model.maxTokens"),
-      ...(model.headersFromEnv === undefined
-        ? {}
-        : { headersFromEnv: stringRecord(model.headersFromEnv, "model.headersFromEnv") }),
+      ...(model.reasoning === undefined ? {} : { reasoning: Boolean(model.reasoning) }),
+      ...(contextWindow === undefined ? {} : { contextWindow }),
+      ...(authScheme ? { authScheme: authScheme as NonNullable<AppConfig["model"]["authScheme"]> } : {}),
     },
     runtime: {
       thinkingLevel: thinkingLevel as AppConfig["runtime"]["thinkingLevel"],
@@ -108,6 +95,10 @@ function validateConfig(value: unknown, configPath: string): AppConfig {
       maxTurns: requireNumber(runtime.maxTurns, "runtime.maxTurns"),
       maxToolCalls: requireNumber(runtime.maxToolCalls, "runtime.maxToolCalls"),
       maxRuntimeMs: requireNumber(runtime.maxRuntimeMs, "runtime.maxRuntimeMs"),
+      maxConcurrentSdkSessions:
+        runtime.maxConcurrentSdkSessions === undefined
+          ? 16
+          : requireNumber(runtime.maxConcurrentSdkSessions, "runtime.maxConcurrentSdkSessions"),
       modelMinIntervalMs:
         runtime.modelMinIntervalMs === undefined ? 0 : requireNumber(runtime.modelMinIntervalMs, "runtime.modelMinIntervalMs"),
       modelRequestsPerMinute:
@@ -226,9 +217,6 @@ function validateConfig(value: unknown, configPath: string): AppConfig {
     }
     const approvalPolicy = profile.approvalPolicy === undefined ? undefined : requireString(profile.approvalPolicy, "profile.approvalPolicy");
     if (approvalPolicy !== undefined && !["always", "on-request", "never"].includes(approvalPolicy)) throw new Error("profile.approvalPolicy is invalid");
-    const contextPolicy = requireObject(profile.contextPolicy, "profile.contextPolicy");
-    const compactAtRatio = requireNumber(contextPolicy.compactAtRatio, "profile.contextPolicy.compactAtRatio");
-    if (compactAtRatio >= 1) throw new Error("profile.contextPolicy.compactAtRatio must be smaller than 1");
     result.profile = {
       id: requireString(profile.id, "profile.id"),
       ...(profile.systemPrompt === undefined ? {} : { systemPrompt: requireString(profile.systemPrompt, "profile.systemPrompt") }),
@@ -237,11 +225,6 @@ function validateConfig(value: unknown, configPath: string): AppConfig {
       requiredCapabilities: stringArray(profile.requiredCapabilities, "profile.requiredCapabilities"),
       toolAllowlist: stringArray(profile.toolAllowlist, "profile.toolAllowlist"),
       ...(approvalPolicy === undefined ? {} : { approvalPolicy: approvalPolicy as "always" | "on-request" | "never" }),
-      contextPolicy: {
-        compactAtRatio,
-        keepRecentTokens: requireNumber(contextPolicy.keepRecentTokens, "profile.contextPolicy.keepRecentTokens"),
-        maxSummaryChars: requireNumber(contextPolicy.maxSummaryChars, "profile.contextPolicy.maxSummaryChars"),
-      },
     };
   }
   if (!Array.isArray(connectors)) throw new Error("connectors must be an array");

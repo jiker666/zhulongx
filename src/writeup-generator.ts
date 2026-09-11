@@ -1,25 +1,26 @@
-import { Agent } from "@earendil-works/pi-agent-core";
-import type { StreamFn } from "@earendil-works/pi-agent-core";
-import type { Model } from "@earendil-works/pi-ai";
+import { runSdkSingleShot, type AgentSdkOverride, type AgentThinkingLevel } from "./agent-driver.js";
 import { sanitizeSecrets } from "./sanitize.js";
 import type { NormalizedTask, RunState } from "./types.js";
 
 const MAX_PROMPT_CHARS = 72_000;
 const MAX_WRITEUP_CHARS = 16 * 1024;
 const MAX_ATTEMPTS = 2;
-type SupportedModel = Model<string>;
 
 export interface WriteupGenerationInput {
   runId: string;
   task: NormalizedTask;
   state: RunState;
   transcript: unknown[];
-  model: SupportedModel;
-  streamFn: StreamFn;
-  apiKey?: string;
-  maxRetryDelayMs?: number;
+  /** Model id passed through to the gateway route (credentials live in the route, not here). */
+  modelId: string;
+  /** Loopback model-gateway route URL for this writeup generation. */
+  baseUrl: string;
+  /** Test seam: faux CLI executable/env for the isolated single-shot subprocess. */
+  sdk?: AgentSdkOverride;
+  thinkingLevel?: AgentThinkingLevel;
   signal?: AbortSignal;
   timeoutMs: number;
+  maxTurns?: number;
 }
 
 export interface WriteupGenerationResult { markdown: string; attempts: number }
@@ -116,6 +117,10 @@ function validate(markdown: string, submission: string | undefined): string[] {
   return errors;
 }
 
+/**
+ * Generate the final writeup with an isolated single-shot SDK query: no tools,
+ * no MCP servers, one turn per attempt, up to two validation-driven retries.
+ */
 export async function generateWriteup(input: WriteupGenerationInput): Promise<WriteupGenerationResult> {
   const timeoutController = new AbortController();
   const relay = () => timeoutController.abort(input.signal?.reason ?? new Error("Writeup generation aborted"));
@@ -126,21 +131,19 @@ export async function generateWriteup(input: WriteupGenerationInput): Promise<Wr
     let validationError: string | undefined;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
       timeoutController.signal.throwIfAborted();
-      const agent = new Agent({
-        streamFn: input.streamFn,
-        sessionId: `${input.runId}:writeup:${attempt}`,
-        getApiKey: () => input.apiKey,
-        ...(input.maxRetryDelayMs === undefined ? {} : { maxRetryDelayMs: input.maxRetryDelayMs }),
-        toolExecution: "sequential",
-        initialState: { model: input.model, thinkingLevel: "low", systemPrompt: "Write only the requested final CTF writeup. Do not expose hidden reasoning.", tools: [] },
+      const result = await runSdkSingleShot({
+        prompt: promptFor(input, previousDraft, validationError),
+        systemPrompt: "Write only the requested final CTF writeup. Do not expose hidden reasoning.",
+        modelId: input.modelId,
+        baseUrl: input.baseUrl,
+        thinkingLevel: input.thinkingLevel ?? "low",
+        ...(input.sdk ? { sdk: input.sdk } : {}),
+        signal: timeoutController.signal,
+        maxTurns: input.maxTurns ?? 1,
       });
-      const abort = () => agent.abort();
-      timeoutController.signal.addEventListener("abort", abort, { once: true });
-      try { await agent.prompt(promptFor(input, previousDraft, validationError)); }
-      finally { timeoutController.signal.removeEventListener("abort", abort); }
       timeoutController.signal.throwIfAborted();
-      const last = [...agent.state.messages].reverse().find((message) => message.role === "assistant");
-      const draft = bounded(textFromAssistant(last), MAX_WRITEUP_CHARS).trim();
+      if (result.isError) throw new Error(result.errorMessage || "Writeup model request failed");
+      const draft = bounded(result.resultText, MAX_WRITEUP_CHARS).trim();
       const errors = validate(draft, input.state.submission);
       if (errors.length === 0) return { markdown: draft, attempts: attempt };
       previousDraft = draft;

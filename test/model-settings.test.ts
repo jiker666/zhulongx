@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createModel, XuanShuRuntime } from "../src/runtime.js";
+import { XuanShuRuntime } from "../src/runtime.js";
 import { testConfig } from "./helpers.js";
 
 describe("runtime model session settings", () => {
@@ -13,12 +13,9 @@ describe("runtime model session settings", () => {
         provider: "wanqing",
         id: "ep-test",
         name: "DeepSeek test",
-        api: "openai-completions",
-        baseUrl: "https://example.invalid/v1",
+        baseUrl: "https://example.invalid",
         apiKeyEnv: "XUANSHU_SESSION_MODEL_KEY",
-        reasoning: false,
         contextWindow: 128_000,
-        maxTokens: 8_192,
       },
       apiKey: "secret-api-key",
       headers: { "X-App-Key": "secret-app-key" },
@@ -29,21 +26,21 @@ describe("runtime model session settings", () => {
     expect(runtime.modelStatus().source).toBe("missing");
   });
 
-  it("merges ephemeral headers into the provider model", () => {
-    const model = createModel({
-      provider: "wanqing",
-      id: "ep-test",
-      name: "DeepSeek test",
-      api: "openai-completions",
-      baseUrl: "https://example.invalid/v1",
-      apiKeyEnv: "XUANSHU_SESSION_MODEL_KEY",
-      reasoning: true,
-      thinkingFormat: "deepseek",
-      contextWindow: 128_000,
-      maxTokens: 8_192,
-    }, { "X-App-Key": "ephemeral" });
-    expect(model.headers).toEqual({ "X-App-Key": "ephemeral" });
-    expect(model.reasoning).toBe(true);
-    expect(model.compat).toMatchObject({ thinkingFormat: "deepseek" });
+  it("clearing the session restores the environment-configured model", () => {
+    const config = testConfig("/tmp/xuan-model-settings-env");
+    process.env.XUANSHU_TEST_API_KEY = "env-key";
+    try {
+      const runtime = new XuanShuRuntime(config);
+      expect(runtime.modelStatus()).toMatchObject({ configured: true, source: "environment", id: "faux-1" });
+      runtime.configureModel({
+        model: { provider: "wanqing", id: "ep-test", name: "DeepSeek test", baseUrl: "https://example.invalid", apiKeyEnv: "XUANSHU_SESSION_MODEL_KEY" },
+        apiKey: "secret-api-key",
+      });
+      expect(runtime.modelStatus()).toMatchObject({ source: "session", id: "ep-test" });
+      runtime.clearConfiguredModel();
+      expect(runtime.modelStatus()).toMatchObject({ source: "environment", id: "faux-1" });
+    } finally {
+      delete process.env.XUANSHU_TEST_API_KEY;
+    }
   });
 });

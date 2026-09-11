@@ -1,20 +1,4 @@
-import type { StreamFn } from "@earendil-works/pi-agent-core";
-import type { Model } from "@earendil-works/pi-ai";
 import type { TSchema } from "typebox";
-
-export type ModelThinkingFormat =
-  | "openai"
-  | "openrouter"
-  | "deepseek"
-  | "together"
-  | "zai"
-  | "qwen"
-  | "chat-template"
-  | "qwen-chat-template"
-  | "string-thinking"
-  | "ant-ling";
-
-export type ModelThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export type RunStatus = "queued" | "running" | "completed" | "blocked" | "failed" | "aborted";
 export type RunPhase = "intake" | "planning" | "exploration" | "analysis" | "verification" | "reporting" | "done";
@@ -24,19 +8,21 @@ export interface ModelConfig {
   provider: string;
   id: string;
   name: string;
-  api: "anthropic-messages" | "openai-completions" | "openai-responses";
+  /** Anthropic-protocol endpoint; the loopback model gateway forwards here. */
   baseUrl: string;
   apiKeyEnv: string;
-  reasoning: boolean;
-  /** Provider-specific wire format for explicitly enabling/disabling reasoning. */
-  thinkingFormat?: ModelThinkingFormat;
-  /** Provider-specific values for pi thinking levels; null marks a level unsupported. */
-  thinkingLevelMap?: Partial<Record<ModelThinkingLevel, string | null>>;
-  /** Whether the gateway accepts the optional reasoning_effort field. */
-  supportsReasoningEffort?: boolean;
-  contextWindow: number;
-  maxTokens: number;
-  headersFromEnv?: Record<string, string>;
+  reasoning?: boolean;
+  /** Optional because the SDK manages its own request sizing; used only for gate estimates. */
+  contextWindow?: number;
+  /** Upstream auth header scheme injected by the model gateway. */
+  authScheme?: "bearer" | "api-key";
+}
+
+/** Active model session configured through the operator API. */
+export interface RuntimeModelSessionConfig {
+  model: ModelConfig;
+  apiKey: string;
+  headers?: Record<string, string>;
 }
 
 export interface RuntimeConfig {
@@ -46,6 +32,8 @@ export interface RuntimeConfig {
   maxTurns: number;
   maxToolCalls: number;
   maxRuntimeMs: number;
+  /** Bound on concurrently spawned agent CLI subprocesses; excess runs queue. */
+  maxConcurrentSdkSessions: number;
   modelMinIntervalMs: number;
   modelRequestsPerMinute: number;
   modelTokensPerMinute: number;
@@ -142,11 +130,6 @@ export interface AgentProfileConfig {
   requiredCapabilities: string[];
   toolAllowlist: string[];
   approvalPolicy?: "always" | "on-request" | "never";
-  contextPolicy: {
-    compactAtRatio: number;
-    keepRecentTokens: number;
-    maxSummaryChars: number;
-  };
 }
 
 export interface TaskRequest {
@@ -402,16 +385,18 @@ export interface ProviderError {
 }
 
 export interface RuntimeOverrides {
-  streamFn?: StreamFn;
-  model?: Model<string>;
-  modelApiKey?: string;
-  modelHeaders?: Record<string, string>;
   onEvent?: (event: RunEvent) => void | Promise<void>;
   externalTools?: import("./external-tools.js").ExternalToolRegistration[];
   permissionGate?: import("./permissions.js").PermissionGate;
   memoryStore?: import("./memory.js").MemoryStore;
   knowledgeStore?: import("./knowledge-store.js").KnowledgeStore;
   executorFactory?: (input: { runId: string; workspaceRoot: string; scratchRoot: string; signal?: AbortSignal }) => Promise<import("./executor.js").Executor> | import("./executor.js").Executor;
+  /** Loopback model gateway; a per-runtime instance is started lazily when absent. */
+  gateway?: import("./model-gateway.js").ModelGateway;
+  /** Operator-configured model session (configureModel); overrides config.model. */
+  sessionModel?: RuntimeModelSessionConfig;
+  /** Test seam for the embedded CLI subprocess: faux executable and env. */
+  sdk?: { pathToClaudeCodeExecutable?: string; env?: Record<string, string> };
 }
 
 export interface ToolTextContent {

@@ -53,7 +53,10 @@ function convertSchema(schema: TSchema): z.ZodType {
     const valueSchema = valueSchemas.length === 1
       ? (valueSchemas[0] as TSchema)
       : ({ anyOf: valueSchemas } as unknown as TSchema);
-    return z.record(z.string(), convertSchema(valueSchema));
+    // Not z.record: the Agent SDK's zod→JSON-Schema conversion cannot walk
+    // foreign ZodRecord instances (its tools/list handler crashes). A catchall
+    // object validates the same arbitrary string→value map and converts cleanly.
+    return z.object({}).catchall(convertSchema(valueSchema));
   }
   switch (node.type) {
     case "string": {
@@ -103,9 +106,13 @@ function convertProperties(node: SchemaNode): z.ZodRawShape {
   const shape: Record<string, z.ZodType> = {};
   for (const [name, property] of Object.entries(properties)) {
     let field = convertSchema(property as TSchema);
-    if (isSchemaNode(property) && "default" in property) {
-      field = field.default(property.default);
-    } else if (!required.has(name)) {
+    // No .default() wrapping: the Agent SDK bundles its own zod build whose
+    // object parser only accepts absent keys for _zod.optin === "optional",
+    // while our zod 4.6 reports "defaulted" for ZodDefault — absent defaulted
+    // fields would be rejected with "expected nonoptional" before our own
+    // validation runs. Defaults are applied post-parse instead
+    // (toolParameterDefaults + wrapXuanShuTools).
+    if (!required.has(name)) {
       field = field.optional();
     }
     shape[name] = field;
@@ -115,9 +122,11 @@ function convertProperties(node: SchemaNode): z.ZodRawShape {
 
 /**
  * Convert a typebox tool-parameter schema (plain JSON Schema) into the zod raw
- * shape the Agent SDK's in-process MCP server expects. Covers the closed
- * construction set used by tools.ts and throws loudly on anything else, so a
- * new schema construct surfaces here instead of silently weakening validation.
+ * shape the Agent SDK's in-process MCP server expects. The shape sticks to
+ * constructs the SDK's bundled zod build understands across copies (no
+ * ZodDefault, no ZodRecord); covers the closed construction set used by
+ * tools.ts and throws loudly on anything else, so a new schema construct
+ * surfaces here instead of silently weakening validation.
  */
 export function toolParametersToZodShape(schema: TSchema): z.ZodRawShape {
   const node = schema as unknown as SchemaNode;
@@ -125,6 +134,21 @@ export function toolParametersToZodShape(schema: TSchema): z.ZodRawShape {
     throw new Error("Tool parameters must be a typebox Type.Object schema");
   }
   return convertProperties(node);
+}
+
+/**
+ * Top-level typebox property defaults for one tool-parameter schema. The
+ * SDK-facing shape cannot carry them (see convertProperties), so the tool
+ * wrapper applies them after its own stricter zod parse.
+ */
+export function toolParameterDefaults(schema: TSchema): Record<string, unknown> {
+  const node = schema as unknown as SchemaNode;
+  const properties = isSchemaNode(node) && isSchemaNode(node.properties) ? node.properties : {};
+  const defaults: Record<string, unknown> = {};
+  for (const [name, property] of Object.entries(properties)) {
+    if (isSchemaNode(property) && "default" in property) defaults[name] = property.default;
+  }
+  return defaults;
 }
 
 function publicToolContent(content: ToolContent[]): unknown[] {
@@ -381,6 +405,7 @@ export function wrapXuanShuTools(options: XuanShuToolAdapterOptions): XuanShuToo
 
   return options.tools.map((source) => {
     const inputSchema = toolParametersToZodShape(source.parameters);
+    const defaults = toolParameterDefaults(source.parameters);
     const validator = z.object(inputSchema);
     const processCall = async (args: unknown, toolUseId: string, callSignal?: AbortSignal): Promise<CallToolResult> => {
       const parsed = validator.safeParse(args);
@@ -388,11 +413,14 @@ export function wrapXuanShuTools(options: XuanShuToolAdapterOptions): XuanShuToo
         const issue = parsed.error.issues[0];
         return toolErrorResult(`Invalid tool arguments: ${issue ? `${issue.path.join(".") || "arguments"} ${issue.message}` : "failed schema validation"}`);
       }
-      const record: ToolCallRecord = { toolCallId: toolUseId, toolName: source.name, args: parsed.data };
+      // Typebox defaults live outside the SDK-facing shape (see
+      // convertProperties); merge them here so tools and the audit trail see
+      // the same resolved arguments the schema used to promise.
+      const record: ToolCallRecord = { toolCallId: toolUseId, toolName: source.name, args: { ...defaults, ...parsed.data } };
       const before = await pipeline.beforeToolCall(record);
       if (before?.block) return toolErrorResult(before.reason);
       try {
-        const result: ToolResult = await source.execute(toolUseId, parsed.data, combineSignals(signal, callSignal));
+        const result: ToolResult = await source.execute(toolUseId, record.args, combineSignals(signal, callSignal));
         if (result.terminate === true) pipeline.markSettled();
         await pipeline.afterToolCall(record, { content: result.content, details: result.details }, false);
         return { content: result.content as CallToolResult["content"] };

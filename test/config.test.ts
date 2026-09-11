@@ -7,7 +7,7 @@ describe("generic configuration", () => {
   it("loads the public default without embedded credentials or platform adapters", async () => {
     const source = await readFile("config/default.yaml", "utf8");
     const config = await loadConfig("config/default.yaml");
-    expect(config.model).toMatchObject({ provider: "openai", api: "openai-responses", apiKeyEnv: "OPENAI_API_KEY" });
+    expect(config.model).toMatchObject({ provider: "anthropic", apiKeyEnv: "XUANSHU_MODEL_API_KEY", baseUrl: "https://api.anthropic.com" });
     expect(Object.keys(config).sort()).toEqual(["connectors", "model", "profile", "runtime", "scope", "server"]);
     expect(source).not.toMatch(/Bearer\s+[A-Za-z0-9._~-]+/i);
   });

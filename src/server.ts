@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { readFile } from "node:fs/promises";
 import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import type { AddressInfo } from "node:net";
-import type { AppConfig, ModelConfig, ModelThinkingFormat, TaskRequest } from "./types.js";
+import type { AppConfig, ModelConfig, TaskRequest } from "./types.js";
 import { AuditChain } from "./audit.js";
 import { dashboardHtml } from "./dashboard.js";
 import { ExperienceStore, type ExperienceUpdate } from "./experience.js";
@@ -163,21 +163,18 @@ function modelSessionInput(value: unknown): RuntimeModelSessionConfig {
   if (!["http:", "https:"].includes(parsedBaseUrl.protocol) || parsedBaseUrl.username || parsedBaseUrl.password) {
     throw new RequestInputError("baseUrl must use http or https without embedded credentials");
   }
-  const api = input.api === undefined ? "openai-completions" : String(input.api);
-  if (!["openai-completions", "openai-responses", "anthropic-messages"].includes(api)) throw new RequestInputError("api is invalid");
   const modelId = typeof input.modelId === "string" ? input.modelId.trim() : "";
   if (!modelId || modelId.length > 200) throw new RequestInputError("modelId is required and must be at most 200 characters");
   const name = typeof input.name === "string" && input.name.trim() ? input.name.trim().slice(0, 200) : modelId;
-  const provider = typeof input.provider === "string" && input.provider.trim() ? input.provider.trim().slice(0, 100) : "custom-openai-compatible";
+  const provider = typeof input.provider === "string" && input.provider.trim() ? input.provider.trim().slice(0, 100) : "anthropic-compatible";
   const appKey = typeof input.appKey === "string" ? input.appKey.trim() : "";
   if (appKey.length > 1_000) throw new RequestInputError("appKey must be at most 1000 characters");
   const appKeyHeader = typeof input.appKeyHeader === "string" && input.appKeyHeader.trim() ? input.appKeyHeader.trim() : "AppKey";
   if (!/^[A-Za-z0-9][A-Za-z0-9-]{0,63}$/.test(appKeyHeader)) throw new RequestInputError("appKeyHeader is invalid");
-  const thinkingFormats: ModelThinkingFormat[] = ["openai", "openrouter", "deepseek", "together", "zai", "qwen", "chat-template", "qwen-chat-template", "string-thinking", "ant-ling"];
-  const thinkingFormat = input.thinkingFormat === undefined || input.thinkingFormat === "" ? undefined : String(input.thinkingFormat);
-  if (thinkingFormat !== undefined && !thinkingFormats.includes(thinkingFormat as ModelThinkingFormat)) throw new RequestInputError("thinkingFormat is invalid");
+  const authScheme = input.authScheme === undefined || input.authScheme === "" ? undefined : String(input.authScheme);
+  if (authScheme !== undefined && !["bearer", "api-key"].includes(authScheme)) throw new RequestInputError("authScheme must be bearer or api-key");
   if (input.reasoning !== undefined && typeof input.reasoning !== "boolean") throw new RequestInputError("reasoning must be a boolean");
-  const reasoning = input.reasoning === undefined ? api === "openai-responses" || thinkingFormat !== undefined : input.reasoning;
+  const reasoning = input.reasoning === undefined ? true : input.reasoning;
   const boundedModelNumber = (key: string, fallback: number, minimum: number, maximum: number): number => {
     if (input[key] === undefined) return fallback;
     const candidate = Number(input[key]);
@@ -190,18 +187,15 @@ function modelSessionInput(value: unknown): RuntimeModelSessionConfig {
   // context/TPM quota than their advertised maximum. Keep the safe default
   // compact, while allowing an operator to raise it explicitly when needed.
   const contextWindow = boundedModelNumber("contextWindow", 32_000, 16_000, 256_000);
-  const maxTokens = boundedModelNumber("maxTokens", 8_192, 1_024, 32_768);
   const model: ModelConfig = {
     provider,
     id: modelId,
     name,
-    api: api as ModelConfig["api"],
     baseUrl,
     apiKeyEnv: "XUANSHU_SESSION_MODEL_KEY",
-    reasoning,
-    ...(thinkingFormat ? { thinkingFormat: thinkingFormat as ModelThinkingFormat } : {}),
+    ...(reasoning ? { reasoning } : {}),
     contextWindow,
-    maxTokens,
+    ...(authScheme ? { authScheme: authScheme as NonNullable<ModelConfig["authScheme"]> } : {}),
   };
   return { model, apiKey, ...(appKey ? { headers: { [appKeyHeader]: appKey } } : {}) };
 }
@@ -218,6 +212,11 @@ async function clientRequest<T>(response: ServerResponse, operation: () => Promi
   catch (error) { json(response, 400, { error: error instanceof Error ? error.message : String(error) }); }
 }
 
+// Token budgets for agent tasks and workflows no longer derive from a model
+// profile's output limit; the SDK sizes its own requests. Keep the legacy
+// ceiling (8k output tokens per turn) so stored budgets stay comparable.
+const TASK_OUTPUT_TOKENS_PER_TURN = 8_192;
+
 function agentTaskBudget(value: unknown, config: AppConfig): AgentTaskBudget {
   const input = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
   const integer = (key: string, fallback: number): number => {
@@ -225,9 +224,10 @@ function agentTaskBudget(value: unknown, config: AppConfig): AgentTaskBudget {
     if (!Number.isSafeInteger(candidate) || candidate <= 0) throw new Error(`budget.${key} must be a positive integer`);
     return candidate;
   };
+  const ceiling = TASK_OUTPUT_TOKENS_PER_TURN * config.runtime.maxTurns;
   return {
     maxRuntimeMs: Math.min(integer("maxRuntimeMs", config.runtime.maxRuntimeMs), config.runtime.maxRuntimeMs),
-    maxTokens: Math.min(integer("maxTokens", config.model.maxTokens * config.runtime.maxTurns), config.model.maxTokens * config.runtime.maxTurns),
+    maxTokens: Math.min(integer("maxTokens", ceiling), ceiling),
     maxCostMicros: integer("maxCostMicros", 10_000_000),
   };
 }
@@ -244,7 +244,7 @@ function workflowBudget(value: unknown, config: AppConfig): WorkflowBudget {
     maxRuntimeMs: integer("maxRuntimeMs", config.runtime.maxRuntimeMs, config.runtime.maxRuntimeMs),
     maxNetworkNodes: integer("maxNetworkNodes", config.runtime.maxHttpRequests, config.runtime.maxHttpRequests),
     maxNetworkRequests: integer("maxNetworkRequests", config.runtime.maxHttpRequests, config.runtime.maxHttpRequests),
-    maxTokens: integer("maxTokens", config.model.maxTokens * config.runtime.maxTurns, config.model.maxTokens * config.runtime.maxTurns),
+    maxTokens: integer("maxTokens", TASK_OUTPUT_TOKENS_PER_TURN * config.runtime.maxTurns, TASK_OUTPUT_TOKENS_PER_TURN * config.runtime.maxTurns),
     maxCostMicros: integer("maxCostMicros", 10_000_000, 1_000_000_000),
     maxControllerExpansions: integer("maxControllerExpansions", 2, 8),
   };

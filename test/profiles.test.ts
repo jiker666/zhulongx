@@ -12,7 +12,7 @@ describe("agent profiles", () => {
 
   it("rejects unknown or incomplete operator profiles", () => {
     const config = testConfig("/tmp/xuan-profile");
-    config.profile = { id: "bad", preferredExecutor: "sandbox", requiredCapabilities: [], toolAllowlist: ["submit_plan", "checkpoint", "missing_tool"], contextPolicy: { compactAtRatio: 0.7, keepRecentTokens: 1000, maxSummaryChars: 1000 } };
+    config.profile = { id: "bad", preferredExecutor: "sandbox", requiredCapabilities: [], toolAllowlist: ["submit_plan", "checkpoint", "missing_tool"] };
     expect(() => resolveAgentProfile(config)).toThrow("unknown builtin tools");
     config.profile.toolAllowlist = ["submit_plan", "checkpoint"];
     expect(() => resolveAgentProfile(config)).toThrow("must allow finish_task");
@@ -20,7 +20,7 @@ describe("agent profiles", () => {
 
   it("validates executor capabilities and narrows the active tool set", () => {
     const config = testConfig("/tmp/xuan-profile");
-    config.profile = { id: "readonly", preferredExecutor: "sandbox", requiredCapabilities: ["workspace-read"], toolAllowlist: ["submit_plan", "checkpoint", "finish_task", "read_file"], contextPolicy: { compactAtRatio: 0.7, keepRecentTokens: 1000, maxSummaryChars: 1000 } };
+    config.profile = { id: "readonly", preferredExecutor: "sandbox", requiredCapabilities: ["workspace-read"], toolAllowlist: ["submit_plan", "checkpoint", "finish_task", "read_file"] };
     const profile = resolveAgentProfile(config);
     expect(() => validateProfileCapabilities(profile, { status: "online", kind: "sandbox", networkAccess: false, network: "none", capabilities: ["scratch-read"], allowedPrograms: [], missingPrograms: [] })).toThrow("workspace-read");
     expect(filterProfileTools(profile, [{ name: "read_file" }, { name: "run_command" }])).toEqual([{ name: "read_file" }]);

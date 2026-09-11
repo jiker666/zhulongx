@@ -1,11 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   estimateAnthropicRequestTokens,
-  estimateModelRequestTokens,
   ModelRequestGate,
 } from "../src/model-rate-limit.js";
-
-const model = { maxTokens: 4_096 };
 
 function gateWithClock() {
   let now = 0;
@@ -96,44 +93,6 @@ describe("ModelRequestGate", () => {
 
     expect(third.waitedMs).toBe(0);
     expect(sleeps).toEqual([]);
-  });
-});
-
-describe("estimateModelRequestTokens (legacy context shapes)", () => {
-  it("reserves at least the configured output budget for a small initial request", () => {
-    const context = { systemPrompt: "system", messages: [], tools: [] };
-    expect(estimateModelRequestTokens(model, context)).toBe(4_096);
-  });
-
-  it("uses reported usage plus trailing tool output for a growing context", () => {
-    const context = {
-      systemPrompt: "system",
-      tools: [],
-      messages: [
-        {
-          role: "assistant",
-          content: [{ type: "text", text: "analysis" }],
-          usage: {
-            input: 18_000,
-            output: 2_000,
-            cacheRead: 0,
-            cacheWrite: 0,
-            totalTokens: 20_000,
-          },
-          stopReason: "toolUse",
-          timestamp: 1,
-        },
-        {
-          role: "toolResult",
-          toolCallId: "call-1",
-          content: [{ type: "text", text: "x".repeat(400) }],
-          isError: false,
-          timestamp: 2,
-        },
-      ],
-    };
-
-    expect(estimateModelRequestTokens(model, context)).toBe(20_100);
   });
 });
 

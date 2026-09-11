@@ -9,7 +9,7 @@ services:
     ports:
       - "127.0.0.1:${XUANSHU_PORT:-7318}:7318"
     environment:
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      XUANSHU_MODEL_API_KEY: ${XUANSHU_MODEL_API_KEY:-}
       XUANSHU_SERVER_TOKEN: ${XUANSHU_SERVER_TOKEN:?set XUANSHU_SERVER_TOKEN}
     volumes:
       - ./workspace:/workspace/input:ro

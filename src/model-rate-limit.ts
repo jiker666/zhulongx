@@ -28,113 +28,12 @@ interface ModelRequestEntry {
   tokens: number;
 }
 
-// Structural subsets of the legacy agent-loop message shapes still consumed by
-// runtime.ts. They carry no framework dependency and disappear with the legacy
-// loop; the gateway estimates from raw request bodies instead.
-export interface EstimateModel {
-  maxTokens?: number;
-}
-
-export interface EstimateUsage {
-  input?: number;
-  output?: number;
-  cacheRead?: number;
-  cacheWrite?: number;
-  totalTokens?: number;
-}
-
-export interface EstimateContentBlock {
-  type?: string;
-  text?: string;
-  thinking?: string;
-  data?: unknown;
-  name?: string;
-  arguments?: unknown;
-}
-
-export interface EstimateMessage {
-  role: string;
-  content: string | EstimateContentBlock[];
-  usage?: EstimateUsage;
-  timestamp?: number;
-  stopReason?: string;
-}
-
-export interface EstimateContext {
-  systemPrompt?: string;
-  messages: EstimateMessage[];
-  tools?: unknown[];
-}
-
 function safeJsonStringify(value: unknown): string {
   try {
     return JSON.stringify(value) ?? "undefined";
   } catch {
     return "[unserializable]";
   }
-}
-
-function estimateContentTokens(content: EstimateMessage["content"]): number {
-  if (typeof content === "string") return Math.ceil(content.length / CHARS_PER_TOKEN);
-  let tokens = 0;
-  for (const block of content) {
-    if (block?.type === "text") tokens += Math.ceil(String(block.text ?? "").length / CHARS_PER_TOKEN);
-    else if (block?.type === "image") tokens += ESTIMATED_IMAGE_TOKENS;
-    else if (block?.type === "thinking") tokens += Math.ceil(String(block.thinking ?? "").length / CHARS_PER_TOKEN);
-    else tokens += Math.ceil((String(block?.name ?? "").length + safeJsonStringify(block?.arguments).length) / CHARS_PER_TOKEN);
-  }
-  return tokens;
-}
-
-function reportedContextTokens(usage: EstimateUsage): number {
-  return usage.totalTokens
-    || (usage.input ?? 0) + (usage.output ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0);
-}
-
-function estimateContextInputTokens(context: EstimateContext): number {
-  let lastUsageIndex = -1;
-  let lastUsageTokens = 0;
-  let latestPrefixTimestamp = Number.NEGATIVE_INFINITY;
-
-  for (const [index, message] of context.messages.entries()) {
-    if (message.role === "assistant") {
-      const tokens = message.usage ? reportedContextTokens(message.usage) : 0;
-      if (
-        typeof message.timestamp === "number"
-        && message.timestamp >= latestPrefixTimestamp
-        && tokens > 0
-        && !["aborted", "error"].includes(String(message.stopReason ?? ""))
-      ) {
-        lastUsageIndex = index;
-        lastUsageTokens = tokens;
-      }
-    }
-    if (typeof message.timestamp === "number") latestPrefixTimestamp = Math.max(latestPrefixTimestamp, message.timestamp);
-  }
-
-  if (lastUsageIndex >= 0) {
-    return lastUsageTokens + context.messages
-      .slice(lastUsageIndex + 1)
-      .reduce((total, message) => total + estimateContentTokens(message.content), 0);
-  }
-
-  const messageTokens = context.messages.reduce(
-    (total, message) => total + estimateContentTokens(message.content),
-    0,
-  );
-  const systemTokens = Math.ceil((context.systemPrompt?.length ?? 0) / CHARS_PER_TOKEN);
-  const toolTokens = Math.ceil(safeJsonStringify(context.tools ?? []).length / CHARS_PER_TOKEN);
-  return messageTokens + systemTokens + toolTokens;
-}
-
-export function estimateModelRequestTokens(
-  model: EstimateModel,
-  context: EstimateContext,
-  options?: { maxTokens?: number },
-): number {
-  const inputTokens = estimateContextInputTokens(context);
-  const outputBudget = options?.maxTokens ?? model.maxTokens ?? DEFAULT_OUTPUT_TOKEN_BUDGET;
-  return Math.max(1, Math.ceil(Math.max(inputTokens, outputBudget)));
 }
 
 /**
