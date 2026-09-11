@@ -1,6 +1,6 @@
 # 容器化部署（Podman / Docker Compose）
 
-本项目使用标准 Compose 文件，可通过 Podman Compose 或 Docker Compose 部署。部署包含两个容器：`xuanshu` 提供 API 和已构建的 React 前端，`ctf-sandbox` 提供无外网的命令执行隔离环境。运行数据写入 named volumes，不会写回源码目录；`workspace/` 以只读方式挂载给两个容器。
+本项目使用标准 Compose 文件，可通过 Podman Compose 或 Docker Compose 部署。部署包含两个容器：`xuanshu` 提供 API 和已构建的 React 前端，`ctf-sandbox` 提供命令执行隔离环境（可出网，permissive 模式）。运行数据写入 named volumes，不会写回源码目录；`workspace/` 以只读方式挂载给两个容器。
 
 ## 一键启动
 
@@ -72,7 +72,7 @@ podman compose down
 
 宿主机端口被占用时，使用 `XUANSHU_PORT=17318 ./start.command`（Windows 可在命令提示符中先执行 `set XUANSHU_PORT=17318`）。API 健康地址为 `http://127.0.0.1:<端口>/health`。
 
-Compose 只将 API 端口绑定到 `127.0.0.1`；sandbox 使用 `network_mode: none`，不具备外网访问能力。主动网络能力仍受运行时 `PolicyEngine` 和 operator scope 控制。
+Compose 只将 API 端口绑定到 `127.0.0.1`；sandbox 已移除 `network_mode: none`，命令可访问外网。策略与预算执行处于 permissive 模式，`PolicyEngine` 仅做参数校验并记录决策。
 
 授权 Web/CTF 任务需要 operator 先配置精确目标范围。默认配置不会放行外网；例如临时验证一个明确授权的主机：
 

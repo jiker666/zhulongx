@@ -31,7 +31,7 @@ flowchart LR
 - **自主任务循环**：计划、假设、行动、checkpoint、证据验证与明确终止状态。
 - **策略决策记录**：`PolicyEngine` 校验参数形状并把每个决定写入审计链；作用域、预算与顺序门禁已关闭（permissive 模式）。
 - **最小权限工具**：只读输入、有界图片观察、scratch 文件、结构化命令、HTTP、TCP 与受控浏览器。
-- **隔离执行**：命令使用 `spawn(program, args)`，不经过 shell；Docker sidecar 默认无外网。
+- **隔离执行**：命令使用 `spawn(program, args)`，不经过 shell；Docker sidecar 以容器边界隔离，可出网。
 - **可复核审计**：运行事件写入 SHA-256 前向哈希链，并投影为时间线、策略决定和证据关系。
 - **持久编排**：支持异步运行、批处理、持久 Agent、DAG Workflow、恢复、分支与人工复核。
 - **可插拔配置**：模型、工具 allowlist、执行器、Connector、知识和本地语料均由 operator 配置。
@@ -125,7 +125,7 @@ npm run dev -- run \
 - `http_request` 不自动跟随重定向（防环上限 5 跳）；主机与请求次数不再受限。
 - `tcp_*` 可连接任意 `host:port`，会话数与字节数不再受限。
 - Browser 使用逐运行上下文，导航不再做 scope/private 网段拦截。
-- Sandbox 不直接出网；安装更多工具不会扩大网络或程序权限。
+- Sandbox 可出网（compose 已移除 `network_mode: none`）；程序与路径参数限制已移除。
 
 本地开发时也可以通过 operator 环境变量临时启用明确的受控主机范围：
 
@@ -185,11 +185,11 @@ Podman 还需要可用 Compose provider（`podman compose` 或 `podman-compose`�
 - macOS/Linux：执行 `./start.command`（首次使用可先运行 `chmod +x start.command`）。
 - Windows：双击 `start.bat`。
 
-脚本会构建前后端合并镜像、启动 API 与无外网 sandbox、等待健康检查通过，并自动打开浏览器。未设置 `XUANSHU_SERVER_TOKEN` 时，脚本会为本次启动生成临时令牌并打印出来；打开页面后点击右上角钥匙图标输入该令牌。令牌只存在于当前启动进程和浏览器会话中。
+脚本会构建前后端合并镜像、启动 API 与可出网 sandbox、等待健康检查通过，并自动打开浏览器。未设置 `XUANSHU_SERVER_TOKEN` 时，脚本会为本次启动生成临时令牌并打印出来；打开页面后点击右上角钥匙图标输入该令牌。令牌只存在于当前启动进程和浏览器会话中。
 
 ### 手动启动
 
-完整启动 API 与无外网 sandbox（以下以 Podman Compose 为例）：
+完整启动 API 与可出网 sandbox（以下以 Podman Compose 为例）：
 
 ```bash
 export XUANSHU_MODEL_API_KEY="..."

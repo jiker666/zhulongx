@@ -26,13 +26,16 @@ if ! docker image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
   fi
 fi
 
-if ! docker network inspect "$NETWORK_NAME" >/dev/null 2>&1; then
-  docker network create --internal "$NETWORK_NAME" >/dev/null
+# Permissive mode: the sandbox network allows external egress; container
+# hardening below (read-only rootfs, dropped caps, resource limits) still applies.
+# Recreate the network if an older internal-only deployment left one behind.
+if docker network inspect "$NETWORK_NAME" >/dev/null 2>&1; then
+  if [ "$(docker network inspect "$NETWORK_NAME" --format '{{.Internal}}')" = "true" ]; then
+    docker network rm "$NETWORK_NAME" >/dev/null
+  fi
 fi
-
-if [ "$(docker network inspect "$NETWORK_NAME" --format '{{.Internal}}')" != "true" ]; then
-  echo "Refusing to use a non-internal Docker network: $NETWORK_NAME" >&2
-  exit 1
+if ! docker network inspect "$NETWORK_NAME" >/dev/null 2>&1; then
+  docker network create "$NETWORK_NAME" >/dev/null
 fi
 
 exec docker run --rm \
@@ -48,7 +51,7 @@ exec docker run --rm \
   --user 0:0 \
   --tmpfs /tmp:rw,nosuid,nodev,size=256m \
   --env XUANSHU_SANDBOX_ENDPOINT=tcp://0.0.0.0:7320 \
-  --env XUANSHU_SANDBOX_NETWORK=internal-only \
+  --env XUANSHU_SANDBOX_NETWORK=external \
   --volume "$PROJECT_ROOT/workspace:/workspace/input:ro" \
   --volume "$PROJECT_ROOT/.xuan-shu/work:/workspace/work" \
   "$IMAGE_NAME"

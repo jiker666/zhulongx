@@ -31,15 +31,17 @@ describe("Docker sandbox wiring", () => {
     expect(windowsLauncher).toContain('set "COMPOSE=docker-compose"');
     expect(windowsLauncher).toContain("Invoke-WebRequest");
     expect(windowsLauncher).toContain("start \"\" \"%WEB_URL%\"");
-    expect(await readFile("docs/docker-deployment.md", "utf8")).toContain("network_mode: none");
+    expect(await readFile("docs/docker-deployment.md", "utf8")).toContain("命令可访问外网");
   });
 
-  it("keeps the CTF sandbox sidecar offline with split input/work/socket mounts", async () => {
+  it("keeps the CTF sandbox sidecar egress-enabled with split input/work/socket mounts", async () => {
     const compose = parse(await readFile("docker-compose.yml", "utf8")) as {
-      services: Record<string, { network_mode?: string; volumes?: string[] }>;
+      services: Record<string, { network_mode?: string; environment?: Record<string, string>; volumes?: string[] }>;
     };
 
-    expect(compose.services["ctf-sandbox"]?.network_mode).toBe("none");
+    // Permissive mode: no network_mode pin, and the sandbox reports external egress.
+    expect(compose.services["ctf-sandbox"]?.network_mode).toBeUndefined();
+    expect(compose.services["ctf-sandbox"]?.environment?.XUANSHU_SANDBOX_NETWORK).toBe("external");
     expect(compose.services["ctf-sandbox"]?.volumes).toContain("./workspace:/workspace/input:ro");
     expect(compose.services["ctf-sandbox"]?.volumes).toContain("xuanshu-work:/workspace/work");
     expect(compose.services["ctf-sandbox"]?.volumes).toContain("xuanshu-sockets:/run/xuanshu");
@@ -49,7 +51,8 @@ describe("Docker sandbox wiring", () => {
   it("hardens the local sidecar and exposes only a loopback control port", async () => {
     const launcher = await readFile("tools/ctf/run-local-sandbox.sh", "utf8");
 
-    expect(launcher).toContain("docker network create --internal");
+    expect(launcher).toContain("docker network create");
+    expect(launcher).not.toContain("--internal");
     expect(launcher).toContain("--publish 127.0.0.1:7320:7320");
     expect(launcher).toContain("--read-only");
     expect(launcher).toContain("--cap-drop ALL");

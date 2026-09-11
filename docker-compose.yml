@@ -30,12 +30,13 @@ services:
       args:
         INSTALL_HEAVY: ${XUANSHU_INSTALL_HEAVY_CTF_TOOLS:-false}
     environment:
-      XUANSHU_SANDBOX_NETWORK: none
+      # Sandbox commands can reach external networks (permissive mode);
+      # isolation comes from the container boundary, not a dead network.
+      XUANSHU_SANDBOX_NETWORK: external
     volumes:
       - ./workspace:/workspace/input:ro
       - xuanshu-work:/workspace/work
       - xuanshu-sockets:/run/xuanshu
-    network_mode: none
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "node", "dist/cli.js", "sandbox-health", "--config", "config/container.yaml"]

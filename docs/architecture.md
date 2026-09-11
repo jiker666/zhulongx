@@ -119,7 +119,7 @@ flowchart LR
 - 范围扩张：单次请求只能缩小 operator-owned 配置，不能从 `observe` 提升到 `controlled`。
 - 命令注入：`run_command` 通过 Unix socket 交给 `ctf-sandbox` 执行，使用 `spawn(program, args)` 且 `shell=false`，程序与路径在 policy 和 sidecar 两层检查。
 - 进程隔离：API/model 进程不执行 CTF 命令；Docker 部署中 sidecar 不接收模型 key，challenge input 只读挂载，每次运行只使用自己的 scratch/HOME 命名空间。
-- 出网隔离：Docker sidecar 使用 `network_mode: none`；远程 web/pwn 只能走经过 `PolicyEngine` 的 HTTP/TCP 工具。
+- 出网：Docker sidecar 可访问外部网络（permissive 模式移除了 `network_mode: none`）；命令与 HTTP/TCP 工具均可直达远程目标。
 - SSRF/重定向：HTTP 只允许配置主机并使用 `redirect=manual`。生产阶段还需增加 DNS 解析锁定和出口代理。
 - 凭据泄露：审计与会话按敏感字段名脱敏，模型密钥只从环境变量读取。
 - 资源耗尽：输入、ZIP、工具输出、请求体、scratch 文件、TCP 字节数、轮次与时间均设置上限。
@@ -136,7 +136,7 @@ flowchart LR
 
 Core profile 固定安装并 smoke-test Radare2 6.2.0、JADX 1.5.5、Pwntools、gdb-multiarch、strace 与 binutils 辅助程序；两个发行包在镜像构建期下载并校验 SHA-256。`ltrace` 因 Debian ARM64 基础镜像没有稳定包而不纳入跨架构 core profile。Heavy profile 通过 `INSTALL_HEAVY=true` 可选安装 angr、qiling、frida-tools、torch、transformers、SageMath、RsaCtfTool、CADO-NFS、flatter、额外的 radare2 源码构建和 stegseek。源码工具固定到 `capabilities.json` 中的 commit，并由 `verify-heavy-tools.sh` 做构建期 smoke test；Ghidra、UPX 和 GPU hashcat 调优仍作为人工确认的重型扩展。`crypto-attacks`、`gf2bv`、`lll_cvp`、`lattice-based-cryptanalysis` 与 `cuso` 只记录在 operator-managed 审查清单，不是默认镜像能力；许可证、安装入口或确定性调用样例未完成前不会进入 allowlist。
 
-这些能力是 sandbox programs，不是新的核心 AgentTool。它们只在无外网 sidecar 内通过 `run_command` 执行，并接受 `PolicyEngine` 的 operator-owned 程序白名单、总工具调用预算、重复动作与 checkpoint 门禁。读取型命令只观察输入；转换、OCR、隐写提取和 Pickora 可在本次运行的 scratch 命名空间内创建文件；分解、约束、OCR、音频和密码尝试可能消耗较多 CPU。所有命令受统一超时、AbortSignal 终止和 stdout/stderr 字节上限约束，每次调用都会写入 `policy.decision` 与 `tool.result` 审计事件。
+这些能力是 sandbox programs，不是新的核心 AgentTool。它们在可出网 sidecar 内通过 `run_command` 执行；程序白名单、预算与 checkpoint 门禁已随 permissive 模式移除，仅保留参数校验与审计记录。读取型命令只观察输入；转换、OCR、隐写提取和 Pickora 可在本次运行的 scratch 命名空间内创建文件；分解、约束、OCR、音频和密码尝试可能消耗较多 CPU。所有命令受统一超时、AbortSignal 终止和 stdout/stderr 字节上限约束，每次调用都会写入 `policy.decision` 与 `tool.result` 审计事件。
 
 镜像构建会运行 `tools/ctf/verify-core-tools.sh`：检查声明的 CLI、导入关键 Python 模块，并执行最小 LLL、CP-SAT 与 Z3 smoke test。heavy 构建额外验证固定源码工具、SageMath 和关键 Python 模块；它体积较大，且分解、符号执行和 ML 工作负载仍受同一命令超时与资源预算。远程交互依然只能使用作用域内的 HTTP/TCP AgentTool；任务依赖中的额外程序不会因此进入公共配置的程序白名单，运行中也禁止临时调用包管理器扩展能力。
 
