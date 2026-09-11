@@ -114,9 +114,9 @@ export function AppShell() {
               <IconButton className="icon-button" type="button" label="关闭" onClick={() => setTokenOpen(false)}><X size={17} aria-hidden="true" /></IconButton>
             </div>
             <label className="field-label" htmlFor="server-token">XUANSHU_SERVER_TOKEN</label>
-            <input ref={tokenInput} id="server-token" type="password" autoComplete="current-password" value={token} onChange={(event) => { setToken(event.target.value); setTokenError(""); }} placeholder="输入本次会话使用的服务令牌" aria-describedby="token-dialog-help token-dialog-error" />
+            <input ref={tokenInput} id="server-token" type="password" autoComplete="current-password" value={token} onChange={(event) => { setToken(event.target.value); setTokenError(""); }} placeholder="输入服务令牌" aria-describedby="token-dialog-help token-dialog-error" />
             {tokenError && <div id="token-dialog-error" className="dialog-error" role="alert">{tokenError}</div>}
-            <p id="token-dialog-help">令牌仅保存在当前浏览器会话中，不会写入运行材料。</p>
+            <p id="token-dialog-help">令牌保存在本浏览器中（localStorage），不会写入运行材料。</p>
             <button className="button" type="submit">连接控制面</button>
           </form>
         </div>

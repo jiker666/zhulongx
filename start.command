@@ -50,6 +50,16 @@ if [ -z "$COMPOSE" ]; then
   exit 1
 fi
 
+# A persistent .env (gitignored) keeps the server token stable across restarts,
+# so the browser only needs it once. Explicitly exported variables still win.
+if [ -z "${XUANSHU_SERVER_TOKEN:-}" ] && [ -f "$PROJECT_ROOT/.env" ]; then
+  persistent_token=$(sed -n 's/^XUANSHU_SERVER_TOKEN=//p' "$PROJECT_ROOT/.env" | tail -n 1)
+  if [ -n "$persistent_token" ]; then
+    XUANSHU_SERVER_TOKEN=$persistent_token
+    export XUANSHU_SERVER_TOKEN
+  fi
+fi
+
 if [ -z "${XUANSHU_SERVER_TOKEN:-}" ]; then
   if command -v openssl >/dev/null 2>&1; then
     XUANSHU_SERVER_TOKEN=$(openssl rand -hex 24)

@@ -61,6 +61,11 @@ if not defined COMPOSE (
   exit /b 1
 )
 
+rem A persistent .env (gitignored) keeps the server token stable across restarts.
+if not defined XUANSHU_SERVER_TOKEN if exist ".env" (
+  for /f "usebackq tokens=1,* delims==" %%A in (".env") do if /I "%%A"=="XUANSHU_SERVER_TOKEN" set "XUANSHU_SERVER_TOKEN=%%B"
+)
+
 if not defined XUANSHU_SERVER_TOKEN (
   for /f "delims=" %%T in ('powershell -NoProfile -Command "[guid]::NewGuid().ToString('N')"') do set "XUANSHU_SERVER_TOKEN=%%T"
   set "GENERATED_TOKEN=1"

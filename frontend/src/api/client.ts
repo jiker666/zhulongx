@@ -3,14 +3,16 @@ export class ApiError extends Error { constructor(public readonly status: number
 const baseURL = import.meta.env.VITE_API_BASE_URL ?? "";
 const serverTokenKey = "xuanshu-server-token";
 
+// localStorage (not sessionStorage): operators pin a stable token in .env, so
+// the browser should remember it across sessions instead of per-tab re-entry.
 export function getServerToken(): string {
-  return window.sessionStorage.getItem(serverTokenKey) ?? "";
+  return window.localStorage.getItem(serverTokenKey) ?? "";
 }
 
 export function setServerToken(value: string): void {
   const token = value.trim();
-  if (token) window.sessionStorage.setItem(serverTokenKey, token);
-  else window.sessionStorage.removeItem(serverTokenKey);
+  if (token) window.localStorage.setItem(serverTokenKey, token);
+  else window.localStorage.removeItem(serverTokenKey);
 }
 
 export function authorizedHeaders(): Record<string, string> {
