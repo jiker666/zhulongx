@@ -177,10 +177,6 @@ profile:
     - tcp_close
     - read_shared_evidence
     - publish_shared_evidence
-  contextPolicy:
-    compactAtRatio: 0.75
-    keepRecentTokens: 100000
-    maxSummaryChars: 12000
 
 # Reverse connectors are disabled by default. Operator-owned deployments may
 # declare bounded outbound clients here and select one with profile.executorTargetId.

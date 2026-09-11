@@ -21,7 +21,6 @@ describe("session trajectory", () => {
           { type: "image", data: Buffer.from("pixels").toString("base64"), mimeType: "image/png" },
         ],
         timestamp: Date.now(),
-        api: "openai-responses",
         provider: "test",
         model: "test",
         usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 },

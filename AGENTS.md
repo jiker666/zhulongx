@@ -6,7 +6,9 @@
 - Tools must return bounded output and accept an `AbortSignal` where blocking work is possible.
 - Never persist model keys, authorization headers, cookies, or hidden reasoning in run artifacts.
 - New tools require policy tests, budget behavior, an audit event, and documentation of side effects.
-- Use deterministic faux-model tests for orchestration behavior; live-model tests belong in opt-in evaluation suites.
+- Use deterministic faux-CLI tests (`test/fixtures/faux-claude-cli.mjs` driving a scripted model through the real SDK session, MCP tools, and gate pipeline) for orchestration behavior; live-model tests belong in opt-in evaluation suites.
+- The agent loop embeds `@anthropic-ai/claude-agent-sdk`: each run spawns a bundled CLI subprocess pointed at the loopback model gateway (`ANTHROPIC_BASE_URL`), never directly at an upstream. `CLAUDE_CONFIG_DIR` is a per-run temp directory removed in `finally`; never write to `~/.claude`.
+- Tool parameter schemas stay single-sourced in typebox; `src/tool-adapter.ts` converts them to the zod shape the SDK's in-process MCP server accepts and must keep to constructs the SDK's bundled zod build understands (no `ZodDefault`, no `ZodRecord`).
 - `npm run check` is the merge gate.
 
 ## Imported CTF knowledge base

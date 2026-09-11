@@ -52,7 +52,7 @@ npm --prefix frontend run build
 在 `.env` 或私有环境中设置所需变量，切勿将真实值复制到公共配置：
 
 ```text
-OPENAI_API_KEY=<仅保存在本机私有环境中>
+XUANSHU_MODEL_API_KEY=<仅保存在本机私有环境中>
 XUANSHU_SERVER_TOKEN=<本地控制面令牌>
 ```
 
@@ -148,7 +148,7 @@ Compose 仅将 API 端口绑定至 `127.0.0.1`；`workspace/` 以只读方式挂
 | --- | --- | --- |
 | `XUANSHU_SERVER_TOKEN` | 启动脚本临时生成 | 控制面 Bearer 令牌；手动启动时必须设置 |
 | `XUANSHU_PORT` | `7318` | 宿主机回环端口 |
-| `OPENAI_API_KEY` | 空 | operator 管理的默认模型密钥 |
+| `XUANSHU_MODEL_API_KEY` | 空 | operator 管理的默认模型密钥（Anthropic 协议端点） |
 | `XUANSHU_INSTALL_HEAVY_CTF_TOOLS` | `false` | 是否构建扩展工具；会增加构建时间和镜像体积 |
 
 ## 5. 控制台操作指南

@@ -56,7 +56,7 @@ flowchart LR
 
 - Node.js `>= 22.19.0`
 - npm（使用仓库内 `package-lock.json`）
-- 一个兼容 OpenAI Responses、Chat Completions 或 Anthropic Messages 的模型端点
+- 一个 Anthropic 协议模型端点（`/v1/messages`；比赛网关、DeepSeek V4 Flash 中转或 Anthropic 官方端点均可）
 - Docker（推荐，用于隔离 sandbox；仅做不需要命令的任务时可不启动）
 
 ## 快速开始
@@ -71,9 +71,9 @@ cp .env.example .env
 mkdir -p workspace
 ```
 
-在 `.env` 中设置模型密钥。默认配置读取 `OPENAI_API_KEY`，也可以复制 `config/default.yaml`，修改 `model.api`、`model.baseUrl` 和 `model.apiKeyEnv` 来使用 operator 自有网关。
+在 `.env` 中设置模型密钥。默认配置读取 `XUANSHU_MODEL_API_KEY`（示例端点为 `deepseek-v4-flash`），也可以复制 `config/default.yaml`，修改 `model.baseUrl`、`model.id` 和 `model.apiKeyEnv` 来使用 operator 自有网关。
 
-前端的“模型设置”页面可以为当前 API 进程临时配置 OpenAI 兼容端点（包括万擎/Ark 风格的 `ep-*` 部署 ID 和可选 `X-App-Key` 请求头）。密钥不会写入浏览器存储、配置文件或运行产物；详细说明见 [模型设置](docs/model-settings.md)。
+前端的“模型设置”页面可以为当前 API 进程临时配置 Anthropic 协议端点（含可选 `AppKey` 网关请求头）。密钥不会写入浏览器存储、配置文件或运行产物；详细说明见 [模型设置](docs/model-settings.md)。
 
 如需本地命令分析，在独立终端启动加固的 Docker sandbox：
 
@@ -192,7 +192,7 @@ Podman 还需要可用 Compose provider（`podman compose` 或 `podman-compose`�
 完整启动 API 与无外网 sandbox（以下以 Podman Compose 为例）：
 
 ```bash
-export OPENAI_API_KEY="..."
+export XUANSHU_MODEL_API_KEY="..."
 export XUANSHU_SERVER_TOKEN="replace-with-a-long-random-value"
 podman compose up -d --build
 ```
@@ -257,7 +257,7 @@ src/
 frontend/             React 审计控制台
 config/               无凭据的公共配置样例
 docs/                 架构、评测和扩展文档
-test/                 确定性 faux-model 与策略测试
+test/                 确定性 faux-CLI（脚本化模型）与策略测试
 tools/ctf/            隔离分析工具的安装和验证脚本
 ```
 

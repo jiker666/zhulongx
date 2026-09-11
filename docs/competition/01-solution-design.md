@@ -36,7 +36,7 @@
 | 证据可追溯 | 追加式 SHA-256 前向哈希审计；请求、判定、结果按调用 ID 关联 | `audit.ts`、`trace.ts` |
 | 面向比赛的可解释性 | Decision Observatory 展示事实投影、策略、证据、回放、分支和人工复核 | `frontend/src/pages/RunDetailPage.tsx` |
 | 结论可交付 | 结构化 submission、严格验证闸门、终态 WP 生成与下载 | `submission-policy.ts`、`writeup-generator.ts` |
-| 工程可维护性 | 模块化边界、确定性 faux-model 测试、`npm run check` 合并门禁 | `src/`、`test/`、`package.json` |
+| 工程可维护性 | 模块化边界、确定性 faux-CLI 测试、`npm run check` 合并门禁 | `src/`、`test/`、`package.json` |
 
 ## 3. 总体架构
 

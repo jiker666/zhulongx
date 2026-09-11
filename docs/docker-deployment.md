@@ -33,7 +33,7 @@ Podman Compose 需要可用 provider。若 `podman compose version` 不可用，
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `OPENAI_API_KEY` | 空 | operator 配置的默认模型密钥；也可在模型设置页面临时配置兼容端点 |
+| `XUANSHU_MODEL_API_KEY` | 空 | operator 配置的默认模型密钥（Anthropic 协议端点）；也可在模型设置页面临时配置 |
 | `XUANSHU_SERVER_TOKEN` | 启动脚本自动生成 | API Bearer 令牌。手动 Compose 启动时必须设置 |
 | `XUANSHU_PORT` | `7318` | 宿主机回环端口，例如 `17318` |
 | `XUANSHU_INSTALL_HEAVY_CTF_TOOLS` | `false` | 是否安装体积较大的扩展工具 |
@@ -48,6 +48,19 @@ XUANSHU_SERVER_TOKEN="replace-with-a-long-random-value" \
 ```
 
 如果本机使用的是 `podman-compose`、`docker compose` 或独立的 `docker-compose`，将命令前缀替换为可用 provider。启动脚本会自动完成这一选择。
+
+## Agent SDK 二进制校验
+
+嵌入的 agent 运行时通过 `@anthropic-ai/claude-agent-sdk` 按会话拉起内置 CLI 子进程。CLI 二进制以平台专属 optional dependency 的形式安装（如 `@anthropic-ai/claude-agent-sdk-linux-arm64`），`npm ci --legacy-peer-deps --ignore-scripts` 不会跳过它们。镜像构建或部署后可在容器内自检：
+
+```bash
+# 1) SDK 可以加载并定位平台 CLI（无输出即成功）
+node -e "import('@anthropic-ai/claude-agent-sdk').then(() => console.log('sdk ok'))"
+# 2) 平台包真实存在（按容器架构选择 linux-x64 / linux-arm64 / musl 变体）
+ls node_modules/@anthropic-ai/ | grep claude-agent-sdk
+```
+
+CLI 子进程以服务用户（镜像内 uid 10001）身份运行；若上述第 2 步找不到任何平台包，说明镜像构建时 npm 以 `--omit=optional` 解析或架构不匹配，首个任务会以 `Native CLI binary for <platform>-<arch> not found` 错误失败。
 
 ## 停止与诊断
 

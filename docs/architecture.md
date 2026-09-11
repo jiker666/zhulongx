@@ -7,7 +7,7 @@
 ```mermaid
 flowchart LR
     I["任务与附件"] --> N["输入归一化"]
-    N --> A["Pi Agent 决策循环"]
+    N --> A["嵌入式 Agent SDK 会话（CLI 子进程）"]
     A --> G["规划与 checkpoint 门禁"]
     G --> P["PolicyEngine"]
     P -->|允许| T["工具注册表"]
@@ -17,6 +17,8 @@ flowchart LR
     T --> O["有界观察结果"]
     S --> O
     O --> A
+    A --> MG["回环模型网关（凭据注入 · 门控 · 审计）"]
+    MG --> A
     A --> F["发现与完成状态"]
     N --> L["哈希链审计"]
     A --> L
@@ -27,7 +29,7 @@ flowchart LR
     F --> E["经验候选"]
     E -->|操作员或独立验证器确认| K["通用经验库"]
     K --> A
-    A --> C["Timeline / Context 双投影"]
+    A --> C["Timeline 投影"]
     A --> Q["持久 Agent / Workflow"]
     Q --> R["统一 Executor"]
     R --> S
@@ -39,9 +41,9 @@ flowchart LR
 | 模块 | 职责 | 不负责 |
 | --- | --- | --- |
 | `input.ts` | 解析任务、文件、目录与 ZIP，限制资源占用 | 不执行附件内容 |
-| `runtime.ts` | 驱动 Pi、状态转换、预算、持久化、工具 cleanup | 不绕过策略执行工具 |
+| `runtime.ts` | 驱动嵌入式 Agent SDK 会话、状态转换、预算、持久化、工具 cleanup | 不绕过策略执行工具 |
 | `executor.ts` / `connector.ts` | 统一命令与文件执行契约；管理反向 Connector 心跳、generation、租约和有界结果 | 不允许 Connector 自报程序或网络权限 |
-| `session-trajectory.ts` / `runtime-events.ts` / `context-projection.ts` | 为追加事件标注来源、执行者、关联 ID 与父序号；记录脱敏限长的模型可见上下文，并从同一事实源生成用户时间线和模型上下文 | 不删除原始审计事件，不把隐藏推理、凭据或图片像素持久化 |
+| `session-trajectory.ts` / `runtime-events.ts` | 为追加事件标注来源、执行者、关联 ID 与父序号；记录脱敏限长的模型可见上下文 | 不删除原始审计事件，不把隐藏推理、凭据或图片像素持久化 |
 | `run-recovery.ts` | 服务启动时结算未完成运行、续接审计链并禁止副作用重放 | 不自动重试或重放旧工具调用 |
 | `policy.ts` | 计划门禁、路径/主机/端口/程序范围、停滞与预算控制 | 不相信模型自报范围 |
 | `tools.ts` | 只读输入、有限图片观察、scratch 写入、sandbox 命令、HTTP/TCP、发现与终止 | 不在 API/model 进程内执行 CTF 命令 |
@@ -58,7 +60,9 @@ flowchart LR
 | `memory.ts` / `knowledge-store.ts` | 保存有来源、TTL、置信度和注入标记的长期参考 | 不保存凭据，不把历史或网页文本当成高优先级指令 |
 | `deep-research.ts` | 对显式 URL 做策略判定、有界并发抓取和知识摄取 | 不提供绕过 `PolicyEngine` 的抓取器或默认联网端点 |
 | `evaluation-ledger.ts` | 固定数据集、模型、运行环境、容器摘要、预算和轨迹引用并聚合指标 | 不声称单次演示等于基准能力 |
-| `model-routing.ts` | 按步骤的难度、effect、能力和预算选择模型；约束 HeavyThink 分支和聚合 | 不默认调用真实模型，不允许分支越过总 Token/成本/时间预算 |
+| `model-gateway.ts` | 进程级回环 Anthropic 协议反向代理：上游凭据注入、RPM/TPM/最小间隔门控、`model.context`/`model.request_reserved`/`model.provider_retry` 审计、SSE usage 记账与可选上游代理 | 不持久化凭据或完整请求载荷，不做模型选择 |
+| `agent-driver.ts` | 封装 Agent SDK `query()` 流式会话：生命周期、SDK 消息到内部事件翻译、length/no-action 恢复注入、abort 与单次 writeup 查询 | 不直接执行工具，不绕过网关发起模型请求 |
+| `tool-adapter.ts` | 把工具集包装为进程内 MCP 服务器 `xuanshu`：typebox→zod 参数转换、逐调用前置/后置管线、串行化队列和 finish_task settle | 不把仅审计用的 details 通道下发给模型，不并行执行同消息内的工具调用 |
 
 ## 自主性机制
 
@@ -91,7 +95,7 @@ flowchart LR
 - 服务启动前会检查持久化的 `queued/running` 状态。遗留运行统一记录 `run.recovered_after_restart` 并结算为 `aborted`；恢复采用 `no-replay`，避免无法确认完成情况的工具产生重复副作用。恢复写入会续接原审计序号和前向哈希，重复启动不会追加重复恢复事件。
 - 人工复核写入独立 `reviews.jsonl`，不修改原始哈希链，因此原始行为与事后修正可以同时追溯。
 - 每个 persisted runtime event 使用 `(epoch, seq)` 排序；SSE 使用稳定 event id 支持 `Last-Event-ID` 回放。检索、UI 历史回放、恢复视图和分支上下文都读取同一审计序列，重复事件由纯 reducer 去重，重连先回放缺口再继续实时流。
-- 模型上下文投影会删除隐藏 thinking、裁剪过长工具数据并在阈值处压缩旧上下文；审计时间线保持完整。压缩摘要带来源边界，并明确作为不可信历史参考注入。
+- 上下文压缩由嵌入式 Agent SDK 自管：压缩边界以 `context.compacted`（`detectedBy: "sdk"`）事件落入审计与 `state.contextCuts`，无客户端侧摘要注入；审计时间线保持完整，隐藏 thinking、凭据或图片像素仍不会持久化。
 
 ## 持久编排与 Connector
 

@@ -11,7 +11,7 @@
 
 ## 1. 测试目的与边界
 
-本报告验证本次可交付代码的工程正确性和安全边界，重点覆盖类型、代码规范、策略控制、预算、审计、恢复、运行摘要、前端构建和部署配置。测试使用确定性 faux-model，不发起真实模型请求，不接触真实比赛平台或未授权目标。
+本报告验证本次可交付代码的工程正确性和安全边界，重点覆盖类型、代码规范、策略控制、预算、审计、恢复、运行摘要、前端构建和部署配置。测试使用确定性 faux-CLI（脚本化模型），不发起真实模型请求，不接触真实比赛平台或未授权目标。
 
 本报告**不**以单次演示替代泛化能力评测，不报告未经固定数据集和环境清单支持的成功率，也不将 Compose 配置解析表述为容器镜像构建或 Docker 运行验收。真实模型、真实平台和长期泛化实验应按 [评测协议](../evaluation.md) 在明确授权的 opt-in suite 中单独执行。
 
@@ -24,7 +24,7 @@
 | 后端构建 | TypeScript ESM，执行仓库 `npm run build` |
 | 前端构建 | `frontend/`，React/Vite 生产构建 |
 | 测试框架 | Vitest、TypeScript、ESLint |
-| 模型依赖 | 确定性 faux-model/faux-runner；无真实模型调用 |
+| 模型依赖 | 确定性 faux-CLI 脚本化模型；无真实模型调用 |
 | 容器验证 | 已连接的 rootless Podman machine（ARM64）；以 `podman compose` 调用已配置的外部 Compose provider，未使用 Docker daemon |
 | 容器端到端 | core sandbox 与 Web 合并镜像实际构建；以 `XUANSHU_PORT=17318` 启动，`/health`、服务日志、sandbox socket 和浏览器页面均已验证 |
 

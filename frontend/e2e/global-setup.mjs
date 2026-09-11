@@ -18,7 +18,7 @@ export default async function globalSetup() {
   await mkdir(fixtureRoot, { recursive: true });
   const now = "2026-08-10T00:00:00.000Z";
   const audit = new AuditChain(resolve(fixtureRoot, "audit.jsonl"), fixtureId);
-  await audit.append("run.started", { model: { provider: "fixture", id: "fixture-model", api: "openai-responses" }, scope: { mode: "observe" } });
+  await audit.append("run.started", { model: { provider: "fixture", id: "fixture-model" }, scope: { mode: "observe" } });
   await audit.append("plan.submitted", { goal: "Inspect the authorized fixture target", steps: [{ id: "step-1", objective: "Collect a bounded baseline" }] });
   await audit.append("policy.decision", { toolCallId: "act-fixture-1", toolName: "http_request", allowed: true, reason: "Within configured scope", signature: "fixture-signature" });
   await audit.append("tool.result", { toolCallId: "act-fixture-1", toolName: "http_request", isError: false, content: "Bounded response captured", details: { status: 200 } });
@@ -49,7 +49,7 @@ export default async function globalSetup() {
   }
   await mkdir(liveFixtureRoot, { recursive: true });
   const liveAudit = new AuditChain(resolve(liveFixtureRoot, "audit.jsonl"), liveFixtureId);
-  await liveAudit.append("run.started", { model: { provider: "fixture", id: "live-fixture-model", api: "openai-responses" }, scope: { mode: "observe" } });
+  await liveAudit.append("run.started", { model: { provider: "fixture", id: "live-fixture-model" }, scope: { mode: "observe" } });
   await liveAudit.append("policy.decision", { toolCallId: "live-action-1", toolName: "http_request", allowed: true, reason: "Within configured scope", signature: "live-signature" });
   await writeFile(resolve(liveFixtureRoot, "state.json"), JSON.stringify({ id: liveFixtureId, status: "running", phase: "analysis", task: { task: "Observe a live authorized fixture", attachments: [], metadata: { category: "Web", target: "live.fixture.lab" } }, createdAt: now, updatedAt: now, startedAt: now, findings: [], evidence: [], lessons: [], hypotheses: [], strategyRevisions: [], strategyRevisionRequired: false, sandboxNamespace: liveFixtureId, scratchRoot: resolve(projectRoot, ".xuan-shu", "work", liveFixtureId), appliedExperienceIds: [], turns: 1, toolCalls: 1, httpRequests: 1, tcpSessions: 0, actionsSinceCheckpoint: 0, repeatedActions: {} }), "utf8");
   const liveTimer = setTimeout(() => { void liveAudit.append("policy.decision", { toolCallId: "live-action-2", toolName: "read_file", allowed: false, reason: "A strategy-revision checkpoint is required", signature: "live-signature-2" }).then(() => liveAudit.append("finding.recorded", { id: "live-finding-1", title: "Live evidence arrived", severity: "info", evidence: ["live-evidence-1"] })); }, 1_200);
