@@ -1,11 +1,10 @@
-import type { AgentTool } from "@earendil-works/pi-agent-core";
-import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 import { sanitizeSecrets } from "./sanitize.js";
 import { validateExternalToolDescriptor, type ToolDescriptor } from "./tool-catalog.js";
+import type { ToolContent, ToolShape } from "./types.js";
 
 export interface ExternalToolRegistration {
   descriptor: ToolDescriptor;
-  tool: AgentTool<any, any>;
+  tool: ToolShape;
 }
 
 function boundedText(value: string, maxBytes: number): string {
@@ -27,7 +26,7 @@ export function adaptExternalTool(registration: ExternalToolRegistration, maxOut
         signal?.throwIfAborted();
         const result = await implementation.execute(id, params, signal, onUpdate);
         signal?.throwIfAborted();
-        const content = result.content.map((item): TextContent | ImageContent => {
+        const content = result.content.map((item): ToolContent => {
           if (item.type === "text") return { ...item, text: boundedText(item.text, maxOutputBytes) };
           const approximateBytes = Math.floor(item.data.length * 3 / 4);
           if (approximateBytes > maxOutputBytes) return { type: "text", text: `[external image omitted: ${item.mimeType}, ${approximateBytes} bytes]` };

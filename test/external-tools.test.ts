@@ -1,4 +1,4 @@
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
 import { adaptExternalTool } from "../src/external-tools.js";
 import { PolicyEngine } from "../src/policy.js";

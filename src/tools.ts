@@ -2,8 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, lstat, open, opendir, readFile, realpath, writeFile } from "node:fs/promises";
 import { createConnection, type Socket } from "node:net";
 import { basename, dirname, relative, resolve } from "node:path";
-import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { Type } from "@earendil-works/pi-ai";
+import { Type } from "typebox";
 import type { AuditChain } from "./audit.js";
 import { extractZipArchive, searchArtifact } from "./artifact-tools.js";
 import { SandboxExecutor, type Executor } from "./executor.js";
@@ -23,6 +22,7 @@ import type {
   RuntimeConfig,
   ScopeConfig,
   StrategyRevision,
+  ToolShape,
 } from "./types.js";
 
 interface CheckpointInput {
@@ -232,7 +232,7 @@ interface ToolContext {
 }
 
 export interface ToolSet {
-  tools: AgentTool<any, any>[];
+  tools: ToolShape[];
   cleanup: () => Promise<void>;
 }
 
@@ -781,7 +781,7 @@ export function createToolSet(context: ToolContext): ToolSet {
     await executor.dispose();
   };
 
-  const tools: AgentTool<any, any>[] = [
+  const tools: ToolShape[] = [
     {
       name: "browser",
       label: "Controlled browser",
@@ -1024,7 +1024,7 @@ export function createToolSet(context: ToolContext): ToolSet {
           );
         },
       },
-    ] satisfies AgentTool<any, any>[] : []),
+    ] satisfies ToolShape[] : []),
     {
       name: "list_files",
       label: "List workspace files",
@@ -1804,6 +1804,6 @@ export function createToolSet(context: ToolContext): ToolSet {
   return { tools, cleanup };
 }
 
-export function createTools(context: ToolContext): AgentTool<any, any>[] {
+export function createTools(context: ToolContext): ToolShape[] {
   return createToolSet(context).tools;
 }

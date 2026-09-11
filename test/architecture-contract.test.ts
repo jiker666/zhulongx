@@ -7,13 +7,13 @@ const NEW_CORE_MODULES = [
   "agent-store", "agent-worker", "connector", "context-projection", "deep-research",
   "evaluation-ledger", "executor", "external-tools", "knowledge-store", "memory",
   "model-gateway", "model-routing", "permissions", "profiles", "provider-errors", "run-recovery",
-  "runtime-events", "session-trajectory", "tool-catalog", "workflow-worker", "workflow",
+  "runtime-events", "session-trajectory", "tool-adapter", "tool-catalog", "workflow-worker", "workflow",
 ];
 
 const LOWER_LAYERS = [
   "agent-store", "connector", "context-projection", "deep-research", "evaluation-ledger",
   "executor", "knowledge-store", "memory", "model-gateway", "model-routing", "permissions",
-  "provider-errors", "runtime-events", "tool-catalog", "workflow",
+  "provider-errors", "runtime-events", "tool-adapter", "tool-catalog", "workflow",
   "session-trajectory",
 ];
 

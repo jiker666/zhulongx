@@ -1,5 +1,6 @@
 import type { StreamFn } from "@earendil-works/pi-agent-core";
 import type { Model } from "@earendil-works/pi-ai";
+import type { TSchema } from "typebox";
 
 export type ModelThinkingFormat =
   | "openai"
@@ -411,4 +412,38 @@ export interface RuntimeOverrides {
   memoryStore?: import("./memory.js").MemoryStore;
   knowledgeStore?: import("./knowledge-store.js").KnowledgeStore;
   executorFactory?: (input: { runId: string; workspaceRoot: string; scratchRoot: string; signal?: AbortSignal }) => Promise<import("./executor.js").Executor> | import("./executor.js").Executor;
+}
+
+export interface ToolTextContent {
+  type: "text";
+  text: string;
+}
+
+export interface ToolImageContent {
+  type: "image";
+  data: string;
+  mimeType: string;
+}
+
+export type ToolContent = ToolTextContent | ToolImageContent;
+
+export interface ToolResult {
+  content: ToolContent[];
+  details: unknown;
+  terminate?: boolean;
+}
+
+/**
+ * Structural replacement for the framework agent-tool interface. Parameters
+ * stay single-sourced as typebox JSON Schema; execute keeps the legacy
+ * (toolCallId, args, signal, onUpdate) signature so existing tools are
+ * unchanged.
+ */
+export interface ToolShape {
+  name: string;
+  label: string;
+  description: string;
+  parameters: TSchema;
+  executionMode?: "parallel" | "sequential";
+  execute(toolCallId: string, args: unknown, signal?: AbortSignal, onUpdate?: (partialResult: ToolResult) => void): Promise<ToolResult>;
 }
