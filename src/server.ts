@@ -24,6 +24,7 @@ import { BoundedWorkflowWorker, runManagerWorkflowNodeRunner } from "./workflow-
 import { ConnectorBroker, ConnectorExecutor } from "./connector.js";
 import { EvaluationLedger, type EvaluationAttempt } from "./evaluation-ledger.js";
 import { KnowledgeStore, type KnowledgeTrust } from "./knowledge-store.js";
+import { startModelGateway, type ModelGateway } from "./model-gateway.js";
 import { QuestionBankProgressStore } from "./question-bank-progress.js";
 import { AdaptiveCampaignManager, DurableAdaptiveCampaignStore, type AdaptiveCampaignStartInput } from "./adaptive-campaign.js";
 import { sanitizeSensitiveText } from "./sanitize.js";
@@ -145,6 +146,8 @@ export interface ApiServerDependencies {
   connectorBroker?: ConnectorBroker;
   evaluationLedger?: EvaluationLedger;
   knowledgeStore?: KnowledgeStore;
+  /** Process-level model gateway; when omitted, startApiServer owns one and stops it on close. */
+  gateway?: ModelGateway;
   adaptiveCampaigns?: AdaptiveCampaignManager;
 }
 
@@ -343,6 +346,7 @@ export function createApiServer(config: AppConfig, dependencies: ApiServerDepend
     permissionGate: permissionBroker,
     memoryStore,
     knowledgeStore,
+    ...(dependencies.gateway ? { gateway: dependencies.gateway } : {}),
     ...(targetConnectorId ? { executorFactory: () => new ConnectorExecutor(targetConnectorId, connectorBroker) } : {}),
   });
   const manager = new RunManager(runtime);
@@ -923,7 +927,11 @@ export async function startApiServer(
     throw new Error(`Refusing non-loopback API without ${config.server.tokenEnv}`);
   }
   await recoverInterruptedRuns(config.runtime.artifactRoot);
-  const { server, manualJobs, manualUploads, agentWorker, workflowWorker, adaptiveCampaigns, closeStreams } = createApiServer(config, dependencies);
+  // One loopback gateway per API process: every embedded agent session and
+  // writeup subprocess routes through it, so credential injection, request
+  // gating, and model audit stay centralized. Owned here unless injected.
+  const gateway = dependencies.gateway ?? await startModelGateway();
+  const { server, manualJobs, manualUploads, agentWorker, workflowWorker, adaptiveCampaigns, closeStreams } = createApiServer(config, { ...dependencies, gateway });
   await adaptiveCampaigns.resumePending();
   await new Promise<void>((resolveListen, reject) => {
     server.once("error", reject);
@@ -941,6 +949,9 @@ export async function startApiServer(
       await adaptiveCampaigns.close();
       await agentWorker.close();
       await workflowWorker.close();
+      // Stop the gateway last: workers may still drain in-flight runs whose
+      // next model request needs its route.
+      await gateway.stop();
     },
   };
 }

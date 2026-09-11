@@ -25,14 +25,6 @@ export interface WriteupGenerationInput {
 
 export interface WriteupGenerationResult { markdown: string; attempts: number }
 
-function textFromAssistant(value: unknown): string {
-  if (!value || typeof value !== "object" || !Array.isArray((value as { content?: unknown }).content)) return "";
-  return (value as { content: unknown[] }).content
-    .flatMap((item) => item && typeof item === "object" && (item as { type?: unknown }).type === "text" ? [String((item as { text?: unknown }).text ?? "")] : [])
-    .join("\n")
-    .trim();
-}
-
 function bounded(value: unknown, limit: number): string {
   const fallback = typeof value === "string" ? value : JSON.stringify(value) ?? "";
   const sanitized = sanitizeSecrets(fallback);

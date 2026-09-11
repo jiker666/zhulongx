@@ -480,7 +480,6 @@ export class XuanShuRuntime {
     };
     gateway.setRoute(runKey, routeOptions);
     let lengthRecoveryAttempts = 0;
-    let noActionRecoveryAttempts = 0;
     const pipeline = createToolCallPipeline({
       state,
       runtime: runtimeConfig,
@@ -526,7 +525,6 @@ export class XuanShuRuntime {
         await audit.append("model.length_recovery", data);
         await emit("model.length_recovery", data);
       } else if (type === "model.no_action_recovery") {
-        noActionRecoveryAttempts = (data as { attempt: number }).attempt;
         await audit.append("model.no_action_recovery", data);
         await emit("model.no_action_recovery", data);
       } else if (type === "context.compacted") {

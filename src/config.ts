@@ -40,14 +40,6 @@ function pythonModuleArray(value: unknown, label: string): string[] {
   return modules;
 }
 
-function stringRecord(value: unknown, label: string): Record<string, string> {
-  const record = requireObject(value, label);
-  if (Object.values(record).some((item) => typeof item !== "string" || item.length === 0)) {
-    throw new Error(`${label} values must be non-empty environment variable names`);
-  }
-  return Object.fromEntries(Object.entries(record) as Array<[string, string]>);
-}
-
 function validateConfig(value: unknown, configPath: string): AppConfig {
   const root = requireObject(value, "config");
   const model = requireObject(root.model, "model");
