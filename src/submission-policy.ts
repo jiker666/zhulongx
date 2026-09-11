@@ -7,6 +7,7 @@ export interface SubmissionValidationInput {
   status: "completed" | "blocked";
   candidate?: string;
   observedOutputs: readonly string[];
+  independentObservedOutputs?: readonly string[];
   verification: readonly string[];
   independentlyVerified: boolean;
   checkedAt?: string;
@@ -59,6 +60,9 @@ export function validateSubmission(input: SubmissionValidationInput): Submission
   const grounded = input.observedOutputs.some((output) => output.includes(candidate));
   if (!grounded) return result(input, "pending", "The exact candidate was not observed in a successful tool result.", false, false);
   if (!input.independentlyVerified) return result(input, "pending", "The candidate is grounded but was not independently verified.", true, false);
+  const independentOutputs = input.independentObservedOutputs ?? input.observedOutputs;
+  const independentlyObserved = independentOutputs.some((output) => output.includes(candidate));
+  if (!independentlyObserved) return result(input, "pending", "Independent verification must come from a separate successful tool result containing the exact candidate.", true, false);
   const verificationMentionsCandidate = input.verification.some((item) => item.includes(candidate));
   if (!verificationMentionsCandidate) return result(input, "pending", "Verification must mention the exact grounded candidate.", true, false);
   return result(input, "accepted", "The candidate passed grounding, format, and independent-verification gates.", true, true);

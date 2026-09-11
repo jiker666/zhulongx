@@ -9,7 +9,7 @@ import type {
 const jsonHeaders = { "content-type": "application/json" };
 
 export const getManualJobs = (signal?: AbortSignal) => request<{ jobs: ManualJobSnapshot[] }>("/v1/manual/jobs", { signal });
-export const startManualJob = (input: { tasks: string[]; concurrency: number; raceAgents: number; writeup: boolean; uploadId?: string }, signal?: AbortSignal) => request<{ job: ManualJobSnapshot }>("/v1/manual/jobs", { method: "POST", signal, headers: jsonHeaders, body: JSON.stringify(input) });
+export const startManualJob = (input: { tasks: string[]; concurrency: number; raceAgents: number; writeup: boolean; strictSubmission: boolean; uploadId?: string }, signal?: AbortSignal) => request<{ job: ManualJobSnapshot }>("/v1/manual/jobs", { method: "POST", signal, headers: jsonHeaders, body: JSON.stringify(input) });
 export const stopManualJob = (id: string, signal?: AbortSignal) => request<{ job: ManualJobSnapshot }>(`/v1/manual/jobs/${encodeURIComponent(id)}/stop`, { method: "POST", signal, headers: jsonHeaders, body: "{}" });
 
 export const getQuestionBank = (signal?: AbortSignal) => request<{ questionBank: QuestionBankSnapshot }>("/v1/question-bank", { signal });

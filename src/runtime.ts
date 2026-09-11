@@ -549,7 +549,7 @@ export class XuanShuRuntime {
     let modelRequestNumber = 0;
     let activeModelRequestId: string | undefined;
     const toolRequestSequences = new Map<string, number>();
-    const observedToolOutputs: string[] = [];
+    const observedToolOutputs: Array<{ toolCallId: string; output: string }> = [];
     const streamFn: StreamFn = (turnModel, context, streamOptions) => lazyStream(turnModel, async () => {
       const requestId = `${id}:request:${++modelRequestNumber}`;
       activeModelRequestId = requestId;
@@ -665,11 +665,16 @@ export class XuanShuRuntime {
           const verification = Array.isArray(input.verification)
             ? input.verification.filter((item): item is string => typeof item === "string")
             : [];
+          const candidate = typeof input.submission === "string" ? input.submission.trim() : "";
+          const candidateOutputs = candidate
+            ? observedToolOutputs.filter((item) => item.output.includes(candidate)).map((item) => item.output)
+            : [];
           const validation = validateSubmission({
             policy: submissionPolicy,
             status: input.status === "completed" ? "completed" : "blocked",
             ...(typeof input.submission === "string" ? { candidate: input.submission } : {}),
-            observedOutputs: observedToolOutputs,
+            observedOutputs: observedToolOutputs.map((item) => item.output),
+            independentObservedOutputs: candidateOutputs.slice(1),
             verification,
             independentlyVerified: input.independentlyVerified === true,
           });
@@ -755,7 +760,7 @@ export class XuanShuRuntime {
         if (!isError && !["submit_plan", "checkpoint", "record_finding", "record_lesson", "finish_task", "read_shared_evidence", "publish_shared_evidence"].includes(toolCall.name)) {
           const observation = JSON.stringify({ content: persistedContent, details: persistedDetails });
           if (observation) {
-            observedToolOutputs.push(observation.slice(0, 12_000));
+            observedToolOutputs.push({ toolCallId: toolCall.id, output: observation.slice(0, 12_000) });
             if (observedToolOutputs.length > 32) observedToolOutputs.shift();
           }
         }

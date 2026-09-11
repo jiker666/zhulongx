@@ -12,6 +12,21 @@ describe("generic configuration", () => {
     expect(source).not.toMatch(/Bearer\s+[A-Za-z0-9._~-]+/i);
   });
 
+  it("accepts explicit operator-owned network scope environment overrides", async () => {
+    const previousMode = process.env.XUANSHU_SCOPE_MODE;
+    const previousHosts = process.env.XUANSHU_ALLOWED_HOSTS;
+    process.env.XUANSHU_SCOPE_MODE = "controlled";
+    process.env.XUANSHU_ALLOWED_HOSTS = "lab.example.invalid, *.sandbox.invalid:*";
+    try {
+      const config = await loadConfig("config/default.yaml");
+      expect(config.scope.mode).toBe("controlled");
+      expect(config.scope.allowedHosts).toEqual(["lab.example.invalid", "*.sandbox.invalid:*"]);
+    } finally {
+      if (previousMode === undefined) delete process.env.XUANSHU_SCOPE_MODE; else process.env.XUANSHU_SCOPE_MODE = previousMode;
+      if (previousHosts === undefined) delete process.env.XUANSHU_ALLOWED_HOSTS; else process.env.XUANSHU_ALLOWED_HOSTS = previousHosts;
+    }
+  });
+
   it("rejects executor kinds without an operator-provided adapter", async () => {
     const source = await readFile("config/default.yaml", "utf8");
     const path = `/tmp/xuan-config-${process.pid}-${Date.now()}.yaml`;

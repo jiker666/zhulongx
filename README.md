@@ -127,6 +127,17 @@ npm run dev -- run \
 - Browser 使用逐运行上下文，导航仍受同一 scope 约束。
 - Sandbox 不直接出网；安装更多工具不会扩大网络或程序权限。
 
+本地开发时也可以通过 operator 环境变量临时启用明确的受控主机范围：
+
+```bash
+XUANSHU_SCOPE_MODE=controlled \
+XUANSHU_ALLOWED_HOSTS='lab.example.test api.example.test:8443' \
+XUANSHU_SERVER_TOKEN='replace-with-a-long-random-value' \
+npm run dev -- serve --config config/default.yaml
+```
+
+这两个变量只覆盖当前进程的 scope；默认仍为 `observe` 且不允许主动网络。Workbench 默认勾选“严格验证答案”，只有成功工具输出和独立验证证据同时支撑的候选才能成为完成结论。
+
 ## 控制台与 API
 
 启动 API 服务：

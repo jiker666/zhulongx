@@ -21,6 +21,7 @@ export interface ManualJobStartInput {
   concurrency: number;
   raceAgents?: number;
   writeup?: boolean;
+  strictSubmission?: boolean;
   skipBlocked?: boolean;
   transientRetryLimit?: number;
 }
@@ -51,6 +52,7 @@ export interface ManualJobSnapshot {
   concurrency: number;
   raceAgents: number;
   writeup: boolean;
+  strictSubmission: boolean;
   skipBlocked: boolean;
   transientRetryLimit: number;
   total: number;
@@ -86,6 +88,7 @@ interface ManualJobHandle {
   concurrency: number;
   raceAgents: number;
   writeup: boolean;
+  strictSubmission: boolean;
   skipBlocked: boolean;
   transientRetryLimit: number;
   tasks: Array<{ request: TaskRequest; snapshot: ManualTaskSnapshot; runIds: Set<string> }>;
@@ -137,6 +140,7 @@ function taskPreview(task: string): string {
 function taskWithOutputContract(
   request: TaskRequest,
   writeup: boolean,
+  strictSubmission: boolean,
   raceAgent?: { index: number; total: number },
 ): TaskRequest {
   const raceLenses = [
@@ -170,7 +174,14 @@ function taskWithOutputContract(
         ]
       : ["- Keep summary concise and include only the result and its verification."]),
   ];
-  return { ...request, task: `${request.task.trimEnd()}\n\n${contract.join("\n")}` };
+  return {
+    ...request,
+    task: `${request.task.trimEnd()}\n\n${contract.join("\n")}`,
+    metadata: {
+      ...(request.metadata ?? {}),
+      ...(strictSubmission ? { submissionPolicy: "strict" } : {}),
+    },
+  };
 }
 
 function boundedWriteup(value: string | undefined): string | undefined {
@@ -194,6 +205,7 @@ function extractSubmission(state: RunState): string | undefined {
 
 function raceWinnerState(state: RunState): boolean {
   if (state.status !== "completed") return false;
+  if (state.submissionValidation && state.submissionValidation.status !== "accepted") return false;
   const submission = extractSubmission(state);
   if (!submission || state.independentlyVerified !== true) return false;
   return (state.verification ?? []).some((record) => record.includes(submission));
@@ -240,6 +252,8 @@ export function validateManualJobInput(input: unknown): ManualJobStartInput {
   }
   const writeup = value.writeup === undefined ? true : value.writeup;
   if (typeof writeup !== "boolean") throw new Error("writeup must be a boolean");
+  const strictSubmission = value.strictSubmission === undefined ? true : value.strictSubmission;
+  if (typeof strictSubmission !== "boolean") throw new Error("strictSubmission must be a boolean");
   const skipBlocked = value.skipBlocked === undefined ? false : value.skipBlocked;
   if (typeof skipBlocked !== "boolean") throw new Error("skipBlocked must be a boolean");
   const transientRetryLimit = value.transientRetryLimit === undefined ? 2 : Number(value.transientRetryLimit);
@@ -251,6 +265,7 @@ export function validateManualJobInput(input: unknown): ManualJobStartInput {
     concurrency,
     raceAgents,
     writeup,
+    strictSubmission,
     skipBlocked,
     transientRetryLimit,
   };
@@ -271,6 +286,7 @@ export class ManualJobManager {
       concurrency: validated.concurrency,
       raceAgents: validated.raceAgents ?? 1,
       writeup: validated.writeup ?? true,
+      strictSubmission: validated.strictSubmission ?? true,
       skipBlocked: validated.skipBlocked ?? false,
       transientRetryLimit: validated.transientRetryLimit ?? 0,
       tasks: validated.tasks.map((input, index) => {
@@ -367,7 +383,7 @@ export class ManualJobManager {
             for (let agent = 0; agent < job.raceAgents; agent += 1) {
               if (job.controller.signal.aborted) break;
               task.snapshot.runAttempts = agent + 1;
-              const request = taskWithOutputContract(preparedRequest, job.writeup, {
+              const request = taskWithOutputContract(preparedRequest, job.writeup, job.strictSubmission, {
                 index: agent,
                 total: job.raceAgents,
               });
@@ -428,7 +444,7 @@ export class ManualJobManager {
               task.snapshot.runAttempts = attempts;
               let activeRunId: string | undefined;
               try {
-                const runId = this.dependencies.runManager.start(taskWithOutputContract(preparedRequest, job.writeup), { workspaceMode: "attachments-only", ...(job.writeup ? {} : { writeup: false }) });
+                const runId = this.dependencies.runManager.start(taskWithOutputContract(preparedRequest, job.writeup, job.strictSubmission), { workspaceMode: "attachments-only", ...(job.writeup ? {} : { writeup: false }) });
                 activeRunId = runId;
                 task.snapshot.runId = runId;
                 task.runIds.add(runId);
@@ -462,7 +478,11 @@ export class ManualJobManager {
           if (state) {
             task.snapshot.runId = settled.runId || state.id;
             task.snapshot.run = { id: state.id, status: state.status, turns: state.turns, toolCalls: state.toolCalls };
-            const valid = job.raceAgents === 1 || raceWinnerState(state);
+            const valid = job.raceAgents === 1
+              ? state.status === "completed"
+                ? !job.strictSubmission || state.submissionValidation === undefined || state.submissionValidation.status === "accepted"
+                : true
+              : raceWinnerState(state);
             task.snapshot.status = valid
               ? job.skipBlocked && state.status === "blocked"
                 ? "skipped"
@@ -543,6 +563,7 @@ export class ManualJobManager {
       concurrency: job.concurrency,
       raceAgents: job.raceAgents,
       writeup: job.writeup,
+      strictSubmission: job.strictSubmission,
       skipBlocked: job.skipBlocked,
       transientRetryLimit: job.transientRetryLimit,
       total: tasks.length,

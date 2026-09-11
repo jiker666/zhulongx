@@ -669,6 +669,7 @@ export function createApiServer(config: AppConfig, dependencies: ApiServerDepend
             concurrency: 1,
             raceAgents: config.questionBank?.raceAgents ?? 1,
             writeup: record.writeup === undefined ? true : record.writeup,
+            strictSubmission: true,
             skipBlocked: true,
             transientRetryLimit: 2,
           });

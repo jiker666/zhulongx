@@ -38,7 +38,7 @@ const PLAYBOOKS: Record<CtfSkillCategory, string[]> = {
     "Translate the transform loop instruction-by-instruction before inverting it: preserve every xor/add/sub/rotate, table lookup, byte truncation, and write order. A permutation-looking index table is not proof that the transform is only a permutation.",
     "Keep tool-call arguments concise and issue one investigative tool call per assistant turn when collecting disassembly or writing a solver; this preserves complete structured arguments and makes traceback recovery possible.",
     "Prefer narrow disassembly windows around a confirmed address and bounded byte reads; do not request a whole text section when a short instruction slice answers the current question.",
-    "Once a reversible transform and its constants are identified, stop expanding the search: write the smallest artifact-derived solver, assert its length/shape, replay the full check independently, run that exact script successfully with the attachment path shown in INPUTS (using the hinted cwd), and only then call finish_task.",
+    "Once a reversible transform and its constants are identified, stop expanding the search: write the smallest artifact-derived solver, assert its length/shape, run it successfully with the attachment path shown in INPUTS (using the hinted cwd), then make a separate second successful tool call to replay the full check independently and emit the same candidate before finish_task.",
     "Before claiming a recovered answer, replay the complete candidate through an independent script or execution path and record the exact observed output, not only a plausible-looking string.",
   ],
   forensics: [

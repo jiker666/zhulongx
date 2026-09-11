@@ -127,14 +127,7 @@ export class PolicyEngine {
       };
     }
     if (toolName === "checkpoint" && state.strategyRevisionRequired) {
-      const checkpoint = args as {
-        failureClassification?: unknown;
-        planChanges?: unknown;
-        nextActionRationale?: unknown;
-      };
-      // The tool schema keeps failureClassification optional so a model can
-      // recover from the persisted lastFailure without repeating boilerplate.
-      // If it is supplied, it must still be a concrete non-none class.
+      const checkpoint = args as { failureClassification?: unknown; planChanges?: unknown; nextActionRationale?: unknown };
       if (
         checkpoint.failureClassification !== undefined &&
         (typeof checkpoint.failureClassification !== "string" || checkpoint.failureClassification === "none")
@@ -150,16 +143,8 @@ export class PolicyEngine {
     }
     const reserveStartsAt = this.runtime.maxRuntimeMs - this.runtime.finalizationReserveMs;
     const startedAt = Date.parse(state.startedAt ?? state.createdAt);
-    if (
-      action &&
-      Number.isFinite(startedAt) &&
-      Date.now() - startedAt >= reserveStartsAt
-    ) {
-      return {
-        allowed: false,
-        reason: "Finalization reserve is active; investigative actions are closed",
-        signature: actionSignature,
-      };
+    if (action && Number.isFinite(startedAt) && Date.now() - startedAt >= reserveStartsAt) {
+      return { allowed: false, reason: "Finalization reserve is active; investigative actions are closed", signature: actionSignature };
     }
     if (action && state.actionsSinceCheckpoint >= this.runtime.maxActionsWithoutCheckpoint) {
       return { allowed: false, reason: "Checkpoint required before more actions", signature: actionSignature };
@@ -193,64 +178,31 @@ export class PolicyEngine {
         return { allowed: false, reason: "Scratch path must be relative and stay inside scratchRoot", signature: actionSignature };
       }
     }
-    if (toolName === "inspect_artifact") {
+    if (["inspect_artifact", "search_artifact"].includes(toolName)) {
       const path = String((args as { path?: unknown })?.path ?? "");
       const source = String((args as { source?: unknown })?.source ?? "workspace");
       if ((source !== "workspace" && source !== "scratch") || !isRelativeSafePath(path)) {
-        return {
-          allowed: false,
-          reason: "Artifact inspection requires a safe relative workspace or scratch path",
-          signature: actionSignature,
-        };
-      }
-    }
-    if (toolName === "search_artifact") {
-      const path = String((args as { path?: unknown })?.path ?? "");
-      const source = String((args as { source?: unknown })?.source ?? "workspace");
-      if ((source !== "workspace" && source !== "scratch") || !isRelativeSafePath(path)) {
-        return {
-          allowed: false,
-          reason: "Artifact search requires a safe relative workspace or scratch path",
-          signature: actionSignature,
-        };
+        return { allowed: false, reason: `${toolName === "inspect_artifact" ? "Artifact inspection" : "Artifact search"} requires a safe relative workspace or scratch path`, signature: actionSignature };
       }
     }
     if (toolName === "extract_archive") {
       const path = String((args as { path?: unknown })?.path ?? "");
       const destination = String((args as { destination?: unknown })?.destination ?? "");
       const source = String((args as { source?: unknown })?.source ?? "workspace");
-      if (
-        (source !== "workspace" && source !== "scratch") ||
-        !isRelativeSafePath(path) ||
-        !isRelativeSafePath(destination)
-      ) {
-        return {
-          allowed: false,
-          reason: "Archive extraction requires safe relative source and scratch destination paths",
-          signature: actionSignature,
-        };
+      if ((source !== "workspace" && source !== "scratch") || !isRelativeSafePath(path) || !isRelativeSafePath(destination)) {
+        return { allowed: false, reason: "Archive extraction requires safe relative source and scratch destination paths", signature: actionSignature };
       }
     }
     if (toolName === "observe_image") {
       const path = String((args as { path?: unknown })?.path ?? "");
       const source = String((args as { source?: unknown })?.source ?? "workspace");
       if ((source !== "workspace" && source !== "scratch") || !isRelativeSafePath(path)) {
-        return {
-          allowed: false,
-          reason: "Image observation requires a safe relative workspace or scratch path",
-          signature: actionSignature,
-        };
+        return { allowed: false, reason: "Image observation requires a safe relative workspace or scratch path", signature: actionSignature };
       }
       if ((state.imageObservations ?? 0) >= this.runtime.maxImageObservations) {
-        return {
-          allowed: false,
-          reason: "Image observation budget exhausted",
-          signature: actionSignature,
-        };
+        return { allowed: false, reason: "Image observation budget exhausted", signature: actionSignature };
       }
     }
-    // Attachment-only runs may inspect their isolated read-only input mount. The
-    // sandbox still confines writes to the per-run scratch directory.
     if (toolName === "http_request" || toolName === "web_collect_baseline") {
       if (this.scope.mode !== "controlled") {
         return { allowed: false, reason: "Network actions require scope.mode=controlled", signature: actionSignature };
@@ -269,28 +221,19 @@ export class PolicyEngine {
       }
     }
     if (toolName === "tcp_open") {
-      if (this.scope.mode !== "controlled") {
-        return { allowed: false, reason: "TCP actions require scope.mode=controlled", signature: actionSignature };
-      }
-      if (state.tcpSessions >= this.runtime.maxTcpSessions) {
-        return { allowed: false, reason: "TCP session budget exhausted", signature: actionSignature };
-      }
+      if (this.scope.mode !== "controlled") return { allowed: false, reason: "TCP actions require scope.mode=controlled", signature: actionSignature };
+      if (state.tcpSessions >= this.runtime.maxTcpSessions) return { allowed: false, reason: "TCP session budget exhausted", signature: actionSignature };
       const host = String((args as { host?: unknown })?.host ?? "");
       const port = Number((args as { port?: unknown })?.port ?? 0);
-      if (!host || !Number.isInteger(port) || port < 1 || port > 65535) {
-        return { allowed: false, reason: "Invalid TCP host or port", signature: actionSignature };
-      }
+      if (!host || !Number.isInteger(port) || port < 1 || port > 65535) return { allowed: false, reason: "Invalid TCP host or port", signature: actionSignature };
       const authority = tcpAuthority(host, port);
-      if (!this.scope.allowedHosts.some((allowed) => hostMatches(authority, allowed))) {
-        return { allowed: false, reason: `TCP host is outside the authorized scope: ${authority}`, signature: actionSignature };
-      }
+      if (!this.scope.allowedHosts.some((allowed) => hostMatches(authority, allowed))) return { allowed: false, reason: `TCP host is outside the authorized scope: ${authority}`, signature: actionSignature };
     }
     if (toolName === "browser") {
       if (this.scope.mode !== "controlled") return { allowed: false, reason: "Browser actions require scope.mode=controlled", signature: actionSignature };
-      const action = String((args as { action?: unknown })?.action ?? "");
-      // Popups remain disabled because they can bridge into host browser privileges.
-      if (["popup"].includes(action)) return { allowed: false, reason: "This browser action is disabled by default", signature: actionSignature };
-      if (!["create_session", "open_page", "navigate", "reload", "go_back", "capture_dom", "capture_network_summary", "assert_state", "click", "fill", "select", "check", "uncheck", "submit_form", "wait_for", "close_page", "close_session", "capture_screenshot", "upload", "download", "evaluate"].includes(action)) return { allowed: false, reason: "Unknown browser action", signature: actionSignature };
+      const browserAction = String((args as { action?: unknown })?.action ?? "");
+      if (["popup"].includes(browserAction)) return { allowed: false, reason: "This browser action is disabled by default", signature: actionSignature };
+      if (!["create_session", "open_page", "navigate", "reload", "go_back", "capture_dom", "capture_network_summary", "assert_state", "click", "fill", "select", "check", "uncheck", "submit_form", "wait_for", "close_page", "close_session", "capture_screenshot", "upload", "download", "evaluate"].includes(browserAction)) return { allowed: false, reason: "Unknown browser action", signature: actionSignature };
     }
     if (descriptor.source !== "builtin" && descriptor.effect === "network") {
       if (this.scope.mode !== "controlled") return { allowed: false, reason: "External network tools require scope.mode=controlled", signature: actionSignature };
@@ -299,18 +242,14 @@ export class PolicyEngine {
       if (descriptor.networkTargetFields?.includes("url")) {
         try {
           const url = new URL(String(input.url ?? ""));
-          if (!["http:", "https:"].includes(url.protocol) || !this.scope.allowedHosts.some((allowed) => hostMatches(url.host, allowed))) {
-            return { allowed: false, reason: `External tool host is outside the authorized scope: ${url.host}`, signature: actionSignature };
-          }
+          if (!["http:", "https:"].includes(url.protocol) || !this.scope.allowedHosts.some((allowed) => hostMatches(url.host, allowed))) return { allowed: false, reason: `External tool host is outside the authorized scope: ${url.host}`, signature: actionSignature };
         } catch (error) {
           return { allowed: false, reason: `Invalid external tool URL: ${String(error)}`, signature: actionSignature };
         }
       }
       if (descriptor.networkTargetFields?.includes("host-port")) {
         const authority = tcpAuthority(String(input.host ?? ""), Number(input.port ?? 0));
-        if (!this.scope.allowedHosts.some((allowed) => hostMatches(authority, allowed))) {
-          return { allowed: false, reason: `External tool host is outside the authorized scope: ${authority}`, signature: actionSignature };
-        }
+        if (!this.scope.allowedHosts.some((allowed) => hostMatches(authority, allowed))) return { allowed: false, reason: `External tool host is outside the authorized scope: ${authority}`, signature: actionSignature };
       }
     }
     return { allowed: true, reason: "Allowed by configured scope and runtime budget", signature: actionSignature };
@@ -332,17 +271,10 @@ export class PolicyEngine {
 
   static evaluateScopedTcpTarget(scope: ScopeConfig, host: string, port: number): PolicyDecision {
     const actionSignature = signature("scoped_tcp_target", { host, port });
-    if (scope.mode !== "controlled") {
-      return { allowed: false, reason: "TCP actions require scope.mode=controlled", signature: actionSignature };
-    }
-    if (!Number.isInteger(port) || port < 1 || port > 65535) {
-      return { allowed: false, reason: `Invalid TCP port: ${port}`, signature: actionSignature };
-    }
+    if (scope.mode !== "controlled") return { allowed: false, reason: "TCP actions require scope.mode=controlled", signature: actionSignature };
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return { allowed: false, reason: `Invalid TCP port: ${port}`, signature: actionSignature };
     const authority = tcpAuthority(host, port);
-    if (!scope.allowedHosts.some((allowed) => hostMatches(authority, allowed))) {
-      return { allowed: false, reason: `TCP host is outside the authorized scope: ${authority}`, signature: actionSignature };
-    }
+    if (!scope.allowedHosts.some((allowed) => hostMatches(authority, allowed))) return { allowed: false, reason: `TCP host is outside the authorized scope: ${authority}`, signature: actionSignature };
     return { allowed: true, reason: "Allowed by configured scope", signature: actionSignature };
   }
-
 }

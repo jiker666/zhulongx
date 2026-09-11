@@ -273,7 +273,19 @@ function validateConfig(value: unknown, configPath: string): AppConfig {
 export async function loadConfig(configPath = DEFAULT_CONFIG_PATH): Promise<AppConfig> {
   const absolutePath = resolve(configPath);
   const content = await readFile(absolutePath, "utf8");
-  return validateConfig(parse(content), absolutePath);
+  const config = validateConfig(parse(content), absolutePath);
+  const configuredMode = process.env.XUANSHU_SCOPE_MODE?.trim();
+  if (configuredMode) {
+    if (configuredMode !== "observe" && configuredMode !== "controlled") {
+      throw new Error("XUANSHU_SCOPE_MODE must be observe or controlled");
+    }
+    config.scope.mode = configuredMode;
+  }
+  const configuredHosts = process.env.XUANSHU_ALLOWED_HOSTS;
+  if (configuredHosts !== undefined) {
+    config.scope.allowedHosts = [...new Set(configuredHosts.split(/[\s,]+/).map((host) => host.trim()).filter(Boolean))];
+  }
+  return config;
 }
 
 export async function loadScopeFile(path: string): Promise<Partial<ScopeConfig>> {

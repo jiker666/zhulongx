@@ -188,6 +188,8 @@
 .final-status-blocked, .final-status-failed { color: var(--danger); background: #f5e8e6; }
 .final-status-running, .final-status-queued { color: var(--amber); background: #f6eedf; }
 .submission-spotlight { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 14px; align-items: center; min-width: 0; padding: 15px 16px; background: #f1f7f2; border: 1px solid #c4daca; border-radius: 5px; }
+.submission-spotlight.candidate { background: #fff8e8; border-color: #e6c47a; border-left-color: #c88719; }
+.submission-spotlight.candidate .submission-label, .submission-spotlight.candidate .submission-value-kicker { color: #8a5a11; }
 .submission-label { justify-content: flex-start; color: var(--green); }
 .submission-label span { font: 700 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
 .submission-label small { margin-left: auto; color: var(--subtle); font-size: 10px; }

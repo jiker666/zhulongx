@@ -10,6 +10,7 @@ describe("submission policy", () => {
       status: "completed",
       candidate: "flag{grounded}",
       observedOutputs: ["command output: flag{grounded}"],
+      independentObservedOutputs: ["independent replay output: flag{grounded}"],
       verification: ["Independent replay returned flag{grounded}"],
       independentlyVerified: true,
     });
@@ -23,6 +24,7 @@ describe("submission policy", () => {
       status: "completed",
       candidate: "flag{invented}",
       observedOutputs: ["command output did not contain a result"],
+      independentObservedOutputs: ["independent replay did not contain a result"],
       verification: ["The model believes flag{invented} is correct"],
       independentlyVerified: true,
     }).status).toBe("pending");
@@ -32,9 +34,22 @@ describe("submission policy", () => {
       status: "completed",
       candidate: "550e8400-e29b-41d4-a716-446655440000",
       observedOutputs: ["550e8400-e29b-41d4-a716-446655440000"],
+      independentObservedOutputs: ["Independent replay returned 550e8400-e29b-41d4-a716-446655440000"],
       verification: ["Independent replay returned 550e8400-e29b-41d4-a716-446655440000"],
       independentlyVerified: true,
     }).status).toBe("rejected");
+  });
+
+  it("does not treat one successful tool result as independent verification", () => {
+    expect(validateSubmission({
+      policy: "strict",
+      status: "completed",
+      candidate: "flag{single-observation}",
+      observedOutputs: ["solver output: flag{single-observation}"],
+      independentObservedOutputs: [],
+      verification: ["Independent replay returned flag{single-observation}"],
+      independentlyVerified: true,
+    }).status).toBe("pending");
   });
 
   it("defaults automated question-bank tasks to strict and keeps other tasks compatible", () => {

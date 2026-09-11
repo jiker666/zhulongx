@@ -321,6 +321,56 @@ describe("XuanShuRuntime", () => {
     }));
   });
 
+  it("blocks an ungrounded strict submission and lets the agent settle as blocked", async () => {
+    const root = await mkdtemp(join(tmpdir(), "xuan-runtime-strict-submission-"));
+    roots.push(root);
+    const config = testConfig(root);
+    await mkdir(config.scope.workspaceRoot, { recursive: true });
+    const faux = registerFauxProvider();
+    registrations.push(faux);
+    faux.setResponses([
+      fauxAssistantMessage(fauxToolCall("submit_plan", {
+        goal: "Verify a candidate from an authorized observation",
+        assumptions: [],
+        hypotheses: [],
+        steps: [{ id: "observe", objective: "Collect evidence", successCriteria: ["Candidate appears in a successful tool result"], tools: ["read_file"] }],
+      }, { id: "strict-plan" }), { stopReason: "toolUse" }),
+      fauxAssistantMessage(fauxToolCall("finish_task", {
+        status: "completed",
+        summary: "A candidate was proposed without a successful observation.",
+        submission: "flag{invented}",
+        evidence: ["model assertion"],
+        remainingRisks: [],
+        nextSteps: [],
+        confidence: 1,
+        verification: ["model assertion mentioned flag{invented}"],
+        independentlyVerified: true,
+      }, { id: "strict-unguarded-finish" }), { stopReason: "toolUse" }),
+      fauxAssistantMessage(fauxToolCall("finish_task", {
+        status: "blocked",
+        summary: "The candidate was rejected because no successful tool result contained it.",
+        evidence: ["submission gate audit"],
+        remainingRisks: ["No grounded candidate"],
+        nextSteps: ["Collect a successful authorized observation"],
+        confidence: 0.1,
+        verification: ["The runtime submission gate rejected the ungrounded candidate"],
+        independentlyVerified: false,
+      }, { id: "strict-blocked-finish" }), { stopReason: "toolUse" }),
+    ]);
+
+    const runtime = new XuanShuRuntime(config, { streamFn: streamSimple, model: faux.getModel() });
+    const state = await runtime.run({ task: "Strictly verify the final result", metadata: { submissionPolicy: "strict" } });
+    const records = await readAuditRecords(join(config.runtime.artifactRoot, state.id, "audit.jsonl"));
+
+    expect(state.status).toBe("blocked");
+    expect(state.submission).toBeUndefined();
+    expect(state.submissionValidation?.status).toBe("accepted");
+    expect(records).toContainEqual(expect.objectContaining({
+      type: "submission.validation",
+      data: expect.objectContaining({ status: "pending", grounded: false }),
+    }));
+  });
+
   it("preserves xhigh reasoning for Responses-compatible models", () => {
     const config = testConfig("/tmp/xuan-responses-model");
     config.model.api = "openai-responses";

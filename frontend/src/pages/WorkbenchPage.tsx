@@ -92,6 +92,7 @@ export function WorkbenchPage() {
   const [concurrency, setConcurrency] = useState(1);
   const [raceAgents, setRaceAgents] = useState(1);
   const [writeup, setWriteup] = useState(true);
+  const [strictSubmission, setStrictSubmission] = useState(true);
   const [formError, setFormError] = useState("");
   const [dragActive, setDragActive] = useState(false);
 
@@ -113,7 +114,7 @@ export function WorkbenchPage() {
       if (files.some((file) => file.size > 100 * 1024 * 1024)) throw new Error("单个附件不能超过 100 MiB");
       if (files.reduce((sum, file) => sum + file.size, 0) > 200 * 1024 * 1024) throw new Error("附件总量不能超过 200 MiB");
       const upload = files.length ? await uploadManualFiles(files, controller.signal) : undefined;
-      return await startManualJob({ tasks, concurrency, raceAgents, writeup, ...(upload ? { uploadId: upload.id } : {}) }, controller.signal);
+      return await startManualJob({ tasks, concurrency, raceAgents, writeup, strictSubmission, ...(upload ? { uploadId: upload.id } : {}) }, controller.signal);
     },
     onSuccess: () => { setTaskText(""); setFiles([]); if (fileInput.current) fileInput.current.value = ""; setFormError(""); void queryClient.invalidateQueries({ queryKey: ["manual-jobs"] }); },
     onError: (error) => setFormError(error.message),
@@ -159,6 +160,7 @@ export function WorkbenchPage() {
             <label><span className="field-label">批次并发</span><input type="number" min={1} max={8} value={concurrency} onChange={(event) => setConcurrency(boundedInteger(event.target.value, concurrency, 1, 8))} /></label>
             <label><span className="field-label">每项 Agent</span><input type="number" min={1} max={8} value={raceAgents} onChange={(event) => setRaceAgents(boundedInteger(event.target.value, raceAgents, 1, 8))} /></label>
             <label className="toggle-control"><span><strong>生成报告</strong><small>输出可复核结论</small></span><input type="checkbox" checked={writeup} onChange={(event) => setWriteup(event.target.checked)} /></label>
+            <label className="toggle-control"><span><strong>严格验证答案</strong><small>仅接受工具证据中的最终结果</small></span><input type="checkbox" checked={strictSubmission} onChange={(event) => setStrictSubmission(event.target.checked)} /></label>
             <div className="submit-control">{submitJob.isPending ? <Button className="button danger-button" type="button" onClick={() => submissionController.current?.abort()}><CircleStop size={15} aria-hidden="true" />取消提交</Button> : <Button className="button submit-task-button" type="submit" disabled={Boolean(submissionIssue)} disabledReason={submissionIssue}><Send size={16} aria-hidden="true" />提交任务</Button>}</div>
           </div>
           <div className={`composer-validation ${submissionIssue && taskText.trim() ? "invalid" : ""}`}>{submissionIssue && taskText.trim() ? submissionIssue : `${parsedTasks.length || 0} 项任务 · ${files.length} 个附件 · 最大 8 并发`}</div>
