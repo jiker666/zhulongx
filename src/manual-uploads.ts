@@ -69,7 +69,11 @@ function storedFileName(name: string, index: number): string {
     .replace(/[^A-Za-z0-9._-]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 160);
-  return `${String(index + 1).padStart(2, "0")}-${randomUUID()}-${safe || "attachment.bin"}`;
+  // No embedded random token: staged filenames are agent-visible evidence, and
+  // a per-upload UUID reads exactly like flag{uuid} material, which has baited
+  // agents into submitting upload metadata as answers. The per-batch index
+  // already keeps names unique.
+  return `${String(index + 1).padStart(2, "0")}-${safe || "attachment.bin"}`;
 }
 
 export class ManualUploadStore {
