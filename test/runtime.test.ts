@@ -743,4 +743,78 @@ describe("XuanShuRuntime", () => {
       await faux.cleanup();
     }
   });
+
+  it("inherits a bounded copy of the parent scratch namespace on continuation", { timeout: 30_000 }, async () => {
+    const { config } = await runtimeFixture("xuan-runtime-inherit-");
+    const parentRunId = "11111111-2222-4333-8444-555555555555";
+    const parentScratch = join(config.runtime.scratchRoot, "runs", parentRunId);
+    await mkdir(join(parentScratch, "work"), { recursive: true });
+    await mkdir(join(parentScratch, "inputs"), { recursive: true });
+    await writeFile(join(parentScratch, "solver.py"), "print('parent solver')\n");
+    await writeFile(join(parentScratch, "work", "out.bin"), Buffer.from([1, 2, 3]));
+    await writeFile(join(parentScratch, "inputs", "01-challenge.zip"), "re-staged-by-child");
+
+    const faux = await registerFauxCli([
+      assistantStep([textBlock("Reusing inherited parent work.")]),
+      successResult("done"),
+    ]);
+    try {
+      const runtime = new XuanShuRuntime(config, sdkOverrides(faux));
+      const state = await runtime.run(
+        { task: "Continue the parent analysis" },
+        {
+          lineage: {
+            parentRunId,
+            boundarySequence: 1,
+            mode: "resume",
+            inheritedEventCount: 1,
+            context: "Parent run trajectory reference",
+          },
+        },
+      );
+      const childScratch = join(config.runtime.scratchRoot, "runs", state.id);
+      await expect(readFile(join(childScratch, "solver.py"), "utf8")).resolves.toBe("print('parent solver')\n");
+      await expect(readFile(join(childScratch, "work", "out.bin"))).resolves.toEqual(Buffer.from([1, 2, 3]));
+      await expect(readFile(join(childScratch, "inputs", "01-challenge.zip"), "utf8")).rejects.toThrow();
+      const records = await readAuditRecords(join(config.runtime.artifactRoot, state.id, "audit.jsonl"));
+      const inherited = records.find((record) => record.type === "scratch.inherited");
+      expect(inherited).toMatchObject({
+        source: "orchestrator",
+        actor: "run-manager",
+        data: { parentRunId, files: 2 },
+      });
+      const context = records.find((record) => record.type === "context.injected");
+      expect(JSON.stringify(context)).toContain("inherited-scratch");
+    } finally {
+      await faux.cleanup();
+    }
+  });
+
+  it("runs normally when a continuation parent has no scratch directory", { timeout: 30_000 }, async () => {
+    const { config } = await runtimeFixture("xuan-runtime-inherit-missing-");
+    const faux = await registerFauxCli([
+      assistantStep([textBlock("No parent scratch to reuse.")]),
+      successResult("done"),
+    ]);
+    try {
+      const runtime = new XuanShuRuntime(config, sdkOverrides(faux));
+      const state = await runtime.run(
+        { task: "Continue an old run" },
+        {
+          lineage: {
+            parentRunId: "99999999-8888-4777-8666-555555555555",
+            boundarySequence: 1,
+            mode: "resume",
+            inheritedEventCount: 1,
+            context: "Parent run trajectory reference",
+          },
+        },
+      );
+      const records = await readAuditRecords(join(config.runtime.artifactRoot, state.id, "audit.jsonl"));
+      expect(records.find((record) => record.type === "scratch.inherited")).toBeUndefined();
+      expect(JSON.stringify(records.find((record) => record.type === "context.injected"))).not.toContain("inherited-scratch");
+    } finally {
+      await faux.cleanup();
+    }
+  });
 });

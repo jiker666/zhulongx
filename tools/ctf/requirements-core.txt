@@ -30,3 +30,4 @@ sqlmap==1.9.10
 volatility3==2.26.2
 safetensors==0.6.2
 scikit-learn==1.7.2
+angr==9.2.185

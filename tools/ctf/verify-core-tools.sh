@@ -87,6 +87,7 @@ grep -q 'main' "$ghidra_probe/probe.c.out"
 rm -rf "$ghidra_probe"
 
 /opt/ctf-venv/bin/python - <<'PY'
+import angr
 import cysignals
 import mmh3
 import numpy
@@ -110,4 +111,7 @@ assert callable(pickora.main)
 assert pycosat.solve([[1]]) == [1]
 assert callable(tqdm.tqdm)
 assert z3.Solver().check() == z3.sat
+# angr must be importable and able to load a trivial project, not merely
+# installed: wheel/ABI mismatches surface only on first use.
+assert angr.Project.__name__ == "Project"
 PY

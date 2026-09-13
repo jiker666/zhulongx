@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { chmod, copyFile, lstat, mkdir, writeFile } from "node:fs/promises";
+import { chmod, copyFile, lstat, mkdir, readdir, writeFile } from "node:fs/promises";
 import { basename, join, relative, resolve } from "node:path";
 import { AuditChain } from "./audit.js";
 import { createAgentSession, type AgentDriverEventType, type AgentSession } from "./agent-driver.js";
@@ -124,6 +124,68 @@ class SdkSessionLimiter {
 function stagedAttachmentName(source: string, index: number): string {
   const leaf = basename(source).replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 180);
   return `${String(index + 1).padStart(2, "0")}-${leaf || "attachment.bin"}`;
+}
+
+const INHERITED_SCRATCH_MAX_FILES = 512;
+const INHERITED_SCRATCH_MAX_BYTES = 128 * 1024 * 1024;
+
+interface InheritedScratchSummary {
+  files: number;
+  bytes: number;
+  skipped: string[];
+}
+
+/**
+ * Continuations inherit a bounded copy of the parent run's scratch namespace.
+ * Without it, every resume re-extracts artifacts and re-derives results that
+ * already exist as parent files — observed to cost ~100 turns per hop. The
+ * per-run inputs/ staging directory is skipped: attachments are re-staged
+ * fresh, and duplicated attachment bytes would double the inheritance budget.
+ */
+async function inheritParentScratch(
+  parentScratch: string,
+  childScratch: string,
+  signal?: AbortSignal,
+): Promise<InheritedScratchSummary | undefined> {
+  const summary: InheritedScratchSummary = { files: 0, bytes: 0, skipped: [] };
+  let topLevel;
+  try {
+    topLevel = await readdir(parentScratch, { withFileTypes: true });
+  } catch {
+    return undefined;
+  }
+  const queue = topLevel
+    .filter((entry) => entry.name !== "inputs")
+    .map((entry) => ({ from: join(parentScratch, entry.name), to: join(childScratch, entry.name) }));
+  while (queue.length > 0) {
+    signal?.throwIfAborted();
+    const { from, to } = queue.shift() as { from: string; to: string };
+    let stats;
+    try {
+      stats = await lstat(from);
+    } catch {
+      summary.skipped.push(basename(from));
+      continue;
+    }
+    if (stats.isDirectory()) {
+      await mkdir(to, { recursive: true });
+      const entries = await readdir(from, { withFileTypes: true });
+      queue.push(...entries.map((entry) => ({ from: join(from, entry.name), to: join(to, entry.name) })));
+      continue;
+    }
+    if (!stats.isFile() || stats.isSymbolicLink()) {
+      summary.skipped.push(basename(from));
+      continue;
+    }
+    if (summary.files >= INHERITED_SCRATCH_MAX_FILES || summary.bytes + stats.size > INHERITED_SCRATCH_MAX_BYTES) {
+      summary.skipped.push(basename(from));
+      continue;
+    }
+    await copyFile(from, to);
+    summary.files += 1;
+    summary.bytes += stats.size;
+  }
+  return summary;
 }
 
 async function stageAttachmentsOnly(
@@ -289,6 +351,11 @@ export class XuanShuRuntime {
     if (workspaceMode === "attachments-only") {
       await stageAttachmentsOnly(task, isolatedInputRoot, options.signal);
     }
+    let inheritedScratch: InheritedScratchSummary | undefined;
+    if (options.lineage) {
+      const parentScratch = join(this.config.runtime.scratchRoot, "runs", options.lineage.parentRunId);
+      inheritedScratch = await inheritParentScratch(parentScratch, runScratchRoot, options.signal).catch(() => undefined);
+    }
     const executor = this.overrides.executorFactory
       ? await this.overrides.executorFactory({
           runId: id,
@@ -405,6 +472,14 @@ export class XuanShuRuntime {
         actor: "run-manager",
         correlationId: state.lineage.parentRunId,
       });
+    }
+    if (inheritedScratch) {
+      await audit.append("scratch.inherited", {
+        parentRunId: options.lineage?.parentRunId,
+        files: inheritedScratch.files,
+        bytes: inheritedScratch.bytes,
+        skipped: inheritedScratch.skipped.slice(0, 20),
+      }, { source: "orchestrator", actor: "run-manager" });
     }
     await writeRunState(runDirectory, state);
     await emit("run.started", { status: state.status, phase: state.phase });
@@ -586,6 +661,15 @@ export class XuanShuRuntime {
           content: String(section.content).slice(0, 12_000),
         })),
         ...(options.lineage?.context ? [{ name: "inherited-trajectory", content: options.lineage.context }] : []),
+        ...(inheritedScratch && inheritedScratch.files > 0
+          ? [{
+              name: "inherited-scratch",
+              content: [
+                `The parent run's scratch namespace was copied into this run's scratch root (${inheritedScratch.files} files, ${inheritedScratch.bytes} bytes).`,
+                "Solver scripts, extracted artifacts, and intermediate work products from the parent are directly reusable. List the scratch root before re-deriving anything, and re-check inherited values against current artifacts before relying on them.",
+              ].join("\n"),
+            }]
+          : []),
         { name: "task", content: renderTaskContext(task) },
       ].filter((section) => Boolean(section.content));
       await audit.append("context.injected", {

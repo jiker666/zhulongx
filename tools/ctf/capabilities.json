@@ -75,7 +75,7 @@
         "reverse": ["addr2line", "analyzeHeadless", "apktool", "c++filt", "file", "gdb-multiarch", "ghidra-decompile", "jadx", "java", "nm", "objcopy", "objdump", "qemu-aarch64", "qemu-arm", "qemu-i386", "qemu-x86_64", "r2", "rabin2", "rafind2", "ragg2", "rax2", "readelf", "strings", "strace"],
         "web": ["curl", "flask-unsign", "jq", "python3", "sqlmap"]
       },
-      "pythonModules": ["Crypto", "cysignals", "fpylll", "gmpy2", "mmh3", "numpy", "ortools", "pickora", "pycosat", "sympy", "tqdm", "volatility3", "z3"],
+      "pythonModules": ["Crypto", "angr", "cysignals", "fpylll", "gmpy2", "mmh3", "numpy", "ortools", "pickora", "pycosat", "sympy", "tqdm", "volatility3", "z3"],
       "binutilsCommands": ["addr2line", "c++filt", "nm", "objcopy", "objdump", "readelf", "strings"],
       "bundled": {
         "radare2": {"version": "6.2.0", "programs": ["r2", "rabin2", "rafind2", "ragg2", "rax2"], "installer": "tools/ctf/install-radare2.sh"},
@@ -87,6 +87,7 @@
         "reverse": [
           "Static baseline: file, rabin2, readelf, strings, nm, objdump, checksec, inspect_artifact.",
           "Use r2/rabin2 for disassembly, cross-references, function metadata, and binary format questions; use jadx only for APK, DEX, or Java bytecode evidence; use ghidra-decompile for full-program C pseudocode when data flow matters more than individual instructions.",
+          "Use angr (Python import) for symbolic execution when concrete RE leaves reachability or data-path questions open: prove a branch is unreachable, recover constants feeding a comparison, or demonstrate coverage of all handlers. Symbolic results are hypotheses until confirmed against execution evidence.",
           "Dynamic cross-check: gdb/gdb-multiarch for state/control flow, strace for observable boundaries, qemu-user for foreign architectures."
         ],
         "pwn": [

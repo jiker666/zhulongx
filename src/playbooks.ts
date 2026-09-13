@@ -25,6 +25,7 @@ const PLAYBOOKS: Record<CtfSkillCategory, string[]> = {
     "For lattice, finite-field, CRC, or constraint work, verify the negotiated capability once, then prefer fpylll, GP, Z3, or OR-Tools over an untested handwritten solver. Keep dimensions, bounds, and coefficient ordering explicit.",
     "Build a minimal solver with assertions. Re-encrypt, re-hash, or substitute recovered values back into every original equation before accepting plaintext.",
     "Distinguish an encoded display value from the underlying secret and infer any wrapper only from direct evidence; never submit a re-encoding merely because it looks answer-like.",
+    "When an encrypted artifact's key derivation is unknown and no implementation ships with it, first enumerate the full cross-product — key-material sources × salt/nonce/info sources × derivation constructions × cipher modes and layout splits — using bytes and constants from the artifacts themselves, then sweep that space as one systematic program (parallelized across available cores, with an AEAD tag or known-plaintext check per cell). Ad-hoc piecemeal guesses revisit the same cells and cannot support an exhaustion claim.",
   ],
   reverse: [
     "Identify format, architecture, packing, imports, sections, strings, entry points, and anti-analysis signals before deep decompilation.",
