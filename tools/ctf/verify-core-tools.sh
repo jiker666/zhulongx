@@ -115,3 +115,7 @@ assert z3.Solver().check() == z3.sat
 # installed: wheel/ABI mismatches surface only on first use.
 assert angr.Project.__name__ == "Project"
 PY
+
+# pyvex caches a root-owned ffi parser blob in /tmp at build time; baked
+# into the image, it is unreadable for the runtime sandbox user (uid 10001).
+rm -f /tmp/pyvex_ffi_parser_cache.*

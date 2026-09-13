@@ -1,6 +1,6 @@
 requests==2.32.5
 pycryptodome==3.23.0
-z3-solver==4.15.4.0
+z3-solver==4.13.0.0
 sympy==1.14.0
 gmpy2==2.2.1
 cysignals==1.12.5
@@ -14,7 +14,7 @@ tqdm==4.70.0
 pwntools==4.15.0
 ROPGadget==7.7
 ropper==1.13.13
-capstone==5.0.6
+capstone==5.0.3
 unicorn==2.1.2
 lief==0.17.0
 pefile==2024.8.26
@@ -31,3 +31,4 @@ volatility3==2.26.2
 safetensors==0.6.2
 scikit-learn==1.7.2
 angr==9.2.185
+pycparser==2.22
