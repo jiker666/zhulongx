@@ -20,3 +20,7 @@ datasets/
 pnpm-lock.yaml
 pnpm-workspace.yaml
 .spike/
+
+# Pre-fetched sandbox toolchain artifacts (see tools/ctf/install-ghidra.sh).
+tools/ctf/deps/*
+!tools/ctf/deps/.gitkeep

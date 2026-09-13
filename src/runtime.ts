@@ -67,17 +67,6 @@ function renderKnowledgeQuery(task: NormalizedTask): string {
   return [task.task, task.metadata.category, attachmentSignals].filter(Boolean).join("\n").slice(0, 12_000);
 }
 
-function effectiveThinkingLevel(
-  category: ReturnType<typeof resolveCtfSkillCategory>,
-  configured: AppConfig["runtime"]["thinkingLevel"],
-): AppConfig["runtime"]["thinkingLevel"] {
-  // Offline binary work benefits more from short, complete tool arguments than
-  // from long hidden deliberation that can consume the provider output budget.
-  return category === "reverse" && configured !== "off"
-    ? "off"
-    : configured;
-}
-
 async function writeupLooksComplete(value: string | undefined): Promise<boolean> {
   const text = value?.trim() ?? "";
   return /^---\s*\n[\s\S]*?\n---\s*\n/m.test(text)
@@ -316,7 +305,7 @@ export class XuanShuRuntime {
         });
     const externalTools = this.overrides.externalTools ?? [];
     const profile = resolveAgentProfile(this.config, externalTools.map((item) => item.descriptor.name));
-    const runThinkingLevel = effectiveThinkingLevel(taskCategory, this.config.runtime.thinkingLevel);
+    const runThinkingLevel = this.config.runtime.thinkingLevel;
     let sandboxReachable = false;
     let sandboxNetwork = "unknown";
     let availablePrograms: string[] = [];

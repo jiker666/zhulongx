@@ -47,6 +47,9 @@ required_commands=(
   rafind2
   ragg2
   rax2
+  analyzeHeadless
+  ghidra-decompile
+  java
 )
 
 missing_commands=()
@@ -73,6 +76,15 @@ scalpel -V >/dev/null || test "$?" -eq 1
 gdb-multiarch --version >/dev/null
 r2 -v >/dev/null
 jadx --version >/dev/null
+# Ghidra headless must actually decompile, not merely exist: this catches
+# missing aarch64/x86 natives, JDK mismatches, and script compile errors.
+ghidra_probe=$(mktemp -d)
+printf 'int main(void){return 42;}\n' > "$ghidra_probe/probe.c"
+gcc -o "$ghidra_probe/probe" "$ghidra_probe/probe.c"
+ghidra-decompile "$ghidra_probe/probe" "$ghidra_probe/probe.c.out"
+grep -q '^// ===== ' "$ghidra_probe/probe.c.out"
+grep -q 'main' "$ghidra_probe/probe.c.out"
+rm -rf "$ghidra_probe"
 
 /opt/ctf-venv/bin/python - <<'PY'
 import cysignals

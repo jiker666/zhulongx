@@ -8,7 +8,7 @@ model:
   contextWindow: 400000
 
 runtime:
-  thinkingLevel: off
+  thinkingLevel: high
   artifactRoot: /data/runs
   scratchRoot: /workspace/work
   maxTurns: 30
