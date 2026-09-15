@@ -3,6 +3,7 @@ import { chmod, copyFile, lstat, mkdir, readdir, writeFile } from "node:fs/promi
 import { basename, join, relative, resolve } from "node:path";
 import { AuditChain } from "./audit.js";
 import { createAgentSession, type AgentDriverEventType, type AgentSession } from "./agent-driver.js";
+import { classifyChallenge, type ChallengeClassification } from "./challenge-classifier.js";
 import { mergeScope } from "./config.js";
 import { SandboxExecutor } from "./executor.js";
 import { ExperienceStore, renderExperienceContext } from "./experience.js";
@@ -39,6 +40,10 @@ const UNLIMITED_MODEL_LIMITS = {
   requestsPerMinute: Number.POSITIVE_INFINITY,
   tokensPerMinute: Number.POSITIVE_INFINITY,
 };
+
+/** Pre-flight budget for the model layer of challenge-type recognition; on expiry the
+ * deterministic signal pass decides instead. */
+const CHALLENGE_CLASSIFY_TIMEOUT_MS = 30_000;
 
 export interface RuntimeModelStatus {
   configured: boolean;
@@ -332,7 +337,6 @@ export class XuanShuRuntime {
     const id = options.id ?? randomUUID();
     const configuredScope = mergeScope(this.config.scope, request.scope);
     const task = await normalizeTask(request);
-    const taskCategory = resolveCtfSkillCategory(task.metadata.category) ?? resolveCtfSkillCategory(task.task);
     const memoryContext = this.overrides.memoryStore
       ? await this.overrides.memoryStore.context({
           ...(task.metadata.userId ? { userId: task.metadata.userId } : {}),
@@ -395,6 +399,67 @@ export class XuanShuRuntime {
     };
     const { modelConfig, apiKey, headers: sessionHeaders } = this.effectiveModel();
     const audit = new AuditChain(join(runDirectory, "audit.jsonl"), id);
+    // Challenge-type recognition runs before any category consumer (playbook, tool
+    // narrowing, experience retrieval, web gate) reads the task, so a missing or
+    // unrecognized metadata.category can no longer silently drop the playbook.
+    let classification: ChallengeClassification;
+    try {
+      if (apiKey) {
+        const classifyKey = `${id}:classify`;
+        const gateway = await this.ensureGateway();
+        gateway.setRoute(classifyKey, {
+          upstream: this.buildUpstream(modelConfig, apiKey, sessionHeaders),
+          limits: UNLIMITED_MODEL_LIMITS,
+        });
+        try {
+          classification = await classifyChallenge(task, {
+            // Direct loopback-gateway request: no agent subprocess, so a dead or
+            // unavailable upstream fails in milliseconds instead of stalling intake.
+            queryModel: async (prompt, signal) => {
+              const response = await fetch(gateway.routeUrl(classifyKey), {
+                method: "POST",
+                headers: { "content-type": "application/json", "anthropic-version": "2023-06-01" },
+                body: JSON.stringify({
+                  model: modelConfig.id,
+                  max_tokens: 300,
+                  system: "You are the challenge-type classifier for a CTF solving platform. Reply with the required output block only.",
+                  messages: [{ role: "user", content: prompt }],
+                }),
+                signal,
+              });
+              if (!response.ok) throw new Error(`classification model request failed with status ${response.status}`);
+              const payload = await response.json() as { content?: Array<{ type?: string; text?: string }> };
+              const text = (payload.content ?? [])
+                .filter((block) => block?.type === "text")
+                .map((block) => block.text ?? "")
+                .join("\n")
+                .trim();
+              if (!text) throw new Error("classification model response contained no text");
+              return text;
+            },
+            timeoutMs: CHALLENGE_CLASSIFY_TIMEOUT_MS,
+            ...(options.signal ? { signal: options.signal } : {}),
+          });
+        } finally {
+          gateway.releaseRoute(classifyKey);
+        }
+      } else {
+        classification = await classifyChallenge(task);
+      }
+    } catch (error) {
+      classification = { category: undefined, confidence: 0, source: "fallback", signals: [`classifier unavailable: ${error instanceof Error ? error.message : String(error)}`] };
+      await audit.append("task.classification_failed", { reason: classification.signals[0] }, { source: "orchestrator", actor: "challenge-classifier" });
+    }
+    if (classification.category && !resolveCtfSkillCategory(task.metadata.category)) {
+      task.metadata.category = classification.category;
+    }
+    const taskCategory = classification.category ?? resolveCtfSkillCategory(task.task);
+    await audit.append("task.classified", {
+      category: classification.category,
+      source: classification.source,
+      confidence: classification.confidence,
+      signals: classification.signals.slice(0, 12),
+    }, { source: "orchestrator", actor: "challenge-classifier" });
     const webClassification = detectWebTask(task);
     const experience = await new ExperienceStore(this.config.runtime.artifactRoot).relevant(
       task.metadata.category ?? (webClassification.isWeb ? "Web" : undefined),
@@ -483,6 +548,9 @@ export class XuanShuRuntime {
     }
     await writeRunState(runDirectory, state);
     await emit("run.started", { status: state.status, phase: state.phase });
+    if (classification.category) {
+      await emit("task.classified", { category: classification.category, source: classification.source, confidence: classification.confidence });
+    }
     const webReasoning = createWebReasoningController(state, audit, this.config.webReasoning);
     await webReasoning.initialize();
     if (webReasoning.enabled && this.config.webReasoning?.persistState !== false) await writeRunState(runDirectory, state);

@@ -71,7 +71,7 @@ cp .env.example .env
 mkdir -p workspace
 ```
 
-在 `.env` 中设置模型密钥。默认配置读取 `XUANSHU_MODEL_API_KEY`（示例端点为 `deepseek-v4-flash`），也可以复制 `config/default.yaml`，修改 `model.baseUrl`、`model.id` 和 `model.apiKeyEnv` 来使用 operator 自有网关。
+在 `.env` 中设置模型密钥。默认配置读取 `XUANSHU_MODEL_API_KEY`（示例端点为 `glm-5.3-flash`），也可以复制 `config/default.yaml`，修改 `model.baseUrl`、`model.id` 和 `model.apiKeyEnv` 来使用 operator 自有网关。
 
 前端的“模型设置”页面可以为当前 API 进程临时配置 Anthropic 协议端点（含可选 `AppKey` 网关请求头）。密钥不会写入浏览器存储、配置文件或运行产物；详细说明见 [模型设置](docs/model-settings.md)。
 

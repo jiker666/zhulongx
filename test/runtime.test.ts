@@ -93,6 +93,46 @@ describe("XuanShuRuntime", () => {
     }
   });
 
+  it("classifies an unlabelled binary task and injects the matching category playbook", { timeout: 30_000 }, async () => {
+    const { config } = await runtimeFixture("xuan-runtime-classify-");
+    const elfPath = join(config.scope.workspaceRoot, "vault.elf");
+    await writeFile(elfPath, Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01, 0x01, 0x00, ...Buffer.alloc(64, 0x11)]));
+    const faux = await registerFauxCli([
+      agentToolStep("classify-plan", "submit_plan", {
+        goal: "Recover the flag from the vault binary",
+        assumptions: [],
+        hypotheses: [],
+        steps: [{ id: "inspect", objective: "Inspect the binary artifact", successCriteria: ["Artifact is inspected"], tools: ["inspect_artifact"] }],
+      }),
+      agentToolStep("classify-finish", "finish_task", {
+        status: "completed",
+        summary: "Completed the bounded analysis of the supplied binary.",
+        evidence: ["the reverse playbook was available to the agent"],
+        remainingRisks: [],
+        nextSteps: [],
+        confidence: 0.9,
+        verification: ["category classification is recorded in the audit trail"],
+        independentlyVerified: true,
+      }),
+      successResult("done"),
+    ]);
+
+    try {
+      const runtime = new XuanShuRuntime(config, sdkOverrides(faux));
+      const state = await runtime.run({ task: "Recover the flag from the supplied vault binary artifact", attachments: [elfPath] });
+      const records = await readAuditRecords(join(config.runtime.artifactRoot, state.id, "audit.jsonl"));
+      const classified = records.find((record) => record.type === "task.classified");
+      const context = records.find((record) => record.type === "context.injected");
+
+      expect(state.status).toBe("completed");
+      expect(classified?.data).toMatchObject({ category: "reverse", source: "deterministic" });
+      expect(state.task.metadata.category).toBe("reverse");
+      expect(JSON.stringify(context)).toContain("CATEGORY PLAYBOOK (reverse)");
+    } finally {
+      await faux.cleanup();
+    }
+  });
+
   it("redacts sensitive text from every persisted run artifact", { timeout: 30_000 }, async () => {
     const { config } = await runtimeFixture("xuan-runtime-redaction-");
     const faux = await registerFauxCli([
