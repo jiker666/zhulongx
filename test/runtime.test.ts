@@ -8,7 +8,7 @@ import { startModelGateway } from "../src/model-gateway.js";
 import { XuanShuRuntime } from "../src/runtime.js";
 import { startSandboxServer } from "../src/sandbox.js";
 import { SharedEvidenceBoard } from "../src/shared-evidence.js";
-import { readAuditRecords } from "../src/trace.js";
+import { prepareRunContinuation, readAuditRecords } from "../src/trace.js";
 import { agentToolStep, assistantStep, registerFauxCli, successResult, textBlock, type FauxCliHandle } from "./faux-cli.js";
 import { testConfig } from "./helpers.js";
 import type { AppConfig } from "../src/types.js";
@@ -130,6 +130,77 @@ describe("XuanShuRuntime", () => {
       expect(JSON.stringify(context)).toContain("CATEGORY PLAYBOOK (reverse)");
     } finally {
       await faux.cleanup();
+    }
+  });
+
+  it("surfaces an inherited negative-results ledger to continuation runs", { timeout: 60_000 }, async () => {
+    const { config } = await runtimeFixture("xuan-runtime-ledger-");
+    const parentScript = [
+      agentToolStep("ledger-parent-plan", "submit_plan", {
+        goal: "Establish verified negative coverage",
+        assumptions: [],
+        hypotheses: [],
+        steps: [{ id: "sweep", objective: "Sweep and record negatives", successCriteria: ["Cells recorded"], tools: ["write_scratch_file"] }],
+      }),
+      agentToolStep("ledger-parent-finish", "finish_task", {
+        status: "completed",
+        summary: "Completed the bounded sweep.",
+        evidence: ["negative cells recorded"],
+        remainingRisks: [],
+        nextSteps: [],
+        confidence: 0.9,
+        verification: ["ledger written to scratch"],
+        independentlyVerified: true,
+      }),
+      successResult("done"),
+    ];
+    const parentFaux = await registerFauxCli(parentScript);
+    let parentId: string;
+    try {
+      const parentRuntime = new XuanShuRuntime(config, sdkOverrides(parentFaux));
+      const parentState = await parentRuntime.run({ task: "Recover the plaintext given this RSA modulus and ciphertext pair" });
+      parentId = parentState.id;
+      expect(parentState.status).toBe("completed");
+    } finally {
+      await parentFaux.cleanup();
+    }
+    // The parent's sweep hygiene artifact: one verified-negative cell per JSON line.
+    await writeFile(
+      join(config.runtime.scratchRoot, "runs", parentId, "negative-ledger.jsonl"),
+      JSON.stringify({ hypothesis: "key = HKDF(ikm, salt, info)", parameters: { ikm: "artifact[0:32]" }, verification: "AEAD tag", verdict: "negative" }) + "\n",
+      "utf8",
+    );
+
+    const prepared = await prepareRunContinuation(config.runtime.artifactRoot, parentId, "fork", undefined, "Extend the recorded coverage");
+    const childFaux = await registerFauxCli([
+      agentToolStep("ledger-child-plan", "submit_plan", {
+        goal: "Extend the inherited negative coverage",
+        assumptions: [],
+        hypotheses: [],
+        steps: [{ id: "extend", objective: "Sweep the remaining structural axes", successCriteria: ["New cells recorded"], tools: ["write_scratch_file"] }],
+      }),
+      agentToolStep("ledger-child-finish", "finish_task", {
+        status: "completed",
+        summary: "Extended the ledger.",
+        evidence: ["ledger appended"],
+        remainingRisks: [],
+        nextSteps: [],
+        confidence: 0.9,
+        verification: ["no recorded cell repeated"],
+        independentlyVerified: true,
+      }),
+      successResult("done"),
+    ]);
+    try {
+      const childRuntime = new XuanShuRuntime(config, sdkOverrides(childFaux));
+      const childState = await childRuntime.run(prepared.request, { workspaceMode: prepared.workspaceMode, lineage: prepared.lineage });
+      expect(childState.status).toBe("completed");
+      const records = await readAuditRecords(join(config.runtime.artifactRoot, childState.id, "audit.jsonl"));
+      const context = records.find((record) => record.type === "context.injected");
+      expect(JSON.stringify(context)).toContain("negative-ledger.jsonl was inherited");
+      expect(JSON.stringify(context)).toContain("must not be repeated or re-derived");
+    } finally {
+      await childFaux.cleanup();
     }
   });
 

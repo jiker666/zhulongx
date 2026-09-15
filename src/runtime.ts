@@ -138,7 +138,11 @@ interface InheritedScratchSummary {
   files: number;
   bytes: number;
   skipped: string[];
+  /** Basename of an inherited negative-results ledger (playbook sweep-hygiene convention). */
+  ledgerFile?: string;
 }
+
+const NEGATIVE_LEDGER_FILE = /^negative-ledger\.(jsonl|json|csv|txt)$/i;
 
 /**
  * Continuations inherit a bounded copy of the parent run's scratch namespace.
@@ -189,6 +193,7 @@ async function inheritParentScratch(
     await copyFile(from, to);
     summary.files += 1;
     summary.bytes += stats.size;
+    if (NEGATIVE_LEDGER_FILE.test(basename(from))) summary.ledgerFile = basename(from);
   }
   return summary;
 }
@@ -735,6 +740,9 @@ export class XuanShuRuntime {
               content: [
                 `The parent run's scratch namespace was copied into this run's scratch root (${inheritedScratch.files} files, ${inheritedScratch.bytes} bytes).`,
                 "Solver scripts, extracted artifacts, and intermediate work products from the parent are directly reusable. List the scratch root before re-deriving anything, and re-check inherited values against current artifacts before relying on them.",
+                ...(inheritedScratch.ledgerFile
+                  ? [`${inheritedScratch.ledgerFile} was inherited: the negative-results ledger. Read it first — recorded cells and absence claims are already verified and must not be repeated or re-derived; extend recorded coverage instead.`]
+                  : []),
               ].join("\n"),
             }]
           : []),

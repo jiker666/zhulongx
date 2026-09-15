@@ -18,6 +18,8 @@ describe("category capability playbooks", () => {
     expect(renderCapabilityPlaybook("Reverse")).toContain("preserve every xor/add/sub/rotate");
     expect(renderCapabilityPlaybook("Reverse")).toContain("image-base + RVA");
     expect(renderCapabilityPlaybook("Reverse")).toContain("full check independently");
+    expect(crypto).toContain("negative-ledger.jsonl");
+    expect(renderCapabilityPlaybook("Reverse")).toContain("negative-ledger.jsonl");
     expect(renderCapabilityPlaybook("Misc")).toContain("pickora");
     expect(renderCapabilityPlaybook("Misc")).toContain("bounded derivative in scratch");
     expect(renderCapabilityPlaybook("unknown")).toBe("");
