@@ -24,6 +24,7 @@ import { createToolCallPipeline, createXuanShuMcpServer } from "./tool-adapter.j
 import { toolDescriptorMap, type ToolEffect } from "./tool-catalog.js";
 import type { AppConfig, ModelConfig, NormalizedTask, RunEvent, RunLineage, RunState, RuntimeModelSessionConfig, RuntimeOverrides, TaskRequest } from "./types.js";
 import { submissionPolicyFor } from "./submission-policy.js";
+import { replayVerifySubmission, replayVerdictEligible } from "./verifier.js";
 import { createWebReasoningController } from "./web-reasoning/controller.js";
 import { detectWebTask } from "./web-reasoning/task-detector.js";
 import { generateWriteup as generateWriteupDocument } from "./writeup-generator.js";
@@ -841,6 +842,28 @@ export class XuanShuRuntime {
       }
       gateway.releaseRoute(runKey);
       this.overrides.permissionGate?.cancelSession?.(id);
+      // Replay verifier (ARTEX retester): before the completion claim is
+      // trusted, re-execute the solver's own verification commands in a fresh
+      // process. Runs while the executor is still alive (cleanup disposes it).
+      if (state.status === "completed" && state.submission && replayVerdictEligible(task)) {
+        try {
+          const verdict = await replayVerifySubmission({
+            auditPath: join(runDirectory, "audit.jsonl"),
+            candidate: state.submission,
+            exec: (request, signal) => executor.exec(request, signal ?? options.signal),
+            namespace: id,
+            commandTimeoutMs: runtimeConfig.commandTimeoutMs,
+            maxOutputBytes: runtimeConfig.maxOutputBytes,
+            ...(options.signal ? { signal: options.signal } : {}),
+          });
+          state.verificationVerdict = verdict;
+          await audit.append("verifier.replay", verdict, { source: "orchestrator", actor: "replay-verifier" });
+          await emit("verifier.replay", { verdict: verdict.verdict, replayed: verdict.replayed });
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          await audit.append("verifier.failed", { reason: reason.slice(0, 300) }, { source: "orchestrator", actor: "replay-verifier" });
+        }
+      }
       await toolSet.cleanup();
       state.phase = "done";
       if (webReasoning.enabled && state.status !== "completed") {

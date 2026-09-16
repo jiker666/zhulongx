@@ -200,7 +200,10 @@ function normalizeTiers(input: CampaignTierPolicy[] | undefined): CampaignTierPo
 }
 
 function safeStatus(value: RunState): CampaignWorkStatus {
-  if (value.status === "completed") return "succeeded";
+  // A contradicted replay verdict demotes a completion claim: the solver's own
+  // verification commands no longer reproduce the candidate, so the item goes
+  // back to the retry path with the contradiction published as feedback.
+  if (value.status === "completed") return value.verificationVerdict?.verdict === "contradicted" ? "failed" : "succeeded";
   if (value.status === "blocked") return "blocked";
   if (value.status === "aborted") return "cancelled";
   return "failed";
@@ -237,6 +240,14 @@ function curationFromState(item: CampaignWorkItem, state: RunState, maxTextChars
       claim: `Current approach stopped: ${state.stopReason}${state.terminalReason ? ` (terminal: ${state.terminalReason})` : ""}`,
       evidence: [`run:${state.id}`],
       confidence: state.terminalReason === "operator_abort" ? 0.5 : 0.8,
+    });
+  }
+  if (state.verificationVerdict?.verdict === "contradicted") {
+    entries.push({
+      kind: "dead-end",
+      claim: `Completion claim contradicted by replay: the run's own verification commands no longer reproduce the candidate. Re-derive from first principles instead of reusing that claim.`,
+      evidence: (state.verificationVerdict.evidence.length > 0 ? state.verificationVerdict.evidence : [`run:${state.id}`]).slice(0, 4),
+      confidence: 0.9,
     });
   }
   const summaryParts = [
@@ -709,7 +720,10 @@ export class AdaptiveCampaignManager {
       const tierPolicy = campaign.tiers[item.tier];
       const retry = status !== "succeeded" && Boolean(tierPolicy && item.attempts < tierPolicy.maxAttempts);
       await this.options.store.settle({ campaignId, itemId: item.id, workerId, generation: item.leaseGeneration, status: retry ? "queued" : status, summary: state.summary ?? state.stopReason ?? state.status, ...(state.stopReason ? { error: state.stopReason } : {}) });
-      if (state.independentlyVerified === true || (state.status === "completed" && (state.verification?.length ?? 0) > 0)) await this.options.store.markVerified(campaignId, item.id, runId);
+      if (state.verificationVerdict?.verdict !== "contradicted"
+        && (state.independentlyVerified === true || (state.status === "completed" && (state.verification?.length ?? 0) > 0))) {
+        await this.options.store.markVerified(campaignId, item.id, runId);
+      }
       if (status !== "succeeded" && !retry) await this.escalate(campaignId, item, curation.proposedTasks, hints);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

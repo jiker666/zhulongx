@@ -3,6 +3,12 @@ import type { RunLineage, RunState, RunStatus, TerminalReason } from "./types.js
 
 export const RUN_SUMMARY_FILE = "summary.json";
 
+export interface PersistedVerificationVerdict {
+  verdict: "reproduced" | "contradicted" | "unverifiable";
+  replayed: number;
+  checkedAt: string;
+}
+
 export interface PersistedRunSummary {
   id: string;
   status: RunStatus;
@@ -15,6 +21,7 @@ export interface PersistedRunSummary {
   toolCalls: number;
   lessons: number;
   terminalReason?: TerminalReason;
+  verificationVerdict?: PersistedVerificationVerdict;
   model?: { provider: string; id: string; baseUrl: string };
   tokenUsage?: RunState["tokenUsage"];
   lineage?: RunLineage;
@@ -33,6 +40,15 @@ export function projectRunSummary(state: RunState): PersistedRunSummary {
     toolCalls: state.toolCalls,
     lessons: state.lessons?.length ?? 0,
     ...(state.terminalReason ? { terminalReason: state.terminalReason } : {}),
+    ...(state.verificationVerdict
+      ? {
+          verificationVerdict: {
+            verdict: state.verificationVerdict.verdict,
+            replayed: state.verificationVerdict.replayed,
+            checkedAt: state.verificationVerdict.checkedAt,
+          },
+        }
+      : {}),
     ...(state.model ? { model: state.model } : {}),
     ...(state.tokenUsage ? { tokenUsage: state.tokenUsage } : {}),
     ...(state.lineage ? { lineage: state.lineage } : {}),
@@ -66,6 +82,9 @@ export function isPersistedRunSummary(value: unknown): value is PersistedRunSumm
     && (summary.category === undefined || typeof summary.category === "string")
     && (summary.finishedAt === undefined || typeof summary.finishedAt === "string")
     && (summary.terminalReason === undefined || isTerminalReason(summary.terminalReason))
+    && (summary.verificationVerdict === undefined || (typeof summary.verificationVerdict === "object"
+      && ["reproduced", "contradicted", "unverifiable"].includes((summary.verificationVerdict as { verdict?: unknown }).verdict as string)
+      && Number.isSafeInteger((summary.verificationVerdict as { replayed?: unknown }).replayed)))
     && (summary.model === undefined || (typeof summary.model === "object"
       && typeof (summary.model as { id?: unknown }).id === "string"
       && typeof (summary.model as { baseUrl?: unknown }).baseUrl === "string"))

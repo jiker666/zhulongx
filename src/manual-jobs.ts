@@ -219,6 +219,9 @@ function extractSubmission(state: RunState): string | undefined {
 function raceWinnerState(state: RunState): boolean {
   if (state.status !== "completed") return false;
   if (state.submissionValidation && state.submissionValidation.status !== "accepted") return false;
+  // A contradicted replay verdict means the verification commands no longer
+  // reproduce the candidate: the completion claim is not trusted.
+  if (state.verificationVerdict?.verdict === "contradicted") return false;
   const submission = extractSubmission(state);
   if (!submission || state.independentlyVerified !== true) return false;
   return (state.verification ?? []).some((record) => record.includes(submission));

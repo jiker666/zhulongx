@@ -268,6 +268,16 @@ export interface RunReview {
 
 export type SubmissionValidationStatus = "accepted" | "pending" | "rejected";
 
+/** Post-settlement replay verdict (ARTEX retester discipline): the solver's
+ * own verification commands are re-executed in a fresh process before the
+ * completion claim is trusted. */
+export interface VerificationVerdict {
+  verdict: "reproduced" | "contradicted" | "unverifiable";
+  evidence: string[];
+  replayed: number;
+  checkedAt: string;
+}
+
 export interface SubmissionValidation {
   policy: "strict" | "advisory";
   status: SubmissionValidationStatus;
@@ -325,6 +335,7 @@ export interface RunState {
   appliedExperienceIds: string[];
   submission?: string;
   submissionValidation?: SubmissionValidation;
+  verificationVerdict?: VerificationVerdict;
   verification?: string[];
   independentlyVerified?: boolean;
   summary?: string;

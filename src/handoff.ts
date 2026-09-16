@@ -28,6 +28,7 @@ export function renderRunHandoff(state: RunState): string {
     `Task: ${clean(state.task.task, 2_000)}`,
     `Submission present: ${state.submission ? "yes (value omitted)" : "no"}`,
     `Submission validation: ${state.submissionValidation?.status ?? "not checked"}`,
+    `Replay verifier: ${state.verificationVerdict ? `${state.verificationVerdict.verdict} (${state.verificationVerdict.replayed} replayed)` : "not run"}`,
     "",
     "## Planned work",
     steps,
