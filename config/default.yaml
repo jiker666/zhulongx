@@ -156,6 +156,7 @@ profile:
     - abort
   toolAllowlist:
     - submit_plan
+    - update_plan_steps
     - checkpoint
     - record_finding
     - record_lesson

@@ -48,6 +48,7 @@ function descriptor(
 
 const BUILTIN_DESCRIPTORS = [
   descriptor("submit_plan", "control", "pure_readonly", "serial", { sideEffects: ["Updates the run plan and hypothesis ledger"] }),
+  descriptor("update_plan_steps", "control", "pure_readonly", "serial", { sideEffects: ["Updates plan step statuses and notes in run state"] }),
   descriptor("checkpoint", "control", "pure_readonly", "serial", { sideEffects: ["Updates run strategy and hypothesis state"] }),
   descriptor("record_finding", "control", "pure_readonly", "serial", { sideEffects: ["Persists a structured finding"] }),
   descriptor("record_lesson", "control", "pure_readonly", "serial", { sideEffects: ["Persists a bounded experience candidate"] }),

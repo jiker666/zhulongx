@@ -177,6 +177,11 @@ export interface PlanStep {
   objective: string;
   successCriteria: string[];
   tools: string[];
+  /** Optional todolist semantics (ARTEX-style): serial chains recorded once,
+   * dispatched stepwise as dependencies complete. */
+  status?: "pending" | "in_progress" | "completed" | "blocked";
+  dependsOn?: string[];
+  note?: string;
 }
 
 export interface RunPlan {

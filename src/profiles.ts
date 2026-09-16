@@ -14,7 +14,7 @@ export function defaultAgentProfile(config: AppConfig): ResolvedAgentProfile {
     preferredExecutor: "sandbox",
     requiredCapabilities: ["workspace-read"],
     toolAllowlist: [...new Set([
-      "submit_plan", "checkpoint", "record_finding", "record_lesson", "finish_task",
+      "submit_plan", "update_plan_steps", "checkpoint", "record_finding", "record_lesson", "finish_task",
       "list_files", "read_file", "inspect_artifact", "extract_archive", "search_artifact", "observe_image",
       "list_scratch_files", "read_scratch_file", "write_scratch_file", "run_command",
       "web_collect_baseline", "web_knowledge_lookup", "web_compare_responses", "web_timing_stats",
@@ -56,7 +56,7 @@ export function filterProfileTools<T extends { name: string }>(profile: Resolved
 export function narrowToolsForCategory<T extends { name: string }>(category: CtfSkillCategory | undefined, tools: T[]): T[] {
   if (!category || category === "web" || category === "osint" || category === "ai/ml") return tools;
   const common = new Set([
-    "submit_plan", "checkpoint", "record_finding", "record_lesson", "finish_task",
+    "submit_plan", "update_plan_steps", "checkpoint", "record_finding", "record_lesson", "finish_task",
     "list_files", "read_file", "inspect_artifact", "extract_archive", "search_artifact",
     "list_scratch_files", "read_scratch_file", "write_scratch_file", "run_command",
     "read_shared_evidence", "publish_shared_evidence",

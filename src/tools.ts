@@ -8,6 +8,7 @@ import { extractZipArchive, searchArtifact } from "./artifact-tools.js";
 import { SandboxExecutor, type Executor } from "./executor.js";
 import { adaptExternalTool, type ExternalToolRegistration } from "./external-tools.js";
 import { isPathInside, resolveWorkspacePath } from "./policy.js";
+import { planHasStepActivity, planUnmetDependencies, renderPlanStatus } from "./plan-status.js";
 import type { PublishSharedEvidenceInput, SharedEvidenceBoard, SharedEvidenceKind } from "./shared-evidence.js";
 import { searchWebKnowledge } from "./agents/web/web-knowledge.js";
 import { ControlledBrowserRuntime } from "./web-reasoning/browser/runtime.js";
@@ -17,6 +18,7 @@ import type {
   FailureClassification,
   Finding,
   HypothesisRecord,
+  PlanStep,
   RunPlan,
   RunState,
   RuntimeConfig,
@@ -823,6 +825,10 @@ export function createToolSet(context: ToolContext): ToolSet {
             objective: Type.String({ minLength: 1 }),
             successCriteria: Type.Array(Type.String()),
             tools: Type.Array(Type.String()),
+            status: Type.Optional(Type.Union([
+              Type.Literal("pending"), Type.Literal("in_progress"), Type.Literal("completed"), Type.Literal("blocked"),
+            ])),
+            dependsOn: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
           }),
           { minItems: 1 },
         ),
@@ -844,6 +850,34 @@ export function createToolSet(context: ToolContext): ToolSet {
           ...input,
           hypothesisLedger: state.hypotheses,
         });
+      },
+    },
+    {
+      name: "update_plan_steps",
+      label: "Update plan steps",
+      description: "Update step statuses of the submitted plan (todolist semantics). Record a serial dependency chain once via dependsOn, then dispatch it stepwise: only mark a step in_progress when every step it dependsOn is completed. Works across compaction and resumes because the plan lives in run state, not the conversation.",
+      parameters: Type.Object({
+        updates: Type.Array(Type.Object({
+          id: Type.String({ minLength: 1 }),
+          status: Type.Optional(Type.Union([
+            Type.Literal("pending"), Type.Literal("in_progress"), Type.Literal("completed"), Type.Literal("blocked"),
+          ])),
+          note: Type.Optional(Type.String({ maxLength: 300 })),
+        }), { minItems: 1, maxItems: 24 }),
+      }),
+      executionMode: "sequential",
+      async execute(_id, params) {
+        const input = params as { updates: Array<{ id: string; status?: PlanStep["status"]; note?: string }> };
+        if (!state.plan) throw new Error("Submit a plan with submit_plan before updating steps");
+        for (const update of input.updates) {
+          const step = state.plan.steps.find((item) => item.id === update.id);
+          if (!step) throw new Error(`Unknown plan step id: ${update.id}`);
+          if (update.status) step.status = update.status;
+          if (update.note) step.note = update.note.slice(0, 300);
+        }
+        const unmet = planUnmetDependencies(state.plan);
+        await audit.append("plan.steps_updated", { updates: input.updates, unmetDependencies: unmet });
+        return textResult(renderPlanStatus(state.plan), { unmetDependencies: unmet });
       },
     },
     {
@@ -961,7 +995,20 @@ export function createToolSet(context: ToolContext): ToolSet {
             ...(resolvedFailure ? { resolvedFailure } : {}),
           });
         }
-        return textResult("Checkpoint recorded; action counter reset and the hypothesis ledger was updated.", checkpoint);
+        // Wake-up re-injection (ARTEX-style): the plan and its step statuses
+        // live in run state, so each checkpoint re-renders the gated chain and
+        // the model re-sees it even after context compaction.
+        const planEcho = planHasStepActivity(state.plan) && state.plan
+          ? [`\n${renderPlanStatus(state.plan)}`]
+          : [];
+        const checkpointUnmet = state.plan ? planUnmetDependencies(state.plan) : [];
+        return textResult(
+          [
+            "Checkpoint recorded; action counter reset and the hypothesis ledger was updated.",
+            ...planEcho,
+          ].join("\n"),
+          { ...checkpoint, ...(checkpointUnmet.length > 0 ? { unmetDependencies: checkpointUnmet } : {}) },
+        );
       },
     },
     ...(sharedEvidence ? [
