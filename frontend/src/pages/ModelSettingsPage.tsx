@@ -39,7 +39,7 @@ export function ModelSettingsPage() {
   return (
     <div className="page model-settings-page">
       <div className="page-heading">
-        <div><div className="eyebrow">MODEL / OPERATOR CONFIGURATION</div><h1>模型设置</h1><p>配置 Anthropic 协议模型端点。密钥只在当前 API 进程内存中使用，不写入仓库、浏览器存储或运行材料。</p></div>
+        <div><div className="eyebrow">配置</div><h1>模型设置</h1><p>配置 Anthropic 协议模型端点。密钥只在当前 API 进程内存中使用，不写入仓库、浏览器存储或运行材料。</p></div>
         <div className="model-settings-status"><Badge tone={current?.configured ? "success" : "danger"}>{current?.configured ? "已连接" : "未配置"}</Badge><span>{current ? sourceLabels[current.source] : "—"}</span></div>
       </div>
 

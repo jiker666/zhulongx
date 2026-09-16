@@ -135,7 +135,7 @@ export function WorkbenchPage() {
   return (
     <div className="page workbench-page">
       <div className="page-heading">
-        <div><div className="eyebrow">HUMAN + AGENT</div><h1>任务工作台</h1><p>组织安全任务、附件、并发批次与 operator 配置的本地任务集。</p></div>
+        <div><div className="eyebrow">工作台</div><h1>任务工作台</h1><p>组织安全任务、附件、并发批次与 operator 配置的本地任务集。</p></div>
         <div className="heading-actions"><span className={`active-job-count ${activeJobs.length ? "active" : ""}`}><Users size={15} aria-hidden="true" />{activeJobs.length ? `${activeJobs.length} 个活动批次` : "当前无活动批次"}</span></div>
       </div>
 

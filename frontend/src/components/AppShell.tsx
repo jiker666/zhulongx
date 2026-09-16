@@ -1,20 +1,33 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { BarChart3, BookOpenCheck, Bot, FlaskConical, GitBranch, Gauge, History, KeyRound, Library, Settings2, ShieldCheck, X } from "lucide-react";
+import { BarChart3, BookOpenCheck, GitBranch, Gauge, History, KeyRound, Library, ListTodo, Settings2, ShieldCheck, X } from "lucide-react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { getServerToken, setServerToken } from "../api/client";
 import { IconButton } from "./ui";
 
-const navigation = [
-  { to: "/overview", label: "系统总览", detail: "就绪与进度", icon: Gauge },
-  { to: "/workbench", label: "任务工作台", detail: "批量与任务集", icon: BookOpenCheck },
-  { to: "/campaigns", label: "自主编排", detail: "任务板与升级", icon: GitBranch },
-  { to: "/runs", label: "运行审计", detail: "决策与证据", icon: History },
-  { to: "/experiences", label: "经验库", detail: "验真策略", icon: Library },
-  { to: "/capability", label: "能力与公示", detail: "维度统计与公示墙", icon: BarChart3 },
-  { to: "/evaluations", label: "评测实验室", detail: "复核指标", icon: FlaskConical },
-  { to: "/runtime", label: "运行时", detail: "Agent 与 Workflow", icon: Bot },
-  { to: "/settings/model", label: "模型设置", detail: "临时连接配置", icon: Settings2 },
+const navigationGroups: Array<{ caption: string; items: Array<{ to: string; label: string; detail: string; icon: typeof Gauge }> }> = [
+  {
+    caption: "运营",
+    items: [
+      { to: "/overview", label: "系统总览", detail: "运行与任务进度", icon: Gauge },
+      { to: "/workbench", label: "任务工作台", detail: "提交与批量执行", icon: ListTodo },
+      { to: "/campaigns", label: "自主编排", detail: "多 Agent 调查", icon: GitBranch },
+      { to: "/runs", label: "运行审计", detail: "决策、证据与结论", icon: History },
+    ],
+  },
+  {
+    caption: "治理",
+    items: [
+      { to: "/experiences", label: "经验库", detail: "已验证策略", icon: Library },
+      { to: "/capability", label: "能力与公示", detail: "维度统计与披露", icon: BarChart3 },
+    ],
+  },
+  {
+    caption: "配置",
+    items: [
+      { to: "/settings/model", label: "模型设置", detail: "端点与密钥", icon: Settings2 },
+    ],
+  },
 ];
 
 export function AppShell() {
@@ -81,12 +94,16 @@ export function AppShell() {
         </div>
 
         <nav className="sidebar-nav" aria-label="主导航">
-          <div className="nav-caption">控制面</div>
-          {navigation.map(({ to, label, detail, icon: Icon }) => (
-            <NavLink key={to} to={to} className="nav-link">
-              <Icon className="nav-icon" size={17} strokeWidth={1.8} aria-hidden="true" />
-              <span className="nav-copy"><span>{label}</span><small>{detail}</small></span>
-            </NavLink>
+          {navigationGroups.map((group) => (
+            <div className="nav-group" key={group.caption}>
+              <div className="nav-caption">{group.caption}</div>
+              {group.items.map(({ to, label, detail, icon: Icon }) => (
+                <NavLink key={to} to={to} className="nav-link">
+                  <Icon className="nav-icon" size={17} strokeWidth={1.8} aria-hidden="true" />
+                  <span className="nav-copy"><span>{label}</span><small>{detail}</small></span>
+                </NavLink>
+              ))}
+            </div>
           ))}
         </nav>
 
@@ -98,9 +115,9 @@ export function AppShell() {
 
       <div className="workspace">
         <header className="topbar">
-          <span className="product-label">Autonomous Cybersecurity Agent</span>
+          <span className="product-label">玄枢 · 自主安全分析平台</span>
           <div className="topbar-actions">
-            <span className="topbar-status"><span className="status-dot" />Policy governed</span>
+            <span className="topbar-status"><span className="status-dot" />策略治理已启用</span>
             <IconButton className="topbar-icon-button" label={tokenConfigured ? "修改服务令牌" : "设置服务令牌"} onClick={(event) => openTokenDialog(event)}><KeyRound size={16} aria-hidden="true" /></IconButton>
           </div>
         </header>

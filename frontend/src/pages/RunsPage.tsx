@@ -50,10 +50,9 @@ export function RunsPage() {
     <div className="page runs-page">
       <section className="runs-hero" aria-labelledby="runs-title">
         <div className="runs-hero-copy">
-          <div className="eyebrow">AUDIT / RUN REGISTRY</div>
+          <div className="eyebrow">运行审计</div>
           <h1 id="runs-title">运行审计</h1>
           <p>查看每一次受授权的安全分析，以及它留下的决策、证据与审计记录。</p>
-          <div className="runs-signal-line"><span />AUDIT STREAM <b>●</b> POLICY ENGINE ONLINE</div>
         </div>
         <div className="runs-hero-status">
           <span className="section-label">当前运行</span>
@@ -63,10 +62,10 @@ export function RunsPage() {
       </section>
 
       <section className="runs-overview" aria-label="任务概览">
-        <div className="overview-item overview-active"><span>活跃任务</span><strong>{running}</strong><small>LIVE NOW</small></div>
-        <div className="overview-item"><span>已完成</span><strong>{completed}</strong><small>VERIFIED</small></div>
-        <div className="overview-item"><span>题型覆盖</span><strong>{typeCount}</strong><small>PROFILES</small></div>
-        <div className={`overview-item ${attention ? "overview-attention" : ""}`}><span>需要关注</span><strong>{attention}</strong><small>ATTENTION</small></div>
+        <div className="overview-item overview-active"><span>活跃任务</span><strong>{running}</strong><small>进行中</small></div>
+        <div className="overview-item"><span>已完成</span><strong>{completed}</strong><small>含核验结论</small></div>
+        <div className="overview-item"><span>题型覆盖</span><strong>{typeCount}</strong><small>类别数</small></div>
+        <div className={`overview-item ${attention ? "overview-attention" : ""}`}><span>需要关注</span><strong>{attention}</strong><small>待处置</small></div>
       </section>
 
       <div className="runs-toolbar">

@@ -43,7 +43,7 @@ export function CapabilityPage() {
     <div className="page capability-page">
       <div className="page-heading">
         <div>
-          <div className="eyebrow">CAPABILITY LEDGER</div>
+          <div className="eyebrow">能力台账</div>
           <h1>能力与公示</h1>
           <p>按类别统计真实解出率与失败模式，并公示所有与通用性原则不符的操作记录。</p>
         </div>
