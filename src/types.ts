@@ -454,6 +454,8 @@ export interface RuntimeOverrides {
   gateway?: import("./model-gateway.js").ModelGateway;
   /** Operator-configured model session (configureModel); overrides config.model. */
   sessionModel?: RuntimeModelSessionConfig;
+  /** Durable per-run outcome ledger; feeds aggregate capability context and stats. */
+  capabilityLedger?: import("./capability-ledger.js").CapabilityLedger;
   /** Test seam for the embedded CLI subprocess: faux executable and env. */
   sdk?: { pathToClaudeCodeExecutable?: string; env?: Record<string, string> };
 }

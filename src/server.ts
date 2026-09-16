@@ -24,6 +24,7 @@ import { BoundedWorkflowWorker, runManagerWorkflowNodeRunner } from "./workflow-
 import { ConnectorBroker, ConnectorExecutor } from "./connector.js";
 import { EvaluationLedger, type EvaluationAttempt } from "./evaluation-ledger.js";
 import { DISCLOSURE_REASON_LABELS, DisclosureLedger, DisclosureLedgerError } from "./disclosure-ledger.js";
+import { CapabilityLedger } from "./capability-ledger.js";
 import { KnowledgeStore, type KnowledgeTrust } from "./knowledge-store.js";
 import { startModelGateway, type ModelGateway } from "./model-gateway.js";
 import { QuestionBankProgressStore } from "./question-bank-progress.js";
@@ -147,6 +148,7 @@ export interface ApiServerDependencies {
   connectorBroker?: ConnectorBroker;
   evaluationLedger?: EvaluationLedger;
   disclosureLedger?: DisclosureLedger;
+  capabilityLedger?: CapabilityLedger;
   knowledgeStore?: KnowledgeStore;
   /** Process-level model gateway; when omitted, startApiServer owns one and stops it on close. */
   gateway?: ModelGateway;
@@ -344,10 +346,12 @@ export function createApiServer(config: AppConfig, dependencies: ApiServerDepend
   const knowledgeStore = dependencies.knowledgeStore ?? new KnowledgeStore(orchestrationRoot);
   const connectorBroker = dependencies.connectorBroker ?? new ConnectorBroker(config.connectors ?? []);
   const targetConnectorId = config.profile?.preferredExecutor === "connector" ? config.profile.executorTargetId : undefined;
+  const capabilityLedger = dependencies.capabilityLedger ?? new CapabilityLedger(orchestrationRoot);
   const runtime = new XuanShuRuntime(config, {
     permissionGate: permissionBroker,
     memoryStore,
     knowledgeStore,
+    capabilityLedger,
     ...(dependencies.gateway ? { gateway: dependencies.gateway } : {}),
     ...(targetConnectorId ? { executorFactory: () => new ConnectorExecutor(targetConnectorId, connectorBroker) } : {}),
   });
@@ -797,6 +801,12 @@ export function createApiServer(config: AppConfig, dependencies: ApiServerDepend
           const status = error instanceof DisclosureLedgerError ? error.status : 500;
           json(response, status, { error: error instanceof Error ? error.message : String(error) });
         }
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/v1/capability") {
+        const includeRecords = url.searchParams.get("records") === "1";
+        const stats = await capabilityLedger.stats();
+        json(response, 200, { ...stats, ...(includeRecords ? { recentRecords: (await capabilityLedger.records()).slice(0, 50) } : {}) });
         return;
       }
       if (request.method === "GET" && url.pathname === "/v1/runs") {

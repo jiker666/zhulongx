@@ -4,6 +4,7 @@ import { basename, join, relative, resolve } from "node:path";
 import { AuditChain } from "./audit.js";
 import { createAgentSession, type AgentDriverEventType, type AgentSession } from "./agent-driver.js";
 import { classifyChallenge, type ChallengeClassification } from "./challenge-classifier.js";
+import { renderCapabilityContext } from "./capability-ledger.js";
 import { mergeScope } from "./config.js";
 import { SandboxExecutor } from "./executor.js";
 import { ExperienceStore, renderExperienceContext } from "./experience.js";
@@ -742,8 +743,22 @@ export class XuanShuRuntime {
           triageContext = "";
         }
       }
+      // Aggregate capability feedback (Tsecbench radar adaptation): category
+      // solve rates and recurring failure modes from past runs, injected as
+      // generic bias guidance for weak dimensions.
+      let capabilityContext = "";
+      if (this.overrides.capabilityLedger) {
+        try {
+          const stats = await this.overrides.capabilityLedger.stats();
+          capabilityContext = renderCapabilityContext(task.metadata.category, stats);
+          if (capabilityContext) await audit.append("context.capability_history", { category: task.metadata.category, runs: stats.total });
+        } catch {
+          capabilityContext = "";
+        }
+      }
       const promptSections = [
         { name: "capability-playbook", content: renderCapabilityPlaybook(task.metadata.category ?? (webReasoning.enabled ? "Web" : undefined)) },
+        ...(capabilityContext ? [{ name: "capability-history", content: capabilityContext }] : []),
         ...(triageContext ? [{ name: "artifact-triage", content: triageContext }] : []),
         { name: "reasoning-state", content: reasoningContext },
         { name: "verified-experience", content: renderExperienceContext(experience) },
@@ -939,6 +954,13 @@ export class XuanShuRuntime {
       });
       await audit.flush();
       await emit("run.settled", { status: state.status, stopReason: state.stopReason });
+      if (this.overrides.capabilityLedger) {
+        try {
+          await this.overrides.capabilityLedger.record(state);
+        } catch {
+          // Recording capability history must never fail the run.
+        }
+      }
     }
     return state;
   }
