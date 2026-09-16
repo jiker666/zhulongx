@@ -11,6 +11,7 @@ const RunsPage = lazy(() => import("./pages/RunsPage").then((module) => ({ defau
 const WorkbenchPage = lazy(() => import("./pages/WorkbenchPage").then((module) => ({ default: module.WorkbenchPage })));
 const CampaignPage = lazy(() => import("./pages/CampaignPage").then((module) => ({ default: module.CampaignPage })));
 const CampaignDetailPage = lazy(() => import("./pages/CampaignDetailPage").then((module) => ({ default: module.CampaignDetailPage })));
+const CapabilityPage = lazy(() => import("./pages/CapabilityPage").then((module) => ({ default: module.CapabilityPage })));
 const EvaluationLabPage = lazy(() => import("./pages/EvaluationLabPage").then((module) => ({ default: module.EvaluationLabPage })));
 const RuntimePage = lazy(() => import("./pages/RuntimePage").then((module) => ({ default: module.RuntimePage })));
 const ModelSettingsPage = lazy(() => import("./pages/ModelSettingsPage").then((module) => ({ default: module.ModelSettingsPage })));
@@ -28,6 +29,7 @@ export function App() {
           <Route path="runs" element={<RunsPage />} />
           <Route path="runs/:runId" element={<RunDetailPage />} />
           <Route path="experiences" element={<ExperiencesPage />} />
+          <Route path="capability" element={<CapabilityPage />} />
           <Route path="evaluations" element={<EvaluationLabPage />} />
           <Route path="runtime" element={<RuntimePage />} />
           <Route path="settings/model" element={<ModelSettingsPage />} />

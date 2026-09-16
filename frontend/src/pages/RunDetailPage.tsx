@@ -4,7 +4,7 @@ import { AlertTriangle, CheckCircle2, Download, Flag, GitFork, HelpCircle, Histo
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { continueRun, generateRunWriteup, getRun, getRunTrace, reviewRunEvent } from "../api/runs";
 import { Badge, Button, Card, EmptyState, ErrorState, LoadingState } from "../components/ui";
-import { formatConfidence, formatDateTime, formatTimestamp, kindLabels, safeJson } from "../features/decision-stream/formatters";
+import { cacheReadShare, formatConfidence, formatDateTime, formatTokenCount, formatTimestamp, kindLabels, observerKindLabels, safeJson, terminalReasonLabels, verdictLabels } from "../features/decision-stream/formatters";
 import { projectTrace } from "../features/decision-stream/projection";
 import type { DecisionRecord } from "../features/decision-stream/types";
 import { EvidenceGraphView } from "../features/evidence-graph/EvidenceGraphView";
@@ -16,7 +16,7 @@ import type { RunConnectionState } from "../features/realtime/types";
 import { PolicyDetails } from "../features/policy/PolicyDetails";
 import { DecisionObservatory } from "../features/decision-observatory/DecisionObservatory";
 import { renderRunWriteup } from "../features/writeup/format";
-import type { RunState, TrajectorySource } from "../types/api";
+import type { ObserverAnomaly, RunState, TrajectorySource } from "../types/api";
 
 const phaseLabels: Record<string, string> = { intake: "接收", planning: "规划", exploration: "探索", analysis: "分析", verification: "验证", reporting: "报告", done: "完成" };
 const statusLabels: Record<string, string> = { queued: "排队中", running: "运行中", completed: "已完成", blocked: "等待外部验证", failed: "失败", aborted: "已中止" };
@@ -55,11 +55,14 @@ function downloadMarkdown(content: string, filename: string): void {
 function MissionControl({ status, state, records, realtimeState }: { status: string; state: RunState | undefined; records: DecisionRecord[]; realtimeState: RunConnectionState }) {
   const runStarted = records.find((record) => record.sourceEventType === "run.started");
   const model = runStarted?.technicalDetails?.model;
-  const modelId = model && typeof model === "object" && typeof (model as Record<string, unknown>).id === "string" ? String((model as Record<string, unknown>).id) : undefined;
+  const eventModelId = model && typeof model === "object" && typeof (model as Record<string, unknown>).id === "string" ? String((model as Record<string, unknown>).id) : undefined;
+  const modelId = state?.model?.id ?? eventModelId;
   const policy = [...records].reverse().find((record) => record.kind === "policy")?.policyState;
   const target = state?.task.metadata.target ?? state?.task.metadata.host ?? state?.task.metadata.url;
   const allowed = records.filter((record) => record.kind === "policy" && record.policyState === "allowed").length;
   const blocked = records.filter((record) => record.kind === "policy" && record.policyState === "blocked").length;
+  const usage = state?.tokenUsage;
+  const cacheShare = usage ? cacheReadShare(usage) : undefined;
   return (
     <Card className="mission-control">
       <div className="mission-kicker">XUANSHU / MISSION CONTROL <span className={`connection-state connection-${realtimeState}`} data-realtime-state={realtimeState}>● {realtimeState.toUpperCase()}</span></div>
@@ -72,8 +75,64 @@ function MissionControl({ status, state, records, realtimeState }: { status: str
         <div><span>策略状态</span><strong>{policy ? policy.toUpperCase() : "UNKNOWN"}</strong></div>
         <div><span>策略计数</span><strong>{allowed} / {blocked}</strong></div>
         <div><span>运行回合 / 工具</span><strong>{state?.turns ?? "—"} / {state?.toolCalls ?? "—"}</strong></div>
+        <div><span>终止原因</span><strong>{state?.terminalReason ? terminalReasonLabels[state.terminalReason] ?? state.terminalReason : "—"}</strong></div>
+        {usage && <div><span>令牌用量</span><strong title={`输入 ${usage.inputTokens} · 输出 ${usage.outputTokens} · 缓存读 ${usage.cacheReadTokens} · 缓存写 ${usage.cacheCreationTokens} · 请求 ${usage.requests}`}>{formatTokenCount(usage.inputTokens + usage.cacheReadTokens + usage.cacheCreationTokens)} 入 / {formatTokenCount(usage.outputTokens)} 出 · 缓存命中 {cacheShare ?? 0}%</strong></div>}
       </div>
     </Card>
+  );
+}
+
+const planStepMarks: Record<string, string> = { completed: "✔", in_progress: "▶", blocked: "⊘", pending: "☐" };
+
+function PlanProgress({ state }: { state?: RunState }) {
+  const plan = state?.plan;
+  if (!plan) return null;
+  const steps = plan.steps ?? [];
+  if (!steps.length) return null;
+  const completed = steps.filter((step) => step.status === "completed").length;
+  const hasActivity = steps.some((step) => step.status);
+  return (
+    <section className="plan-progress-panel" aria-label="执行计划进度">
+      <div className="plan-progress-heading">
+        <div><span className="section-label">PLAN PROGRESS</span><h2>执行计划进度{hasActivity ? ` · ${completed}/${steps.length}` : ""}</h2></div>
+        <span className="plan-progress-goal" title={plan.goal}>{plan.goal}</span>
+      </div>
+      <ol className="plan-steps">
+        {steps.map((step) => (
+          <li key={step.id} className={`plan-step plan-step-${step.status ?? "pending"}`}>
+            <span className="plan-step-mark" aria-hidden="true">{planStepMarks[step.status ?? "pending"]}</span>
+            <div className="plan-step-body">
+              <strong>{step.id}</strong>
+              <span className="plan-step-objective">{step.objective}</span>
+              {step.dependsOn?.length ? <small className="plan-step-depends">依赖：{step.dependsOn.join("、")}</small> : null}
+              {step.note ? <small className="plan-step-note">{step.note}</small> : null}
+            </div>
+          </li>
+        ))}
+      </ol>
+    </section>
+  );
+}
+
+function ObserverNotes({ anomalies }: { anomalies?: ObserverAnomaly[] }) {
+  if (!anomalies?.length) return null;
+  return (
+    <section className="observer-notes-panel" aria-label="旁路观察者记录">
+      <div className="observer-notes-heading">
+        <div><span className="section-label">OBSERVER / RECORD-ONLY</span><h2>旁路观察者记录</h2></div>
+        <span className="chip chip-warn">{anomalies.length} 类异常</span>
+      </div>
+      <ul className="observer-notes-list">
+        {anomalies.map((anomaly) => (
+          <li key={`${anomaly.kind}-${anomaly.detail}`} className="observer-note">
+            <span className="chip chip-warn">{observerKindLabels[anomaly.kind] ?? anomaly.kind} ×{anomaly.occurrences}</span>
+            <code>{anomaly.detail}</code>
+            <small>{formatDateTime(anomaly.firstSeenAt)} → {formatDateTime(anomaly.lastSeenAt)}</small>
+          </li>
+        ))}
+      </ul>
+      <small className="observer-notes-disclaimer">观察者只记录、不干预：这些记录用于操作员复盘与后续运行交接，不会截断本次运行。</small>
+    </section>
   );
 }
 
@@ -101,7 +160,9 @@ function FinalConclusion({ state, events }: { state?: RunState; events: Array<{ 
   const submission = state?.submission ?? (typeof outcomeData.submission === "string" ? outcomeData.submission : undefined);
   const summary = state?.summary ?? (typeof outcomeData.summary === "string" ? outcomeData.summary : undefined);
   const submissionValidation = state?.submissionValidation;
-  const verifiedSubmission = Boolean(submission && state?.independentlyVerified === true && submissionValidation?.status === "accepted");
+  const replayVerdict = state?.verificationVerdict;
+  const contradicted = replayVerdict?.verdict === "contradicted";
+  const verifiedSubmission = Boolean(submission && !contradicted && state?.independentlyVerified === true && submissionValidation?.status === "accepted");
   const writeupError = state?.writeupError;
   const category = state?.task.metadata.category ?? "";
   const flagLike = /ctf|flag|challenge/i.test(category) || Boolean(submission && /flag\{|[A-Za-z0-9_:-]+\{[^}]+\}/i.test(submission));
@@ -131,10 +192,21 @@ function FinalConclusion({ state, events }: { state?: RunState; events: Array<{ 
   const hasWriteup = Boolean(state?.writeup?.trim()) || generatedInSession;
   return (
     <section className={`final-conclusion-panel ${submission ? "has-submission" : "no-submission"}`} aria-label="最终结论">
-      <div className="final-conclusion-heading"><div><span className="section-label">FINAL CONCLUSION</span><h2>运行总结结论</h2></div><div className="final-heading-status"><span className={`final-status final-status-${status}`}>{statusText}</span>{verifiedSubmission && flagLike && <span className="final-flag-status"><Flag size={12} aria-hidden="true" />FLAG FOUND</span>}</div></div>
+      <div className="final-conclusion-heading"><div><span className="section-label">FINAL CONCLUSION</span><h2>运行总结结论</h2></div><div className="final-heading-status"><span className={`final-status final-status-${status}`}>{statusText}</span>{replayVerdict && <span className={`chip chip-verdict-${replayVerdict.verdict}`} title={`重跑 ${replayVerdict.replayed} 条验证命令 · ${formatDateTime(replayVerdict.checkedAt)}`}>{verdictLabels[replayVerdict.verdict]}</span>}{verifiedSubmission && flagLike && <span className="final-flag-status"><Flag size={12} aria-hidden="true" />FLAG FOUND</span>}</div></div>
       {submission ? <div className={`submission-spotlight${verifiedSubmission ? " verified" : " candidate"}`}><div className="submission-label"><Flag size={17} aria-hidden="true" /><span>{verifiedSubmission && flagLike ? "FLAG" : "候选答案"}</span><small>{verifiedSubmission ? "已通过工具证据与独立验证" : "来自 finish_task，尚未形成可确认结论"}</small></div><div className="submission-value"><span className="submission-value-kicker">{verifiedSubmission && flagLike ? "最终 Flag" : "候选提交"}</span><code title={submission}>{submission}</code></div></div> : <div className="submission-empty"><Flag size={16} aria-hidden="true" /><span>未提交最终答案或 Flag</span><small>运行状态不会从工具日志中推测答案。</small></div>}
       <div className="conclusion-summary"><div className="conclusion-summary-heading"><span className="observatory-kicker">SUMMARY / 结论摘要</span>{summary && state && <Button className="button secondary compact-action" type="button" onClick={() => void downloadWriteup()} disabled={generatingWriteup}><Download size={14} aria-hidden="true" />{generatingWriteup ? "正在生成 WP" : hasWriteup ? "下载 WP" : "AI 生成并下载 WP"}</Button>}</div><p>{summary || "运行尚未写入总结结论。"}</p>{(writeupError || generationError) && <small className="writeup-generation-note">WP 自动生成失败，当前下载内容为结构化兼容报告：{generationError ?? writeupError}</small>}</div>
-      <div className="conclusion-proof"><span>{verifiedSubmission ? "✓ INDEPENDENTLY VERIFIED" : "VERIFICATION STATUS"}</span><strong>{verifiedSubmission ? "已独立验证" : submissionValidation?.reason ?? (state?.verification?.length ? `${state.verification.length} 条验证记录` : "未提供独立验证")}</strong></div>
+      <div className="conclusion-proof"><span>{verifiedSubmission ? "✓ INDEPENDENTLY VERIFIED" : "VERIFICATION STATUS"}</span><strong>{contradicted ? "复放验证矛盾：完成声明不被信任" : verifiedSubmission ? "已独立验证" : submissionValidation?.reason ?? (state?.verification?.length ? `${state.verification.length} 条验证记录` : "未提供独立验证")}</strong></div>
+      {replayVerdict && (
+        <div className={`replay-verdict replay-verdict-${replayVerdict.verdict}`}>
+          <span className="observatory-kicker">REPLAY VERIFIER / 复放验证</span>
+          <div className="replay-verdict-row">
+            <span className={`chip chip-verdict-${replayVerdict.verdict}`}>{verdictLabels[replayVerdict.verdict]}</span>
+            <span className="replay-verdict-meta">在结算后重跑了解题者自己的 {replayVerdict.replayed} 条验证命令 · {formatDateTime(replayVerdict.checkedAt)}</span>
+          </div>
+          {replayVerdict.evidence.length > 0 && <ul className="replay-verdict-evidence">{replayVerdict.evidence.map((item, index) => <li key={index}><code>{item}</code></li>)}</ul>}
+          {contradicted && <small className="replay-verdict-warning">复放未复现候选答案：该运行的完成声明已按失败处理，赛跑与编排不再采信。</small>}
+        </div>
+      )}
     </section>
   );
 }
@@ -355,7 +427,9 @@ export function RunDetailPage() {
       {continuation.error && <div className="inline-error" role="alert">{continuation.error.message}</div>}
       <MissionControl status={run.data?.status ?? "unknown"} state={state} records={decisions} realtimeState={realtimeState} />
       <CurrentAction status={run.data?.status ?? "unknown"} decision={currentDecision} total={decisions.length} />
+      <PlanProgress state={state} />
       <FinalConclusion state={state} events={rawEvents} />
+      <ObserverNotes anomalies={state?.observerAnomalies} />
       <DecisionObservatory state={state} events={observatoryEvents} onLocate={locateSequence} />
       <BranchCompare current={state} parent={parentRun.data?.state} currentEvents={rawEvents} parentEvents={parentTrace.data?.rawEvents ?? []} />
       {trace.data && <div className={`audit-integrity ${trace.data.integrity.valid ? "valid" : "invalid"}`}>{trace.data.integrity.valid ? <CheckCircle2 size={15} aria-hidden="true" /> : <AlertTriangle size={15} aria-hidden="true" />}<span><strong>{trace.data.integrity.valid ? "审计链完整" : "审计链异常"}</strong><small>{trace.data.integrity.records} 条只追加记录{trace.data.integrity.error ? ` · ${trace.data.integrity.error}` : " · 顺序与哈希校验通过"}</small></span></div>}

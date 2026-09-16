@@ -407,6 +407,59 @@ a {
   color: var(--muted);
 }
 
+/* Compact chips for card footers, verdicts, and anomaly counts. */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 4px 7px;
+  border-radius: 4px;
+  font: 10px ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chip-muted {
+  color: var(--muted);
+  background: var(--surface-elevated);
+  border: 1px solid var(--border);
+}
+
+.chip-warn {
+  color: var(--amber);
+  background: #f6eedf;
+  border: 1px solid #ead9bc;
+}
+
+.chip-verdict-reproduced {
+  color: var(--green);
+  background: #e9f1ec;
+  border: 1px solid #cfe3d6;
+}
+
+.chip-verdict-contradicted {
+  color: var(--danger);
+  background: #f6e8e7;
+  border: 1px solid #e7c9c5;
+}
+
+.chip-verdict-unverifiable {
+  color: var(--muted);
+  background: var(--surface-elevated);
+  border: 1px solid var(--border);
+}
+
+.run-card-footer-tags {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  max-width: 46%;
+}
+
 .state-panel {
   display: flex;
   flex-direction: column;

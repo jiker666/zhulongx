@@ -1,6 +1,7 @@
 import { Link } from "react-router-dom";
 import { Badge, Card } from "./ui";
 import type { RunSummary } from "../types/api";
+import { terminalReasonLabels, verdictLabels } from "../features/decision-stream/formatters";
 
 const statusLabels: Record<string, string> = {
   indexing: "正在索引",
@@ -72,6 +73,11 @@ export function RunCard({ run }: { run: RunSummary }) {
         <div className="run-status-line">
           <span className="run-status-pulse" aria-hidden="true" />
           <Badge tone={run.status}>{status}</Badge>
+          {run.verificationVerdict ? (
+            <span className={`chip chip-verdict-${run.verificationVerdict.verdict}`}>
+              {verdictLabels[run.verificationVerdict.verdict]}
+            </span>
+          ) : null}
         </div>
         <span className="run-date">{new Date(run.createdAt).toLocaleString("zh-CN", { hour12: false })}</span>
       </div>
@@ -99,6 +105,15 @@ export function RunCard({ run }: { run: RunSummary }) {
       </div>
 
       <div className="run-card-footer">
+        <div className="run-card-footer-tags">
+          {run.terminalReason ? (
+            <span className="chip chip-muted" title="运行终止的真实原因">{terminalReasonLabels[run.terminalReason] ?? run.terminalReason}</span>
+          ) : null}
+          {run.model ? <span className="chip chip-muted" title="本次运行使用的模型">{run.model.id}</span> : null}
+          {run.observerAnomalies ? (
+            <span className="chip chip-warn" title="旁路观察者记录到的异常次数（只记录、不干预）">观察 ×{run.observerAnomalies}</span>
+          ) : null}
+        </div>
         <span className="run-id" title={run.id}>{run.id}</span>
         <Link className="button secondary run-detail-button" to={`/runs/${run.id}`}>
           查看详情 <span aria-hidden="true">→</span>

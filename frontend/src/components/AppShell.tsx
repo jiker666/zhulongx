@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { BookOpenCheck, Bot, FlaskConical, GitBranch, Gauge, History, KeyRound, Library, Settings2, ShieldCheck, X } from "lucide-react";
+import { BarChart3, BookOpenCheck, Bot, FlaskConical, GitBranch, Gauge, History, KeyRound, Library, Settings2, ShieldCheck, X } from "lucide-react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { getServerToken, setServerToken } from "../api/client";
 import { IconButton } from "./ui";
@@ -11,6 +11,7 @@ const navigation = [
   { to: "/campaigns", label: "自主编排", detail: "任务板与升级", icon: GitBranch },
   { to: "/runs", label: "运行审计", detail: "决策与证据", icon: History },
   { to: "/experiences", label: "经验库", detail: "验真策略", icon: Library },
+  { to: "/capability", label: "能力与公示", detail: "维度统计与公示墙", icon: BarChart3 },
   { to: "/evaluations", label: "评测实验室", detail: "复核指标", icon: FlaskConical },
   { to: "/runtime", label: "运行时", detail: "Agent 与 Workflow", icon: Bot },
   { to: "/settings/model", label: "模型设置", detail: "临时连接配置", icon: Settings2 },

@@ -23,6 +23,7 @@ const toolGuides: Record<string, { action: string; purpose: string; impact: stri
   http_request: { action: "向授权目标发送一个受控 HTTP 请求", purpose: "观察服务响应并验证假设", impact: "请求必须通过目标范围、方法和预算检查" },
   browser: { action: "在受控浏览器中执行一步操作", purpose: "观察网页状态或完成必要交互", impact: "导航目标和动作必须通过安全策略" },
   submit_plan: { action: "提交本次任务的执行计划", purpose: "明确目标、假设和验证步骤", impact: "只更新运行计划，不访问外部目标" },
+  update_plan_steps: { action: "更新计划步骤的执行状态", purpose: "按依赖门逐步派发已记录的任务链", impact: "只更新运行状态中的计划进度，压缩后仍可恢复" },
   checkpoint: { action: "整理当前证据并检查方向", purpose: "避免重复或无依据地继续尝试", impact: "会更新假设和下一步策略" },
   record_finding: { action: "记录一条可复核发现", purpose: "把结论与证据固定下来", impact: "发现会进入最终报告和证据图" },
   record_lesson: { action: "记录一条候选经验", purpose: "为后续相似任务保留可验证策略", impact: "经验仍需后续任务再次验证" },
@@ -142,6 +143,11 @@ export function projectTraceEvent(event: RawTraceEvent): DecisionRecord {
       return record(event, "system", "Agent 已给出本轮公开判断", publicText ?? "本轮没有公开文本，可能直接选择了工具动作", { stopReason: data.stopReason, usage: data.usage, publicText, hiddenReasoningOmitted: data.hiddenReasoningOmitted }, { why: "把模型的外显结论与后续动作对应起来", impact: "隐藏思维过程不会保存；只有可复核文本和结构化动作进入轨迹", result: publicText ?? "已进入工具或下一轮处理" });
     }
     case "plan.submitted": return record(event, "system", "执行计划已提交", reason ?? "Agent 明确了目标、假设和验证步骤", { goal: data.goal, steps: data.steps }, { why: "先规划可以减少盲目尝试", impact: "计划本身不操作目标，但后续动作必须围绕计划和证据推进", next: "执行第一个可验证步骤" });
+    case "plan.steps_updated": {
+      const updates = Array.isArray(data.updates) ? data.updates.length : 0;
+      const unmet = Array.isArray(data.unmetDependencies) ? data.unmetDependencies.filter((item): item is string => typeof item === "string") : [];
+      return record(event, "system", "计划步骤状态已更新", `按 todolist 派发了 ${updates} 个步骤的状态`, { updates: data.updates, unmetDependencies: data.unmetDependencies }, { why: "依赖链记录在运行状态里，压缩或续跑后仍然可见", impact: unmet.length ? "有步骤在依赖未完成时开始执行，运行时会给出事实门警告" : "后续动作应围绕当前 in_progress 步骤推进", result: unmet.length ? `依赖门未满足：${unmet.join("；")}` : "依赖门校验通过", next: unmet.length ? "先补齐缺失的事实，再继续该步骤" : "完成当前步骤后更新状态" });
+    }
     case "tool.requested": return record(event, "action", guide.action, stringField(data, ["description"]) ?? guide.purpose, { toolName: tool, args: data.args, description: data.description }, { what: guide.action, why: guide.purpose, impact: guide.impact, next: "先交给安全策略检查是否允许执行" });
     case "policy.decision": return record(event, "policy", data.allowed === true ? "安全策略允许执行" : "安全策略阻止了动作", reason ?? "策略引擎完成范围、预算和权限检查", { toolName: tool, allowed: data.allowed, reason: data.reason, signature: data.signature, args: data.args, scope: data.scope, risk: data.risk, ruleId: data.ruleId, approvalState: data.approvalState, checks: data.checks }, { what: `检查“${guide.action}”是否在授权范围内`, why: "任何主动能力都必须先经过策略引擎", impact: data.allowed === true ? "检查通过，工具可以执行" : "动作不会执行，也不会触碰目标", result: data.allowed === true ? "允许" : `已阻止：${reason ?? "不满足策略"}`, next: data.allowed === true ? "执行工具并读取结果" : "调整策略或请求操作员处理" });
     case "permission.request": return record(event, "policy", "动作正在等待人工许可", `${tool} 的风险等级需要操作员确认`, { toolName: tool, risk: data.risk, args: data.args }, { why: "高影响动作不能仅由模型决定", impact: "在许可给出前不会执行工具", next: "等待操作员批准或拒绝" });
@@ -158,6 +164,22 @@ export function projectTraceEvent(event: RawTraceEvent): DecisionRecord {
     case "lesson.captured": return record(event, "system", "候选经验已记录", stringField(data, ["title", "summary"]) ?? "候选经验已写入运行记录", { id: data.id }, { why: "把有效方法留给相似任务复用", impact: "候选经验不会被当作事实，后续仍需再次验证" });
     case "run.finished_by_agent": return record(event, "result", "Agent 已提交运行结论", reason ?? "Agent 认为本轮任务已经收敛", { status: data.status, summary: data.summary }, { why: "证据足够或安全范围内已无法继续", impact: "编排器将检查状态并结算运行", result: stringField(data, ["summary"]) ?? String(data.status ?? "unknown") });
     case "run.settled": return record(event, "result", "运行已经结束", reason ?? "编排器已完成运行结算", { status: data.status, stopReason: data.stopReason }, { why: "运行到达完成、阻塞、失败或中止状态", impact: "轨迹保持只读，可检索、回放或创建分支", result: String(data.status ?? "unknown") });
+    case "context.triage": return record(event, "observation", "附件已完成确定性分诊", `引擎在第一回合前完成了 ${Number(data.files ?? 0)} 个附件的类型、熵与字符串清单`, { files: data.files }, { why: "把机械的第一遍观察交给引擎，Agent 从第 1 回合就开始真正的分析", impact: "分诊不调用模型，结果是可复现的本地测量", next: "基于清单决定先分析哪个附件" });
+    case "context.capability_history": return record(event, "context", "同类任务历史能力已注入", `注入了「${String(data.category ?? "unknown")}」类别的聚合解题统计与纠偏提示`, { category: data.category, runs: data.runs }, { why: "弱维度的历史失败模式应该影响开局策略，而不是每轮重新踩坑", impact: "只包含类别级统计和通用建议，不包含任何题目知识", next: "按纠偏提示规划本轮动作顺序" });
+    case "model.usage_summary": {
+      const usage = data as { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheCreationTokens?: number; requests?: number };
+      return record(event, "system", "运行模型用量已汇总", `${Number(usage.requests ?? 0)} 次请求，输入 ${Number(usage.inputTokens ?? 0)}、输出 ${Number(usage.outputTokens ?? 0)}、缓存读 ${Number(usage.cacheReadTokens ?? 0)}`, { usage: data }, { why: "按字段记账才能看清缓存经济性与真实成本", impact: "用量已写入运行摘要，可用于跨模型对比", result: `cache_read=${Number(usage.cacheReadTokens ?? 0)}` });
+    }
+    case "observer.anomaly": {
+      const occurrences = Number(data.occurrences ?? 1);
+      return record(event, "warning", "旁路观察者记录到异常", `${String(data.detail ?? "检测到运行病理")}（×${occurrences}）`, { kind: data.kind, detail: data.detail, occurrences }, { what: "旁路观察者只记录、不干预", why: "观察者独立于 Solver 记录循环、重复失败等病理，避免解题者自述掩盖问题", impact: "记录进入审计链和交接文档，供操作员与后续运行参考", result: `${String(data.kind ?? "anomaly")} ×${occurrences}` });
+    }
+    case "verifier.replay": {
+      const verdict = String(data.verdict ?? "unverifiable");
+      const title = verdict === "reproduced" ? "复放验证已复现候选" : verdict === "contradicted" ? "复放验证与结论矛盾" : "复放验证无法验证";
+      return record(event, verdict === "contradicted" ? "warning" : "result", title, `重新执行了解题者自己的 ${Number(data.replayed ?? 0)} 条验证命令，判决：${verdict}`, { verdict: data.verdict, replayed: data.replayed, evidence: data.evidence }, { what: "在结算后用全新进程重跑验证命令", why: "历史输出不能当作证据：一次成功不等于可复现", impact: verdict === "contradicted" ? "该运行的完成声明不被信任，赛跑与编排按失败处理" : "完成声明得到独立复放支撑", result: `verdict=${verdict}, replayed=${Number(data.replayed ?? 0)}` });
+    }
+    case "verifier.failed": return record(event, "warning", "复放验证器运行失败", reason ?? "复放验证未完成，本次运行保持 unverifiable", { reason: data.reason }, { why: "验证器故障不应改变运行本身的结论", impact: "没有复放判决时按未验证处理", result: reason ?? "replay verifier error" });
     case "run.error": return record(event, "warning", "运行发生错误", reason ?? "运行记录了错误", { message: data.message }, { why: "模型、基础设施或配置未能完成请求", impact: "错误已审计，后续可从历史结尾继续", result: reason ?? "unknown error" });
     case "WEB_ACTION_GUARD_REJECTED": return record(event, "policy", "浏览器动作被安全护栏阻止", reason ?? "动作未通过 Web 安全护栏", { toolName: tool, decision: data.decision }, { why: "浏览器动作可能影响真实网页状态", impact: "被拒绝的动作不会执行" });
     case "WEB_ACTION_SKIPPED_DUPLICATE": return record(event, "warning", "重复动作已跳过", "系统检测到同一 Web 动作已经执行过", { toolName: tool, actionId: data.actionId }, { why: "避免重复请求、触发风控或浪费预算", impact: "Agent 需要基于新证据选择不同动作" });
