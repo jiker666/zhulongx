@@ -3,7 +3,7 @@
   padding: 3px;
   width: max-content;
   max-width: 100%;
-  background: #f3f4f6;
+  background: #f0eee8;
   border-radius: var(--radius);
 }
 
@@ -15,7 +15,7 @@
   padding: 3px;
   width: max-content;
   max-width: 100%;
-  background: #f3f4f6;
+  background: #f0eee8;
   border-radius: var(--radius);
 }
 
@@ -51,7 +51,7 @@
   color: var(--text);
   background: var(--surface);
   border-color: var(--border);
-  box-shadow: 0 1px 2px rgb(15 23 42 / 6%);
+  box-shadow: 0 1px 2px rgb(51 45 35 / 5%);
 }
 
 .graph-layout {
@@ -110,18 +110,18 @@
   height: 620px;
   min-width: 0;
   overflow: hidden;
-  background: #f9fafb;
+  background: #f8f7f3;
   border: 1px solid var(--border);
   border-radius: 6px;
 }
 
 .evidence-graph-canvas .react-flow {
-  background: #f9fafb;
+  background: #f8f7f3;
 }
 
 .evidence-graph-canvas .react-flow__attribution {
   color: var(--subtle);
-  background: rgb(249 250 251 / 85%);
+  background: rgb(248 247 243 / 85%);
 }
 
 .evidence-graph-node {
@@ -135,7 +135,7 @@
   border: 1px solid color-mix(in srgb, var(--node-accent) 42%, var(--border));
   border-left: 3px solid var(--node-accent);
   border-radius: var(--radius);
-  box-shadow: 0 5px 14px rgb(15 23 42 / 8%);
+  box-shadow: 0 5px 14px rgb(51 45 35 / 8%);
   cursor: pointer;
 }
 

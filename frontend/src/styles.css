@@ -1,26 +1,26 @@
 :root {
   font-family: Inter, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
-  color: #111827;
-  background: #f6f7f9;
+  color: #26241f;
+  background: #faf9f5;
   font-synthesis: none;
-  --bg: #f6f7f9;
-  --sidebar: #0f172a;
+  --bg: #faf9f5;
+  --sidebar: #f0eee5;
   --surface: #ffffff;
-  --surface-elevated: #f3f4f6;
-  --surface-soft: #f9fafb;
-  --border: #e5e7eb;
-  --border-strong: #d1d5db;
-  --text: #111827;
-  --muted: #6b7280;
-  --subtle: #9ca3af;
-  --accent: #2563eb;
-  --accent-deep: #1d4ed8;
-  --accent-soft: #dbeafe;
-  --blue: #2563eb;
-  --green: #047857;
-  --amber: #b45309;
-  --danger: #b91c1c;
-  --radius: 6px;
+  --surface-elevated: #eeece4;
+  --surface-soft: #f5f4ef;
+  --border: #e8e5dc;
+  --border-strong: #d4d1c6;
+  --text: #26241f;
+  --muted: #6f6d64;
+  --subtle: #9b998f;
+  --accent: #d97757;
+  --accent-deep: #bf5f3f;
+  --accent-soft: #f4e5dd;
+  --blue: #54748c;
+  --green: #4e7a5e;
+  --amber: #a07a3a;
+  --danger: #b45151;
+  --radius: 10px;
 }
 
 * {
@@ -58,7 +58,7 @@ input:focus-visible,
 select:focus-visible,
 textarea:focus-visible,
 summary:focus-visible {
-  outline: 2px solid rgb(37 99 235 / 45%);
+  outline: 2px solid rgb(217 119 87 / 40%);
   outline-offset: 2px;
 }
 
@@ -82,8 +82,8 @@ a {
   width: 256px;
   height: 100vh;
   padding: 18px 14px;
-  color: #cbd5e1;
-  border-right: 1px solid rgb(255 255 255 / 8%);
+  color: var(--text);
+  border-right: 1px solid var(--border);
   background: var(--sidebar);
 }
 
@@ -104,9 +104,9 @@ a {
   place-items: center;
   width: 34px;
   height: 34px;
-  color: #ffffff;
+  color: #fffaf4;
   background: var(--accent);
-  border-radius: 8px;
+  border-radius: 9px;
   font-size: 15px;
   font-weight: 650;
 }
@@ -117,14 +117,14 @@ a {
 }
 
 .brand-copy strong {
-  color: #f8fafc;
+  color: var(--text);
   font-size: 16px;
   font-weight: 650;
   letter-spacing: 0.01em;
 }
 
 .brand-copy small {
-  color: #94a3b8;
+  color: var(--subtle);
   font-size: 9px;
   letter-spacing: 0.08em;
 }
@@ -145,7 +145,7 @@ a {
 
 .nav-caption {
   padding: 14px 11px 7px;
-  color: #64748b;
+  color: var(--subtle);
   font-size: 10px;
   font-weight: 600;
   letter-spacing: 0.08em;
@@ -157,7 +157,7 @@ a {
   display: grid;
   gap: 3px;
   padding: 9px 12px;
-  color: #cbd5e1;
+  color: #56534b;
   border: 1px solid transparent;
   border-radius: var(--radius);
 }
@@ -168,19 +168,20 @@ a {
 }
 
 .nav-link small {
-  color: #7c8aa1;
+  color: var(--subtle);
   font-size: 11px;
 }
 
 .nav-link:hover {
-  color: #f8fafc;
-  background: rgb(255 255 255 / 6%);
+  color: var(--text);
+  background: #e8e4d8;
 }
 
 .nav-link.active {
-  color: #ffffff;
-  background: rgb(255 255 255 / 10%);
-  border-color: rgb(255 255 255 / 6%);
+  color: var(--text);
+  background: var(--surface);
+  border-color: var(--border);
+  box-shadow: 0 1px 2px rgb(41 37 31 / 4%);
 }
 
 .nav-link.active::before {
@@ -190,7 +191,7 @@ a {
   left: 0;
   width: 3px;
   content: "";
-  background: #3b82f6;
+  background: var(--accent);
   border-radius: 0 2px 2px 0;
 }
 
@@ -199,8 +200,8 @@ a {
   gap: 6px;
   margin-top: auto;
   padding: 14px 12px;
-  color: #94a3b8;
-  border-top: 1px solid rgb(255 255 255 / 8%);
+  color: #56534b;
+  border-top: 1px solid var(--border);
   font-size: 12px;
   line-height: 1.5;
 }
@@ -211,7 +212,7 @@ a {
 }
 
 .sidebar-note small {
-  color: #64748b;
+  color: var(--subtle);
   font-size: 11px;
 }
 
@@ -221,9 +222,9 @@ a {
   width: 7px;
   height: 7px;
   margin-right: 8px;
-  background: #10b981;
+  background: #5d8a66;
   border-radius: 50%;
-  box-shadow: 0 0 0 3px rgb(16 185 129 / 15%);
+  box-shadow: 0 0 0 3px rgb(93 138 102 / 12%);
 }
 
 .workspace {
@@ -240,7 +241,7 @@ a {
   height: 58px;
   padding: 0 34px;
   color: var(--muted);
-  background: rgb(255 255 255 / 90%);
+  background: rgb(250 249 245 / 90%);
   border-bottom: 1px solid var(--border);
   backdrop-filter: blur(14px);
 }
@@ -259,7 +260,7 @@ a {
 .topbar-status {
   display: flex;
   align-items: center;
-  color: #4b5563;
+  color: #65635d;
 }
 
 .topbar-status .status-dot {
@@ -291,8 +292,9 @@ a {
 .page-heading h1,
 .runs-hero h1 {
   margin: 8px 0 8px;
-  font-size: 24px;
-  font-weight: 650;
+  font-family: "Songti SC", "Noto Serif SC", SimSun, serif;
+  font-size: 28px;
+  font-weight: 550;
   letter-spacing: -0.01em;
 }
 
@@ -310,7 +312,7 @@ a {
   justify-content: center;
   min-height: 36px;
   padding: 8px 14px;
-  color: #ffffff;
+  color: #fffaf4;
   background: var(--accent);
   border: 1px solid var(--accent);
   border-radius: var(--radius);
@@ -332,7 +334,7 @@ a {
 
 .button.secondary:hover {
   background: var(--surface-elevated);
-  border-color: #9ca3af;
+  border-color: #a5a29a;
 }
 
 .card {
@@ -340,7 +342,7 @@ a {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  box-shadow: 0 1px 2px rgb(15 23 42 / 4%);
+  box-shadow: 0 1px 2px rgb(41 37 31 / 4%);
 }
 
 .run-grid,
@@ -385,25 +387,25 @@ a {
 
 .badge-running,
 .badge-queued {
-  color: #1d4ed8;
-  background: #eff6ff;
+  color: #3d5a75;
+  background: #eaf0f4;
 }
 
 .badge-completed,
 .badge-success {
-  color: #047857;
-  background: #ecfdf5;
+  color: #3f7058;
+  background: #e9f1ec;
 }
 
 .badge-blocked {
-  color: #b45309;
-  background: #fffbeb;
+  color: #875d26;
+  background: #f6eedf;
 }
 
 .badge-failed,
 .badge-aborted {
-  color: #b91c1c;
-  background: #fef2f2;
+  color: #a24747;
+  background: #f6e8e7;
 }
 
 .badge-neutral {
@@ -432,20 +434,20 @@ a {
 
 .chip-warn {
   color: var(--amber);
-  background: #fffbeb;
-  border: 1px solid #fde68a;
+  background: #f6eedf;
+  border: 1px solid #ead9bc;
 }
 
 .chip-verdict-reproduced {
   color: var(--green);
-  background: #ecfdf5;
-  border: 1px solid #a7f3d0;
+  background: #e9f1ec;
+  border: 1px solid #cfe3d6;
 }
 
 .chip-verdict-contradicted {
   color: var(--danger);
-  background: #fef2f2;
-  border: 1px solid #fecaca;
+  background: #f6e8e7;
+  border: 1px solid #e7c9c5;
 }
 
 .chip-verdict-unverifiable {
@@ -546,14 +548,14 @@ a {
 
 .summary {
   margin: 20px 0 0;
-  color: #4b5563;
+  color: #56534d;
   font-size: 13px;
   line-height: 1.7;
 }
 
 .strategy-list {
   padding-left: 20px;
-  color: #4b5563;
+  color: #56534d;
   font-size: 13px;
   line-height: 1.8;
 }
@@ -585,7 +587,7 @@ a {
 .run-card:hover {
   transform: translateY(-2px);
   border-color: var(--border-strong);
-  box-shadow: 0 8px 20px rgb(15 23 42 / 8%);
+  box-shadow: 0 8px 20px rgb(51 45 35 / 8%);
 }
 
 .run-status-line {
@@ -638,7 +640,7 @@ a {
   display: flex;
   align-items: center;
   gap: 6px;
-  color: #374151;
+  color: #4f4d48;
   font-size: 12px;
   font-weight: 600;
 }
@@ -666,7 +668,7 @@ a {
   min-height: 36px;
   padding: 8px 10px;
   overflow: hidden;
-  color: #334155;
+  color: #6e503f;
   background: var(--surface-soft);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -729,7 +731,7 @@ a {
 .run-metrics strong {
   display: block;
   margin-top: 5px;
-  color: #111827;
+  color: #44423d;
   font-size: 13px;
 }
 
@@ -784,7 +786,7 @@ a {
 }
 
 .runs-hero h1 {
-  font-size: 26px;
+  font-size: 30px;
 }
 
 .runs-hero p {
@@ -876,7 +878,7 @@ a {
   flex-wrap: wrap;
   gap: 4px;
   padding: 3px;
-  background: #f3f4f6;
+  background: #efece3;
   border-radius: var(--radius);
 }
 
@@ -896,7 +898,7 @@ a {
   min-width: 18px;
   padding: 1px 5px;
   color: var(--subtle);
-  background: #ffffff;
+  background: rgb(255 255 255 / 55%);
   border-radius: 999px;
   font: 10px ui-monospace, SFMono-Regular, Menlo, monospace;
 }
@@ -909,7 +911,7 @@ a {
   color: var(--text);
   background: var(--surface);
   border-color: var(--border);
-  box-shadow: 0 1px 2px rgb(15 23 42 / 6%);
+  box-shadow: 0 1px 2px rgb(51 45 35 / 5%);
 }
 
 .run-filters button.active span {
@@ -954,7 +956,7 @@ a {
     height: auto;
     padding: 12px 14px;
     border-right: 0;
-    border-bottom: 1px solid rgb(255 255 255 / 10%);
+    border-bottom: 1px solid var(--border);
   }
 
   .sidebar-header {
@@ -1062,7 +1064,7 @@ a {
 
   .page-heading h1,
   .runs-hero h1 {
-    font-size: 22px;
+    font-size: 24px;
   }
 
   .runs-toolbar {
