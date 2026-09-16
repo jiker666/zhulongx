@@ -9,6 +9,7 @@ import { SandboxExecutor } from "./executor.js";
 import { ExperienceStore, renderExperienceContext } from "./experience.js";
 import { renderRunHandoff } from "./handoff.js";
 import { normalizeTask, renderTaskContext } from "./input.js";
+import { renderTriageSection, triageAttachments } from "./artifact-triage.js";
 import { startModelGateway, type ModelGateway, type ModelGatewayUpstream, type ModelRouteOptions } from "./model-gateway.js";
 import { PolicyEngine } from "./policy.js";
 import { classifyProviderError } from "./provider-errors.js";
@@ -724,8 +725,25 @@ export class XuanShuRuntime {
           await emit("knowledge.retrieval_failed", { reason: "Knowledge retrieval unavailable; continuing without retrieved context" });
         }
       }
+      // Deterministic, engine-side first-pass observations (type/entropy/strings)
+      // injected before turn 1 so no run spends opening turns re-deriving them.
+      let triageContext = "";
+      if (task.attachments.length > 0) {
+        try {
+          const triaged = await triageAttachments(task.attachments.map((attachment) => ({
+            path: attachment.source,
+            name: attachment.toolPath?.path ?? attachment.source.split("/").pop() ?? attachment.source,
+            ...(attachment.sha256 ? { sha256: attachment.sha256 } : {}),
+          })));
+          triageContext = renderTriageSection(triaged);
+          if (triageContext) await audit.append("context.triage", { files: triaged.length });
+        } catch {
+          triageContext = "";
+        }
+      }
       const promptSections = [
         { name: "capability-playbook", content: renderCapabilityPlaybook(task.metadata.category ?? (webReasoning.enabled ? "Web" : undefined)) },
+        ...(triageContext ? [{ name: "artifact-triage", content: triageContext }] : []),
         { name: "reasoning-state", content: reasoningContext },
         { name: "verified-experience", content: renderExperienceContext(experience) },
         { name: "memory", content: memoryContext },
