@@ -19,7 +19,12 @@ describe("category capability playbooks", () => {
     expect(renderCapabilityPlaybook("Reverse")).toContain("image-base + RVA");
     expect(renderCapabilityPlaybook("Reverse")).toContain("full check independently");
     expect(crypto).toContain("negative-ledger.jsonl");
+    expect(crypto).toContain("prove or disprove referentiality");
+    expect(crypto).toContain("Sweep stop rule");
+    expect(crypto).toContain("re-encoding the parse tree");
+    expect(crypto).toContain("byte inventory of the whole bundle");
     expect(renderCapabilityPlaybook("Reverse")).toContain("negative-ledger.jsonl");
+    expect(renderCapabilityPlaybook("Reverse")).toContain("fresh processes");
     expect(renderCapabilityPlaybook("Misc")).toContain("pickora");
     expect(renderCapabilityPlaybook("Misc")).toContain("bounded derivative in scratch");
     expect(renderCapabilityPlaybook("unknown")).toBe("");
