@@ -23,6 +23,7 @@ import { DurableWorkflowStore, type WorkflowBudget, type WorkflowNodeSpec } from
 import { BoundedWorkflowWorker, runManagerWorkflowNodeRunner } from "./workflow-worker.js";
 import { ConnectorBroker, ConnectorExecutor } from "./connector.js";
 import { EvaluationLedger, type EvaluationAttempt } from "./evaluation-ledger.js";
+import { DISCLOSURE_REASON_LABELS, DisclosureLedger, DisclosureLedgerError } from "./disclosure-ledger.js";
 import { KnowledgeStore, type KnowledgeTrust } from "./knowledge-store.js";
 import { startModelGateway, type ModelGateway } from "./model-gateway.js";
 import { QuestionBankProgressStore } from "./question-bank-progress.js";
@@ -145,6 +146,7 @@ export interface ApiServerDependencies {
   workflowWorker?: BoundedWorkflowWorker;
   connectorBroker?: ConnectorBroker;
   evaluationLedger?: EvaluationLedger;
+  disclosureLedger?: DisclosureLedger;
   knowledgeStore?: KnowledgeStore;
   /** Process-level model gateway; when omitted, startApiServer owns one and stops it on close. */
   gateway?: ModelGateway;
@@ -357,6 +359,7 @@ export function createApiServer(config: AppConfig, dependencies: ApiServerDepend
   const workflowWorker = dependencies.workflowWorker ?? new BoundedWorkflowWorker(workflowStore, runManagerWorkflowNodeRunner(manager));
   workflowWorker.start();
   const evaluationLedger = dependencies.evaluationLedger ?? new EvaluationLedger(orchestrationRoot);
+  const disclosureLedger = dependencies.disclosureLedger ?? new DisclosureLedger(orchestrationRoot);
   const adaptiveCampaigns = dependencies.adaptiveCampaigns ?? new AdaptiveCampaignManager({
     store: new DurableAdaptiveCampaignStore(orchestrationRoot),
     runManager: manager,
@@ -771,6 +774,29 @@ export function createApiServer(config: AppConfig, dependencies: ApiServerDepend
         const job = manualJobs.get(manualJobMatch[1]);
         if (!job) json(response, 404, { error: "Manual job not found" });
         else json(response, 200, { job });
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/v1/disclosures") {
+        const windowParam = url.searchParams.get("windowDays");
+        const windowDays = windowParam === null ? undefined : Number.parseInt(windowParam, 10);
+        if (windowDays !== undefined && (!Number.isFinite(windowDays) || windowDays < 0)) {
+          json(response, 400, { error: "windowDays must be a non-negative integer" });
+          return;
+        }
+        const listed = await disclosureLedger.list(windowDays);
+        json(response, 200, { ...listed, reasonLabels: DISCLOSURE_REASON_LABELS });
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/v1/disclosures") {
+        const input = await bodyJson(request);
+        try {
+          const body = input as { runId?: unknown; taskId?: unknown; reason?: unknown; detail?: unknown; disclosedBy?: unknown };
+          const record = await disclosureLedger.disclose(body);
+          json(response, 201, { record });
+        } catch (error) {
+          const status = error instanceof DisclosureLedgerError ? error.status : 500;
+          json(response, status, { error: error instanceof Error ? error.message : String(error) });
+        }
         return;
       }
       if (request.method === "GET" && url.pathname === "/v1/runs") {
