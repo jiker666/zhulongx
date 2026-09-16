@@ -353,3 +353,44 @@ describe("ModelGateway", () => {
     }
   });
 });
+
+describe("ModelGateway usage attribution", () => {
+  it("accumulates the per-field usage split across JSON and SSE responses", async () => {
+    const gateway = await startModelGateway();
+    try {
+      let call = 0;
+      respondWith = (response) => {
+        call += 1;
+        if (call === 1) {
+          response.writeHead(200, { "content-type": "application/json" });
+          response.end(JSON.stringify({
+            usage: { input_tokens: 100, output_tokens: 40, cache_read_input_tokens: 900, cache_creation_input_tokens: 60 },
+          }));
+          return;
+        }
+        response.writeHead(200, { "content-type": "text/event-stream" });
+        response.end(sseBody([
+          { type: "message_start", message: { usage: { input_tokens: 200, cache_read_input_tokens: 5000, cache_creation_input_tokens: 30 } } },
+          { type: "message_delta", usage: { output_tokens: 75 } },
+        ]));
+      };
+      gateway.setRoute("usage-run", { upstream: { baseUrl: `http://127.0.0.1:${upstreamPort}`, apiKey: "up-key" } });
+      await postJson(gateway.routeUrl("usage-run"), minimalBody);
+      await postJson(gateway.routeUrl("usage-run"), minimalBody);
+
+      const usage = gateway.routeUsage("usage-run");
+      expect(usage).toBeDefined();
+      expect(usage).toMatchObject({
+        requests: 2,
+        inputTokens: 300,
+        outputTokens: 115,
+        cacheReadTokens: 5900,
+        cacheCreationTokens: 90,
+      });
+      gateway.releaseRoute("usage-run");
+      expect(gateway.routeUsage("usage-run")).toBeUndefined();
+    } finally {
+      await gateway.stop();
+    }
+  });
+});

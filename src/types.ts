@@ -288,6 +288,16 @@ export interface RunLineage {
   inheritedEventCount: number;
 }
 
+/** Provider token usage accumulated over the run, kept per field so cache
+ * economics are measurable (Tsecbench-style attribution). */
+export interface TokenUsageSummary {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  requests: number;
+}
+
 export interface RunState {
   id: string;
   status: RunStatus;
@@ -321,6 +331,9 @@ export interface RunState {
   writeupError?: string;
   stopReason?: string;
   terminalReason?: TerminalReason;
+  /** Model that actually served this run (session override included) + gateway usage split. */
+  model?: { provider: string; id: string; baseUrl: string };
+  tokenUsage?: TokenUsageSummary;
   turns: number;
   toolCalls: number;
   imageObservations: number;

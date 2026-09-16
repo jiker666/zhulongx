@@ -815,6 +815,12 @@ export class XuanShuRuntime {
       await audit.append("run.error", { message: state.stopReason, providerError: state.providerError, terminalReason: state.terminalReason });
     } finally {
       options.signal?.removeEventListener("abort", abortRun);
+      const tokenUsage = gateway.routeUsage(runKey);
+      if (tokenUsage && tokenUsage.requests > 0) {
+        state.tokenUsage = tokenUsage;
+        state.model ??= { provider: modelConfig.provider, id: modelConfig.id, baseUrl: modelConfig.baseUrl };
+        await audit.append("model.usage_summary", tokenUsage);
+      }
       gateway.releaseRoute(runKey);
       this.overrides.permissionGate?.cancelSession?.(id);
       await toolSet.cleanup();

@@ -71,6 +71,7 @@ interface ModelRouteState {
   runKey: string;
   options: ModelRouteOptions;
   requestCount: number;
+  usage: UsageDetail;
 }
 
 interface MatchedRoute {
@@ -128,17 +129,50 @@ function anthropicContextView(body: Record<string, unknown>): ModelContextView {
   };
 }
 
+/** Provider usage split, kept per field so runs can report cache economics
+ * (Tsecbench-style accounting: the cache-read share dominates cheap-model runs). */
+export interface UsageDetail {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+}
+
+export interface UsageSummary extends UsageDetail {
+  requests: number;
+}
+
+function emptyUsage(): UsageDetail {
+  return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
+}
+
+function addUsage(target: UsageDetail, source: UsageDetail): void {
+  target.inputTokens += source.inputTokens;
+  target.outputTokens += source.outputTokens;
+  target.cacheReadTokens += source.cacheReadTokens;
+  target.cacheCreationTokens += source.cacheCreationTokens;
+}
+
 function extractJsonUsage(text: string): number | undefined {
+  const detail = extractJsonUsageDetail(text);
+  if (!detail) return undefined;
+  const tokens = detail.inputTokens + detail.outputTokens + detail.cacheReadTokens + detail.cacheCreationTokens;
+  return tokens > 0 ? tokens : undefined;
+}
+
+function extractJsonUsageDetail(text: string): UsageDetail | undefined {
   try {
     const body = JSON.parse(text) as { usage?: Record<string, unknown> };
     const usage = body.usage;
     if (!usage || typeof usage !== "object") return undefined;
     const readNumber = (value: unknown): number => (typeof value === "number" && Number.isFinite(value) ? value : 0);
-    const tokens = readNumber(usage.input_tokens)
-      + readNumber(usage.output_tokens)
-      + readNumber(usage.cache_read_input_tokens)
-      + readNumber(usage.cache_creation_input_tokens);
-    return tokens > 0 ? tokens : undefined;
+    const detail = {
+      inputTokens: readNumber(usage.input_tokens),
+      outputTokens: readNumber(usage.output_tokens),
+      cacheReadTokens: readNumber(usage.cache_read_input_tokens),
+      cacheCreationTokens: readNumber(usage.cache_creation_input_tokens),
+    };
+    return (detail.inputTokens + detail.outputTokens + detail.cacheReadTokens + detail.cacheCreationTokens) > 0 ? detail : undefined;
   } catch {
     return undefined;
   }
@@ -147,8 +181,7 @@ function extractJsonUsage(text: string): number | undefined {
 /** Incremental SSE scan that pulls provider usage out of a pass-through stream. */
 class SseUsageParser {
   private buffer = "";
-  private inputTokens = 0;
-  private outputTokens = 0;
+  private detail = emptyUsage();
 
   push(chunk: string): void {
     this.buffer += chunk;
@@ -165,8 +198,12 @@ class SseUsageParser {
   }
 
   totalTokens(): number | undefined {
-    const total = this.inputTokens + this.outputTokens;
+    const total = this.detail.inputTokens + this.detail.outputTokens + this.detail.cacheReadTokens + this.detail.cacheCreationTokens;
     return total > 0 ? total : undefined;
+  }
+
+  usageDetail(): UsageDetail | undefined {
+    return this.totalTokens() === undefined ? undefined : { ...this.detail };
   }
 
   private consumeLine(line: string): void {
@@ -182,12 +219,13 @@ class SseUsageParser {
     }
     if (event.type === "message_start" && event.message?.usage) {
       const usage = event.message.usage;
-      this.inputTokens = (typeof usage.input_tokens === "number" ? usage.input_tokens : 0)
-        + (typeof usage.cache_read_input_tokens === "number" ? usage.cache_read_input_tokens : 0)
-        + (typeof usage.cache_creation_input_tokens === "number" ? usage.cache_creation_input_tokens : 0);
+      const readNumber = (value: unknown): number => (typeof value === "number" && Number.isFinite(value) ? value : 0);
+      this.detail.inputTokens = readNumber(usage.input_tokens);
+      this.detail.cacheReadTokens = readNumber(usage.cache_read_input_tokens);
+      this.detail.cacheCreationTokens = readNumber(usage.cache_creation_input_tokens);
     } else if (event.type === "message_delta" && event.usage) {
       const output = typeof event.usage.output_tokens === "number" ? event.usage.output_tokens : 0;
-      this.outputTokens = Math.max(this.outputTokens, output);
+      this.detail.outputTokens = Math.max(this.detail.outputTokens, output);
     }
   }
 }
@@ -264,11 +302,18 @@ export class ModelGateway {
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
       throw new Error("Upstream baseUrl must use http or https");
     }
-    this.routes.set(runKey, { runKey, options, requestCount: 0 });
+    this.routes.set(runKey, { runKey, options, requestCount: 0, usage: emptyUsage() });
   }
 
   releaseRoute(runKey: string): void {
     this.routes.delete(runKey);
+  }
+
+  /** Accumulated provider usage for a live route; read before releaseRoute. */
+  routeUsage(runKey: string): UsageSummary | undefined {
+    const route = this.routes.get(runKey);
+    if (!route || route.requestCount === 0) return undefined;
+    return { ...route.usage, requests: route.requestCount };
   }
 
   async stop(): Promise<void> {
@@ -437,16 +482,20 @@ export class ModelGateway {
 
     const contentType = upstreamResponse.headers.get("content-type") ?? "";
     if (contentType.includes("text/event-stream") && upstreamResponse.body) {
-      await this.pipeStream(upstreamResponse, response, reservation.entryId);
+      await this.pipeStream(upstreamResponse, response, reservation.entryId, route);
       return;
     }
     const text = await upstreamResponse.text();
     response.end(text);
-    const usage = extractJsonUsage(text);
-    if (usage) this.gate.recordActualTokens(reservation.entryId, usage);
+    const usageDetail = extractJsonUsageDetail(text);
+    if (usageDetail) {
+      addUsage(route.usage, usageDetail);
+      const usage = usageDetail.inputTokens + usageDetail.outputTokens + usageDetail.cacheReadTokens + usageDetail.cacheCreationTokens;
+      this.gate.recordActualTokens(reservation.entryId, usage);
+    }
   }
 
-  private async pipeStream(upstream: Response, response: ServerResponse, entryId: string): Promise<void> {
+  private async pipeStream(upstream: Response, response: ServerResponse, entryId: string, route?: ModelRouteState): Promise<void> {
     const decoder = new TextDecoder();
     const usageParser = new SseUsageParser();
     const source = Readable.fromWeb(upstream.body as unknown as NodeWebReadableStream);
@@ -463,8 +512,12 @@ export class ModelGateway {
     } finally {
       response.end();
     }
-    const usage = usageParser.totalTokens();
-    if (usage) this.gate.recordActualTokens(entryId, usage);
+    const usageDetail = usageParser.usageDetail();
+    if (usageDetail) {
+      if (route) addUsage(route.usage, usageDetail);
+      const usage = usageDetail.inputTokens + usageDetail.outputTokens + usageDetail.cacheReadTokens + usageDetail.cacheCreationTokens;
+      this.gate.recordActualTokens(entryId, usage);
+    }
   }
 
   private sendJson(response: ServerResponse, status: number, value: unknown, emptyBody = false): void {

@@ -15,6 +15,8 @@ export interface PersistedRunSummary {
   toolCalls: number;
   lessons: number;
   terminalReason?: TerminalReason;
+  model?: { provider: string; id: string; baseUrl: string };
+  tokenUsage?: RunState["tokenUsage"];
   lineage?: RunLineage;
 }
 
@@ -31,6 +33,8 @@ export function projectRunSummary(state: RunState): PersistedRunSummary {
     toolCalls: state.toolCalls,
     lessons: state.lessons?.length ?? 0,
     ...(state.terminalReason ? { terminalReason: state.terminalReason } : {}),
+    ...(state.model ? { model: state.model } : {}),
+    ...(state.tokenUsage ? { tokenUsage: state.tokenUsage } : {}),
     ...(state.lineage ? { lineage: state.lineage } : {}),
   };
 }
@@ -62,5 +66,9 @@ export function isPersistedRunSummary(value: unknown): value is PersistedRunSumm
     && (summary.category === undefined || typeof summary.category === "string")
     && (summary.finishedAt === undefined || typeof summary.finishedAt === "string")
     && (summary.terminalReason === undefined || isTerminalReason(summary.terminalReason))
+    && (summary.model === undefined || (typeof summary.model === "object"
+      && typeof (summary.model as { id?: unknown }).id === "string"
+      && typeof (summary.model as { baseUrl?: unknown }).baseUrl === "string"))
+    && (summary.tokenUsage === undefined || (typeof summary.tokenUsage === "object" && Object.values(summary.tokenUsage as Record<string, unknown>).every((value) => Number.isFinite(value))))
     && (summary.lineage === undefined || isRunLineage(summary.lineage));
 }
