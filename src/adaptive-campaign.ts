@@ -232,7 +232,12 @@ function curationFromState(item: CampaignWorkItem, state: RunState, maxTextChars
     entries.push({ kind: "fact", claim: "Independent verification observed", evidence: [verification], confidence: 0.9 });
   }
   if (state.status !== "completed" && state.stopReason) {
-    entries.push({ kind: "dead-end", claim: `Current approach stopped: ${state.stopReason}`, evidence: [`run:${state.id}`], confidence: 0.8 });
+    entries.push({
+      kind: "dead-end",
+      claim: `Current approach stopped: ${state.stopReason}${state.terminalReason ? ` (terminal: ${state.terminalReason})` : ""}`,
+      evidence: [`run:${state.id}`],
+      confidence: state.terminalReason === "operator_abort" ? 0.5 : 0.8,
+    });
   }
   const summaryParts = [
     state.summary ? `公开结论：${state.summary}` : "本轮没有公开结论",

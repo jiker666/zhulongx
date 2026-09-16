@@ -1,4 +1,5 @@
-import type { RunLineage, RunState, RunStatus } from "./types.js";
+import { isTerminalReason } from "./terminal-reason.js";
+import type { RunLineage, RunState, RunStatus, TerminalReason } from "./types.js";
 
 export const RUN_SUMMARY_FILE = "summary.json";
 
@@ -13,6 +14,7 @@ export interface PersistedRunSummary {
   turns: number;
   toolCalls: number;
   lessons: number;
+  terminalReason?: TerminalReason;
   lineage?: RunLineage;
 }
 
@@ -28,6 +30,7 @@ export function projectRunSummary(state: RunState): PersistedRunSummary {
     turns: state.turns,
     toolCalls: state.toolCalls,
     lessons: state.lessons?.length ?? 0,
+    ...(state.terminalReason ? { terminalReason: state.terminalReason } : {}),
     ...(state.lineage ? { lineage: state.lineage } : {}),
   };
 }
@@ -58,5 +61,6 @@ export function isPersistedRunSummary(value: unknown): value is PersistedRunSumm
     && Number.isSafeInteger(summary.lessons)
     && (summary.category === undefined || typeof summary.category === "string")
     && (summary.finishedAt === undefined || typeof summary.finishedAt === "string")
+    && (summary.terminalReason === undefined || isTerminalReason(summary.terminalReason))
     && (summary.lineage === undefined || isRunLineage(summary.lineage));
 }

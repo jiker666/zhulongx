@@ -688,6 +688,7 @@ export class XuanShuRuntime {
     };
     const abortRun = () => {
       state.stopReason = "Run stopped by operator";
+      state.terminalReason ??= "operator_abort";
       session?.abort("Run stopped by operator");
     };
     options.signal?.addEventListener("abort", abortRun, { once: true });
@@ -782,17 +783,21 @@ export class XuanShuRuntime {
         if (state.status === "running") {
           if (result.aborted) {
             state.status = "aborted";
+            state.terminalReason = "operator_abort";
             state.stopReason ??= result.abortReason ?? "Run aborted";
           } else if (result.isError || result.subtype === "error_during_execution") {
             state.status = "failed";
+            state.terminalReason = "model_error";
             state.stopReason = result.errorMessage ?? "Model request failed";
             state.providerError = classifyProviderError(new Error(state.stopReason));
           } else if (result.stopReason === "max_tokens") {
             state.status = "failed";
+            state.terminalReason = "output_limit";
             state.stopReason = `Model exhausted the output token limit after ${lengthRecoveryAttempts} recovery attempt(s)`;
             state.summary = lastText;
           } else {
             state.status = "blocked";
+            state.terminalReason = "ended_without_finish";
             state.stopReason = "Agent ended without finish_task";
             if (lastText) state.summary = lastText;
           }
@@ -804,7 +809,10 @@ export class XuanShuRuntime {
       state.status = "failed";
       state.stopReason = error instanceof Error ? error.message : String(error);
       state.providerError = classifyProviderError(error);
-      await audit.append("run.error", { message: state.stopReason, providerError: state.providerError });
+      state.terminalReason = state.providerError.code === "aborted" ? "operator_abort"
+        : state.providerError.code === "unknown" ? "infrastructure_error"
+        : "model_error";
+      await audit.append("run.error", { message: state.stopReason, providerError: state.providerError, terminalReason: state.terminalReason });
     } finally {
       options.signal?.removeEventListener("abort", abortRun);
       gateway.releaseRoute(runKey);

@@ -1771,6 +1771,7 @@ export function createToolSet(context: ToolContext): ToolSet {
           state.submission = input.submission.trim();
         }
         state.stopReason = input.status === "completed" ? "Agent declared task complete" : "Agent reported a blocker";
+        state.terminalReason = input.status === "completed" ? "agent_completed" : "agent_blocked";
         state.phase = "done";
         await audit.append("run.finished_by_agent", input);
         return { ...textResult(input.summary, input), terminate: true };

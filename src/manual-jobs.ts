@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { RunState, TaskRequest } from "./types.js";
 import type { RunManager } from "./run-manager.js";
 import { SharedEvidenceBoard } from "./shared-evidence.js";
+import { isTransientTerminalReason } from "./terminal-reason.js";
 
 const MAX_TASKS = 20;
 const MAX_CONCURRENCY = 8;
@@ -130,6 +131,18 @@ export function isRetryableManualRunFailure(message: string | undefined): boolea
   return /(?:\b429\b|too\s*many\s*requests|rate\s*limit|\b5\d\d\b|econnreset|etimedout|fetch failed|socket hang up|connection error)/i.test(
     message ?? "",
   );
+}
+
+/**
+ * Retry decision for a settled run: prefer the structured terminal reason
+ * (transient model_error only) and fall back to the legacy stop-message
+ * regex for runs recorded before terminalReason existed. Blockers, budget
+ * exhaustion, and operator aborts are steady states — retrying them
+ * unchanged just reproduces the same outcome.
+ */
+export function shouldRetryRunFailure(state: Pick<RunState, "terminalReason" | "providerError" | "stopReason">): boolean {
+  if (state.terminalReason) return isTransientTerminalReason(state.terminalReason, state.providerError);
+  return isRetryableManualRunFailure(state.stopReason);
 }
 
 function taskPreview(task: string): string {
@@ -451,7 +464,7 @@ export class ManualJobManager {
                 const state = await this.dependencies.runManager.wait(runId);
                 task.runIds.delete(runId);
                 settled = { agent: 0, runId, state };
-                if (state.status === "failed" && attempts <= job.transientRetryLimit && isRetryableManualRunFailure(state.stopReason)) {
+                if (state.status === "failed" && attempts <= job.transientRetryLimit && shouldRetryRunFailure(state)) {
                   task.snapshot.error = `Transient model failure; retrying (${attempts}/${job.transientRetryLimit})`;
                   await (this.dependencies.delay ?? retryDelay)(Math.min(5_000 * 2 ** (attempts - 1), 60_000), job.controller.signal);
                   continue;

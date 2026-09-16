@@ -1,6 +1,21 @@
 import type { TSchema } from "typebox";
 
 export type RunStatus = "queued" | "running" | "completed" | "blocked" | "failed" | "aborted";
+
+/**
+ * Structured reason a run reached its terminal state. Coexists with the
+ * free-text stopReason: status stays comparable across history while
+ * operators and campaign layers branch on the reason (retry only transient
+ * model errors; treat blockers and budget exhaustion as steady states).
+ */
+export type TerminalReason =
+  | "agent_completed"
+  | "agent_blocked"
+  | "ended_without_finish"
+  | "output_limit"
+  | "model_error"
+  | "operator_abort"
+  | "infrastructure_error";
 export type RunPhase = "intake" | "planning" | "exploration" | "analysis" | "verification" | "reporting" | "done";
 export type ScopeMode = "observe" | "controlled";
 
@@ -305,6 +320,7 @@ export interface RunState {
   writeup?: string;
   writeupError?: string;
   stopReason?: string;
+  terminalReason?: TerminalReason;
   turns: number;
   toolCalls: number;
   imageObservations: number;

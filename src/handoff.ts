@@ -49,6 +49,6 @@ export function renderRunHandoff(state: RunState): string {
     "## Remaining risks",
     list(state.remainingRisks),
     "",
-    `Stop reason: ${clean(state.stopReason, 600) || "Not recorded"}`,
+    `Stop reason: ${clean(state.stopReason, 600) || "Not recorded"}${state.terminalReason ? ` (terminal: ${state.terminalReason})` : ""}`,
   ].join("\n").slice(0, 24_000) + "\n";
 }
