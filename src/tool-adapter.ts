@@ -4,6 +4,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { TSchema } from "typebox";
 import { z } from "zod";
 import type { AuditChain } from "./audit.js";
+import { RunObserver } from "./observer.js";
 import type { PermissionGate } from "./permissions.js";
 import type { PolicyEngine } from "./policy.js";
 import { sanitizeSecrets } from "./sanitize.js";
@@ -209,6 +210,7 @@ export function createToolCallPipeline(deps: ToolCallPipelineDeps): ToolCallPipe
   const { state, audit, policy, descriptors, webReasoning, emit } = deps;
   const toolRequestSequences = new Map<string, number>();
   const observedToolOutputs: Array<{ toolCallId: string; output: string }> = [];
+  const observer = new RunObserver(state, deps.runtime);
   let settled = false;
 
   return {
@@ -320,6 +322,11 @@ export function createToolCallPipeline(deps: ToolCallPipelineDeps): ToolCallPipe
         correlationId: toolCall.toolCallId,
         ...(toolRequestSequences.get(toolCall.toolCallId) !== undefined ? { parentSequence: toolRequestSequences.get(toolCall.toolCallId)! } : {}),
       });
+      // Record-only bypass observation: anomalies are noted, never gated.
+      for (const anomaly of observer.observe({ toolName: toolCall.toolName, args: toolCall.args, isError })) {
+        await audit.append("observer.anomaly", anomaly, { source: "orchestrator", actor: "run-observer", correlationId: toolCall.toolCallId });
+        await emit("observer.anomaly", { kind: anomaly.kind, detail: anomaly.detail, occurrences: anomaly.occurrences });
+      }
       if (!isError && !OBSERVATION_EXCLUDED_TOOLS.has(toolCall.toolName)) {
         const observation = JSON.stringify({ content: persistedContent, details: persistedDetails });
         if (observation) {

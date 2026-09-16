@@ -22,6 +22,7 @@ export interface PersistedRunSummary {
   lessons: number;
   terminalReason?: TerminalReason;
   verificationVerdict?: PersistedVerificationVerdict;
+  observerAnomalies?: number;
   model?: { provider: string; id: string; baseUrl: string };
   tokenUsage?: RunState["tokenUsage"];
   lineage?: RunLineage;
@@ -51,6 +52,7 @@ export function projectRunSummary(state: RunState): PersistedRunSummary {
       : {}),
     ...(state.model ? { model: state.model } : {}),
     ...(state.tokenUsage ? { tokenUsage: state.tokenUsage } : {}),
+    ...(state.observerAnomalies?.length ? { observerAnomalies: state.observerAnomalies.length } : {}),
     ...(state.lineage ? { lineage: state.lineage } : {}),
   };
 }
@@ -85,6 +87,7 @@ export function isPersistedRunSummary(value: unknown): value is PersistedRunSumm
     && (summary.verificationVerdict === undefined || (typeof summary.verificationVerdict === "object"
       && ["reproduced", "contradicted", "unverifiable"].includes((summary.verificationVerdict as { verdict?: unknown }).verdict as string)
       && Number.isSafeInteger((summary.verificationVerdict as { replayed?: unknown }).replayed)))
+    && (summary.observerAnomalies === undefined || Number.isSafeInteger(summary.observerAnomalies))
     && (summary.model === undefined || (typeof summary.model === "object"
       && typeof (summary.model as { id?: unknown }).id === "string"
       && typeof (summary.model as { baseUrl?: unknown }).baseUrl === "string"))

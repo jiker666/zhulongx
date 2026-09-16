@@ -313,6 +313,18 @@ export interface TokenUsageSummary {
   requests: number;
 }
 
+/** Record-only observer note (Manager/Solver/Observer architecture): a
+ * detected pathology the observer saw but deliberately did not act on. */
+export type ObserverAnomalyKind = "repeated_action" | "repeated_failure" | "repeated_read" | "checkpoint_gap";
+
+export interface ObserverAnomaly {
+  kind: ObserverAnomalyKind;
+  detail: string;
+  occurrences: number;
+  firstSeenAt: string;
+  lastSeenAt: string;
+}
+
 export interface RunState {
   id: string;
   status: RunStatus;
@@ -350,6 +362,8 @@ export interface RunState {
   /** Model that actually served this run (session override included) + gateway usage split. */
   model?: { provider: string; id: string; baseUrl: string };
   tokenUsage?: TokenUsageSummary;
+  /** Record-only notes from the bypass observer; never gates actions. */
+  observerAnomalies?: ObserverAnomaly[];
   turns: number;
   toolCalls: number;
   imageObservations: number;
