@@ -102,7 +102,7 @@ function buildTask(attemptId, problem, annexFiles) {
     lines.push(`远程环境(本题唯一授权测试目标,限时开放):${urls.join(", ")}(剩余约 ${Math.round((problem.container?.remaining_seconds ?? 3600) / 60)} 分钟)`);
     lines.push("平台约定:重托管题的 flag 由平台生成、只存在于远程环境内(常见 NSSCTF{uuid} 格式,拿到 shell 后 cat flag / cat /flag / env 常见可得)。flag 必须实际从远程环境读取;网络 writeup 里的历史 flag 属于原比赛环境,与本环境不同,不得采信或作为提交值。");
   } else {
-    lines.push("本题无远程容器,基于附件离线解题。若题面或附件引用了外部比赛或仓库,历史 writeup 的 flag 不可信(平台导入时可能重新生成),应以题面与附件的实际内容为准。");
+    lines.push("本题无远程容器,基于附件离线解题。离线附件题的 flag 保留原比赛包装、藏在题面或附件内容中:从附件实际解出的完整 flag(含其原始包装,如 FSCTF{...}、pctf{...}、flag{...})应原样提交,不要改写、不要重新包装、不要套 NSSCTF{} 外壳。若题面或附件引用了外部比赛或仓库,历史 writeup 的 flag 不可信(平台导入时可能重新生成),应以题面与附件的实际内容为准。");
   }
   if (annexFiles.length > 0) {
     lines.push(`附件(只读挂载):/workspace/input/arena/${attemptId}/ 下有 ${annexFiles.join(", ")}`);
