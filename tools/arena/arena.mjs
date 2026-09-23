@@ -140,26 +140,32 @@ async function fetchAttempt(minRemainingSeconds) {
 
 // Container URLs (and occasionally content) are provisioned asynchronously:
 // keep re-reading the attempt detail until the problem is actually solvable.
+// A pwn problem can ship its binary as an annex while the flag itself lives
+// only in the remote container — annex presence must NOT short-circuit the
+// wait when a container was promised (that mislabel cost two missed runs).
 async function waitForProvision(attemptId, problem, maxWaitMs) {
+  const urls = (candidate) => (Array.isArray(candidate?.container?.url) ? candidate.container.url : []);
   const material = (candidate) =>
-    (candidate.content ?? "").trim() !== "" || annexUrls(candidate.annex).length > 0
-    || (Array.isArray(candidate.container?.url) ? candidate.container.url.length : 0) > 0;
-  if (material(problem)) return problem;
-  // Provisioning can lag by many minutes (container created at attempt start but
-  // state 0 -> 4 with URL only minutes later). Declaring "no container" while
-  // container_enabled sends the agent down offline/writeup paths that cannot
-  // reach the platform-generated flag, so keep polling far longer in that case.
-  const budget = maxWaitMs ?? (problem.container_enabled ? 600_000 : 240_000);
-  const deadline = Date.now() + budget;
+    (candidate.content ?? "").trim() !== "" || annexUrls(candidate.annex).length > 0 || urls(candidate).length > 0;
+  const ready = (candidate) => material(candidate) && !(candidate.container_enabled && urls(candidate).length === 0);
+  if (ready(problem)) return problem;
+  // Provisioning has been observed to lag 24+ minutes behind attempt start;
+  // wait it out but keep enough of the 1h TTL for the run itself.
+  const deadline = Date.now() + (maxWaitMs ?? 1_800_000);
   while (Date.now() < deadline) {
-    await sleep(10_000);
+    await sleep(15_000);
     const detail = unwrap((await nss(`/attempt/${attemptId}/`)).json);
     const candidate = detail?.attempt?.problem ?? detail?.problem;
-    if (candidate && material(candidate)) {
+    if (candidate && ready(candidate)) {
       console.log(`[arena] provisioned after poll: urls=${JSON.stringify(candidate.container?.url ?? [])} content=${(candidate.content ?? "").length}B`);
       return candidate;
     }
-    console.log(`[arena] waiting for problem provisioning (content=${(candidate?.content ?? "").length}B urls=${(candidate?.container?.url ?? []).length})...`);
+    const remaining = detail?.attempt?.remaining_seconds;
+    if (typeof remaining === "number" && remaining < 1_200) {
+      console.warn(`[arena] only ${remaining}s left on the attempt; proceeding without a container`);
+      return candidate ?? problem;
+    }
+    console.log(`[arena] waiting for problem provisioning (content=${(candidate?.content ?? "").length}B annex=${annexUrls(candidate?.annex).length} urls=${urls(candidate).length})...`);
   }
   return problem;
 }
