@@ -294,9 +294,17 @@ async function cmdLoop(options) {
   let missesOnAttempt = 0;
   let consecutiveAbandons = 0;
   while (true) {
-    const detail = unwrap((await nss("/current/")).json);
-    const rating = detail?.agent?.rating ?? 0;
-    console.log(`[loop] ${new Date().toISOString()} agent rating ${rating} / target ${target} (solved ${detail?.agent?.solved_count ?? "?"})`);
+    let rating;
+    try {
+      const detail = unwrap((await nss("/current/")).json);
+      rating = detail?.agent?.rating ?? 0;
+      console.log(`[loop] ${new Date().toISOString()} agent rating ${rating} / target ${target} (solved ${detail?.agent?.solved_count ?? "?"})`);
+    } catch (error) {
+      // Transient network failures must not kill a multi-hour marathon.
+      console.warn(`[loop] agent-state fetch failed (${error?.message ?? error}); retrying in 30s`);
+      await sleep(30_000);
+      continue;
+    }
     if (rating >= target) { console.log("[loop] target reached — stopping"); return 0; }
     if (consecutiveAbandons >= 3) {
       console.warn("[loop] three fresh problems missed in a row — stopping for review");
@@ -314,15 +322,19 @@ async function cmdLoop(options) {
       missesOnAttempt++;
       console.warn(`[loop] no correct submission (miss ${missesOnAttempt} on this attempt)`);
       if (missesOnAttempt >= 2) {
-        const current = unwrap((await nss("/current/")).json);
-        const attempt = current?.attempt;
-        if (attempt && attempt.state_label === "active") {
-          console.log(`[loop] abandoning attempt ${attempt.id} after repeated misses`);
-          await nss(`/attempt/${attempt.id}/abandon/`, { method: "POST", body: "{}" });
-          await record({ attemptId: attempt.id, outcome: "loop-abandoned" });
+        try {
+          const current = unwrap((await nss("/current/")).json);
+          const attempt = current?.attempt;
+          if (attempt && attempt.state_label === "active") {
+            console.log(`[loop] abandoning attempt ${attempt.id} after repeated misses`);
+            await nss(`/attempt/${attempt.id}/abandon/`, { method: "POST", body: "{}" });
+            await record({ attemptId: attempt.id, outcome: "loop-abandoned" });
+          }
+          missesOnAttempt = 0;
+          consecutiveAbandons++;
+        } catch (error) {
+          console.warn(`[loop] abandon path failed (${error?.message ?? error}); will retry next pass`);
         }
-        missesOnAttempt = 0;
-        consecutiveAbandons++;
       }
     }
     await sleep(10_000);
