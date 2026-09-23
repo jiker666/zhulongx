@@ -239,7 +239,8 @@ async function cmdRun(options) {
   const runId = created.json.id;
   console.log(`[arena] xuanshu run ${runId} queued (log: workspace/arena/${attemptId}/task.txt)`);
 
-  const deadline = Date.now() + (options.maxMinutes ?? 45) * 60_000;
+  const runBudgetMs = Math.min(options.maxMinutes * 60_000, Math.max(attempt.remaining_seconds * 1000 - 120_000, 300_000));
+  const deadline = Date.now() + runBudgetMs;
   let terminal = null;
   while (Date.now() < deadline) {
     await sleep(15_000);
@@ -320,8 +321,16 @@ async function cmdLoop(options) {
     if (lastRunCorrect) { missesOnAttempt = 0; consecutiveAbandons = 0; }
     else {
       missesOnAttempt++;
-      console.warn(`[loop] no correct submission (miss ${missesOnAttempt} on this attempt)`);
-      if (missesOnAttempt >= 2) {
+      let attemptRemaining = null;
+      try {
+        const current = unwrap((await nss("/current/")).json);
+        attemptRemaining = current?.attempt?.remaining_seconds ?? null;
+      } catch { /* fetched again in the abandon path if needed */ }
+      // Retrying needs a real shot: a fresh run that cannot finish inside the
+      // attempt TTL is guaranteed waste — abandon and take a new problem.
+      const tooLate = typeof attemptRemaining === "number" && attemptRemaining < 1_500;
+      console.warn(`[loop] no correct submission (miss ${missesOnAttempt} on this attempt, ${attemptRemaining ?? "?"}s left${tooLate ? " — too late to retry" : ""})`);
+      if (missesOnAttempt >= 2 || tooLate) {
         try {
           const current = unwrap((await nss("/current/")).json);
           const attempt = current?.attempt;
