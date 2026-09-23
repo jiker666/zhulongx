@@ -244,7 +244,15 @@ async function cmdRun(options) {
   let terminal = null;
   while (Date.now() < deadline) {
     await sleep(15_000);
-    const snapshot = await xuanshu(`/v1/runs/${runId}`);
+    let snapshot;
+    try {
+      snapshot = await xuanshu(`/v1/runs/${runId}`);
+    } catch (error) {
+      // A slow poll response must not abort the whole run watch — the run
+      // itself is fine server-side; just try again on the next tick.
+      console.warn(`[arena] poll ${runId} failed (${error?.message ?? error}); continuing`);
+      continue;
+    }
     const body = snapshot.json ?? {};
     const status = body.state?.status ?? body.status;
     if (snapshot.status !== 200 || !status) {
@@ -311,7 +319,7 @@ async function cmdLoop(options) {
       console.warn("[loop] three fresh problems missed in a row — stopping for review");
       return 2;
     }
-    await ensureModel();
+    try { await ensureModel(); } catch (error) { console.warn(`[loop] ensureModel failed (${error?.message ?? error})`); }
     lastRunCorrect = false;
     try {
       await cmdRun(options);
