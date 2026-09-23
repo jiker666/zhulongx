@@ -100,8 +100,9 @@ function buildTask(attemptId, problem, annexFiles) {
   const urls = Array.isArray(problem.container?.url) ? problem.container.url : [];
   if (problem.container_enabled && urls.length > 0) {
     lines.push(`远程环境(本题唯一授权测试目标,限时开放):${urls.join(", ")}(剩余约 ${Math.round((problem.container?.remaining_seconds ?? 3600) / 60)} 分钟)`);
+    lines.push("平台约定:重托管题的 flag 由平台生成、只存在于远程环境内(常见 NSSCTF{uuid} 格式,拿到 shell 后 cat flag / cat /flag / env 常见可得)。flag 必须实际从远程环境读取;网络 writeup 里的历史 flag 属于原比赛环境,与本环境不同,不得采信或作为提交值。");
   } else {
-    lines.push("本题无远程容器,基于附件离线解题。");
+    lines.push("本题无远程容器,基于附件离线解题。若题面或附件引用了外部比赛或仓库,历史 writeup 的 flag 不可信(平台导入时可能重新生成),应以题面与附件的实际内容为准。");
   }
   if (annexFiles.length > 0) {
     lines.push(`附件(只读挂载):/workspace/input/arena/${attemptId}/ 下有 ${annexFiles.join(", ")}`);
@@ -139,12 +140,17 @@ async function fetchAttempt(minRemainingSeconds) {
 
 // Container URLs (and occasionally content) are provisioned asynchronously:
 // keep re-reading the attempt detail until the problem is actually solvable.
-async function waitForProvision(attemptId, problem, maxWaitMs = 240_000) {
+async function waitForProvision(attemptId, problem, maxWaitMs) {
   const material = (candidate) =>
     (candidate.content ?? "").trim() !== "" || annexUrls(candidate.annex).length > 0
     || (Array.isArray(candidate.container?.url) ? candidate.container.url.length : 0) > 0;
   if (material(problem)) return problem;
-  const deadline = Date.now() + maxWaitMs;
+  // Provisioning can lag by many minutes (container created at attempt start but
+  // state 0 -> 4 with URL only minutes later). Declaring "no container" while
+  // container_enabled sends the agent down offline/writeup paths that cannot
+  // reach the platform-generated flag, so keep polling far longer in that case.
+  const budget = maxWaitMs ?? (problem.container_enabled ? 600_000 : 240_000);
+  const deadline = Date.now() + budget;
   while (Date.now() < deadline) {
     await sleep(10_000);
     const detail = unwrap((await nss(`/attempt/${attemptId}/`)).json);
