@@ -15,6 +15,8 @@ const PLAYBOOKS: Record<CtfSkillCategory, string[]> = {
     "Record architecture, ABI, protections, symbols/imports, input primitives, exact buffer geometry, and service synchronization before choosing an exploit class.",
     "Derive offsets and addresses from the supplied binary or a reproducible crash; never use guessed offsets, gadgets, libc builds, or newline behavior.",
     "Prove the smallest primitive locally, then keep payload construction separate from the scoped remote session and capture the exact remote response.",
+    "When hijacking a printf-family call to system via GOT overwrite, the hijacked call executes system(buf) with buf being the very input string that performed the writes: make the payload double as the command (leading 'sh #' style bytes) or arrange for the argument register to point at a stored command string at call time.",
+    "A control-flow hijack that verifies by readback but yields no observable output is usually a silent crash or closed stdout, not a failed overwrite: check 16-byte stack alignment before the target (insert a plain ret gadget), and probe with a stderr side-channel (command >&2) before concluding the primitive is unusable.",
     "If the remote endpoint or required runtime is absent, retain the verified offline exploit artifact and report an infrastructure blocker instead of scanning for a host.",
   ],
   crypto: [
