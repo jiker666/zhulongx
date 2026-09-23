@@ -66,4 +66,14 @@ describe("DurableWorkflowStore", () => {
     const worker = new BoundedWorkflowWorker(value, { run: async (_workflow, current) => ({ status: "succeeded", summary: current.id }) }, { concurrency: 2, leaseMs: 500, idlePollMs: 10 }); worker.start();
     await expect.poll(async () => (await value.get(workflow.id))?.status).toBe("succeeded"); await worker.close();
   });
+
+  it("recovers from a truncated store file instead of throwing", async () => {
+    const value = await store(); await value.create({ name: "trunc", budget, nodes: [node("a")] });
+    const { writeFile, readdir } = await import("node:fs/promises");
+    await writeFile(value.path, "");
+    const reopened = new DurableWorkflowStore(join(value.path, ".."));
+    expect((await reopened.snapshot()).workflows).toEqual([]);
+    const quarantined = (await readdir(join(value.path, ".."))).filter((name) => name.startsWith("workflows.json.corrupt-"));
+    expect(quarantined).toHaveLength(1);
+  });
 });

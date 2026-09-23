@@ -293,6 +293,18 @@ export class DurableWorkflowStore {
   private event(state: WorkflowState, workflowId: string, type: string, nodeId?: string, detail?: string): void { state.events.push({ id: randomUUID(), workflowId, type, ...(nodeId ? { nodeId } : {}), ...(detail ? { detail: bounded(detail, 500) } : {}), createdAt: now() }); state.events = state.events.slice(-this.limits.maxEvents); }
 
   private async mutate<T>(operation: (state: WorkflowState) => T): Promise<T> { let result!: T; const pending = this.queue.then(async () => { const state = await this.read(); result = operation(state); await this.write(state); }); this.queue = pending.then(() => undefined, () => undefined); await pending; return result; }
-  private async read(): Promise<WorkflowState> { try { const value = JSON.parse(await readFile(this.path, "utf8")) as WorkflowState; return { version: 1, workflows: value.workflows ?? [], events: value.events ?? [] }; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return { version: 1, workflows: [], events: [] }; throw error; } }
+  private async read(): Promise<WorkflowState> {
+    try { const value = JSON.parse(await readFile(this.path, "utf8")) as WorkflowState; return { version: 1, workflows: value.workflows ?? [], events: value.events ?? [] }; }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return { version: 1, workflows: [], events: [] };
+      // A truncated store (e.g. zero-byte file left by an unclean shutdown) must not
+      // crash-loop the whole API process: quarantine the file and start from empty state.
+      if (error instanceof SyntaxError) {
+        await rename(this.path, `${this.path}.corrupt-${randomUUID()}`).catch(() => {});
+        return { version: 1, workflows: [], events: [] };
+      }
+      throw error;
+    }
+  }
   private async write(state: WorkflowState): Promise<void> { await mkdir(dirname(this.path), { recursive: true }); const temporary = `${this.path}.${randomUUID()}.tmp`; try { await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 }); await rename(temporary, this.path); } finally { await rm(temporary, { force: true }); } }
 }

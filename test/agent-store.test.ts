@@ -66,4 +66,18 @@ describe("DurableAgentStore", () => {
     const claimed = await value.claimNext("worker", 5_000);
     await expect(value.settleTask({ taskId: task.id, workerId: "worker", generation: claimed!.leaseGeneration, status: "succeeded", summary: "too costly", tokensUsed: 11 })).rejects.toThrow("provider budget");
   });
+
+  it("recovers from a truncated store file instead of throwing", async () => {
+    const first = await store();
+    await first.createAgent({ purpose: "addressable", profileId: "general" });
+    const { writeFile, readdir } = await import("node:fs/promises");
+    await writeFile(first.path, "");
+    const reopened = new DurableAgentStore(join(first.path, ".."));
+    const snapshot = await reopened.snapshot();
+    expect(snapshot.agents).toEqual([]);
+    const quarantined = (await readdir(join(first.path, ".."))).filter((name) => name.startsWith("agents.json.corrupt-"));
+    expect(quarantined).toHaveLength(1);
+    const after = await reopened.createAgent({ purpose: "addressable", profileId: "general" });
+    expect((await reopened.snapshot()).agents.map((item) => item.id)).toEqual([after.id]);
+  });
 });

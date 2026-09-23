@@ -311,7 +311,16 @@ export class DurableAgentStore {
 
   private async read(): Promise<AgentStoreState> {
     try { const value = JSON.parse(await readFile(this.path, "utf8")) as AgentStoreState; return { version: 1, agents: value.agents ?? [], tasks: value.tasks ?? [], results: value.results ?? [], messages: value.messages ?? [], events: value.events ?? [] }; }
-    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return { version: 1, agents: [], tasks: [], results: [], messages: [], events: [] }; throw error; }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return { version: 1, agents: [], tasks: [], results: [], messages: [], events: [] };
+      // A truncated store (e.g. zero-byte file left by an unclean shutdown) must not
+      // crash-loop the whole API process: quarantine the file and start from empty state.
+      if (error instanceof SyntaxError) {
+        await rename(this.path, `${this.path}.corrupt-${randomUUID()}`).catch(() => {});
+        return { version: 1, agents: [], tasks: [], results: [], messages: [], events: [] };
+      }
+      throw error;
+    }
   }
 
   private async write(state: AgentStoreState): Promise<void> {
