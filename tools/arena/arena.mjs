@@ -175,6 +175,20 @@ async function submitFlag(attemptId, flag) {
   return result.json;
 }
 
+// Model settings are session-scoped in the API container; re-assert them each
+// iteration so an API restart mid-marathon cannot silently break every run.
+async function ensureModel() {
+  const apiKey = process.env.BIGMODEL_API_KEY;
+  if (!apiKey) return;
+  const result = await xuanshu("/v1/settings/model", {
+    method: "POST",
+    body: JSON.stringify({ modelId: process.env.ARENA_MODEL_ID ?? "glm-5.3", apiKey, baseUrl: process.env.BIGMODEL_BASE_URL ?? "https://open.bigmodel.cn/api/anthropic", reasoning: true }),
+  });
+  if (result.status >= 300) console.warn(`[arena] ensureModel -> ${result.status}`);
+}
+
+let lastRunCorrect = false;
+
 async function cmdRun(options) {
   if (!NSS_TOKEN) die("NSS_AGENT_TOKEN missing in .env");
   if (!SERVER_TOKEN) die("XUANSHU_SERVER_TOKEN missing in .env");
@@ -244,6 +258,7 @@ async function cmdRun(options) {
 
   if (terminal.status === "completed" && terminal.submission) {
     const verdict = await submitFlag(attemptId, terminal.submission);
+    lastRunCorrect = verdict?.data?.correct === true;
     await record({ attemptId, runId, type: problem.type_label, rating: problem.rating, outcome: "submitted", runStatus: terminal.status, submission: terminal.submission, verdict });
     return 0;
   }
@@ -263,11 +278,57 @@ async function cmdStats() {
   return 0;
 }
 
+async function cmdLoop(options) {
+  if (!NSS_TOKEN) die("NSS_AGENT_TOKEN missing in .env");
+  if (!SERVER_TOKEN) die("XUANSHU_SERVER_TOKEN missing in .env");
+  const target = options.target ?? 3000;
+  // Circuit breakers: one retry on a missed attempt (next/ reuses it), then
+  // abandon; three fresh problems missed in a row means the agent is out of
+  // its depth and grinding on would just burn rating — stop and report.
+  let missesOnAttempt = 0;
+  let consecutiveAbandons = 0;
+  while (true) {
+    const detail = unwrap((await nss("/current/")).json);
+    const rating = detail?.agent?.rating ?? 0;
+    console.log(`[loop] ${new Date().toISOString()} agent rating ${rating} / target ${target} (solved ${detail?.agent?.solved_count ?? "?"})`);
+    if (rating >= target) { console.log("[loop] target reached — stopping"); return 0; }
+    if (consecutiveAbandons >= 3) {
+      console.warn("[loop] three fresh problems missed in a row — stopping for review");
+      return 2;
+    }
+    await ensureModel();
+    lastRunCorrect = false;
+    try {
+      await cmdRun(options);
+    } catch (error) {
+      console.warn(`[loop] run crashed: ${error?.message ?? error}`);
+    }
+    if (lastRunCorrect) { missesOnAttempt = 0; consecutiveAbandons = 0; }
+    else {
+      missesOnAttempt++;
+      console.warn(`[loop] no correct submission (miss ${missesOnAttempt} on this attempt)`);
+      if (missesOnAttempt >= 2) {
+        const current = unwrap((await nss("/current/")).json);
+        const attempt = current?.attempt;
+        if (attempt && attempt.state_label === "active") {
+          console.log(`[loop] abandoning attempt ${attempt.id} after repeated misses`);
+          await nss(`/attempt/${attempt.id}/abandon/`, { method: "POST", body: "{}" });
+          await record({ attemptId: attempt.id, outcome: "loop-abandoned" });
+        }
+        missesOnAttempt = 0;
+        consecutiveAbandons++;
+      }
+    }
+    await sleep(10_000);
+  }
+}
+
 function usage() {
   console.log(`Usage:
   node tools/arena/arena.mjs current
   node tools/arena/arena.mjs next
   node tools/arena/arena.mjs run [--max-minutes 45]
+  node tools/arena/arena.mjs loop [--target 3000] [--max-minutes 40]
   node tools/arena/arena.mjs submit <attemptId> <flag>
   node tools/arena/arena.mjs abandon <attemptId>
   node tools/arena/arena.mjs stats`);
@@ -275,7 +336,11 @@ function usage() {
 
 async function main() {
   const [command, ...rest] = process.argv.slice(2);
-  const options = { maxMinutes: Number(process.argv.find((_, index) => process.argv[index - 1] === "--max-minutes")) || 45 };
+  const arg = (name, fallback) => {
+    const index = process.argv.indexOf(`--${name}`);
+    return index > 0 && process.argv[index + 1] ? process.argv[index + 1] : fallback;
+  };
+  const options = { maxMinutes: Number(arg("max-minutes", 40)) || 40, target: Number(arg("target", 3000)) || 3000 };
   switch (command) {
     case "current": {
       const result = await nss("/current/");
@@ -288,6 +353,7 @@ async function main() {
       return 0;
     }
     case "run": return cmdRun(options);
+    case "loop": return cmdLoop(options);
     case "submit": {
       const [attemptId, flag] = rest;
       if (!attemptId || !flag) die("submit requires <attemptId> <flag>");
