@@ -127,13 +127,21 @@ async function record(entry) {
 async function fetchAttempt(minRemainingSeconds) {
   let payload = unwrap((await nss("/next/", { method: "POST", body: "{}" })).json);
   let attempt = payload?.attempt;
-  if (!attempt) die(`next/ returned no attempt: ${JSON.stringify(payload).slice(0, 400)}`);
+  if (!attempt) {
+    // Abandoning early puts the agent on a cooldown; surface the wait so the
+    // caller can back off instead of dying.
+    const retryAfter = Number(payload?.retry_after_seconds ?? 0);
+    throw Object.assign(new Error(`next/ returned no attempt: ${JSON.stringify(payload).slice(0, 300)}`), { retryAfter });
+  }
   if ((attempt.remaining_seconds ?? 3600) < minRemainingSeconds) {
     console.log(`[arena] attempt ${attempt.id} has only ${attempt.remaining_seconds}s left; abandoning and refetching`);
     await nss(`/attempt/${attempt.id}/abandon/`, { method: "POST", body: "{}" });
     payload = unwrap((await nss("/next/", { method: "POST", body: "{}" })).json);
     attempt = payload?.attempt;
-    if (!attempt) die(`next/ retry returned no attempt: ${JSON.stringify(payload).slice(0, 400)}`);
+    if (!attempt) {
+      const retryAfter = Number(payload?.retry_after_seconds ?? 0);
+      throw Object.assign(new Error(`next/ retry returned no attempt: ${JSON.stringify(payload).slice(0, 300)}`), { retryAfter });
+    }
   }
   return { payload, attempt };
 }
@@ -186,11 +194,15 @@ async function submitFlag(attemptId, flag) {
 async function ensureModel() {
   const apiKey = process.env.BIGMODEL_API_KEY;
   if (!apiKey) return;
-  const result = await xuanshu("/v1/settings/model", {
-    method: "POST",
-    body: JSON.stringify({ modelId: process.env.ARENA_MODEL_ID ?? "glm-5.3", apiKey, baseUrl: process.env.BIGMODEL_BASE_URL ?? "https://open.bigmodel.cn/api/anthropic", reasoning: true }),
-  });
-  if (result.status >= 300) console.warn(`[arena] ensureModel -> ${result.status}`);
+  try {
+    const result = await xuanshu("/v1/settings/model", {
+      method: "POST",
+      body: JSON.stringify({ modelId: process.env.ARENA_MODEL_ID ?? "glm-5.3", apiKey, baseUrl: process.env.BIGMODEL_BASE_URL ?? "https://open.bigmodel.cn/api/anthropic", reasoning: true }),
+    });
+    if (result.status >= 300) console.warn(`[arena] ensureModel -> ${result.status}`);
+  } catch (error) {
+    console.warn(`[arena] ensureModel failed (${error?.message ?? error})`);
+  }
 }
 
 let lastRunCorrect = false;
@@ -315,16 +327,30 @@ async function cmdLoop(options) {
       continue;
     }
     if (rating >= target) { console.log("[loop] target reached — stopping"); return 0; }
-    if (consecutiveAbandons >= 3) {
-      console.warn("[loop] three fresh problems missed in a row — stopping for review");
+    if (consecutiveAbandons >= 6) {
+      console.warn("[loop] six fresh problems missed in a row — stopping for review");
       return 2;
     }
-    try { await ensureModel(); } catch (error) { console.warn(`[loop] ensureModel failed (${error?.message ?? error})`); }
+    if (consecutiveAbandons >= 3) {
+      // Miss streaks are as often infra weather (VM bounces, API wedges) as
+      // capability gaps — breathe for 10 minutes before burning more attempts.
+      console.warn("[loop] three fresh problems missed in a row — pausing 10 minutes");
+      await sleep(600_000);
+      consecutiveAbandons = 0;
+    }
+    await ensureModel();
     lastRunCorrect = false;
     try {
       await cmdRun(options);
     } catch (error) {
-      console.warn(`[loop] run crashed: ${error?.message ?? error}`);
+      const retryAfter = Number(error?.retryAfter ?? 0);
+      if (retryAfter > 0) {
+        console.warn(`[loop] arena cooldown: waiting ${retryAfter + 5}s before refetching`);
+        await sleep((retryAfter + 5) * 1000);
+        continue;
+      }
+      console.warn(`[loop] run crashed: ${error?.message ?? error}; pausing 60s`);
+      await sleep(60_000);
     }
     if (lastRunCorrect) { missesOnAttempt = 0; consecutiveAbandons = 0; }
     else {
