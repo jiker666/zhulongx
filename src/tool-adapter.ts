@@ -209,7 +209,7 @@ export interface ToolCallPipeline {
 export function createToolCallPipeline(deps: ToolCallPipelineDeps): ToolCallPipeline {
   const { state, audit, policy, descriptors, webReasoning, emit } = deps;
   const toolRequestSequences = new Map<string, number>();
-  const observedToolOutputs: Array<{ toolCallId: string; output: string }> = [];
+  const observedToolOutputs: Array<{ toolCallId: string; output: string; args: string }> = [];
   const observer = new RunObserver(state, deps.runtime);
   let settled = false;
 
@@ -234,6 +234,9 @@ export function createToolCallPipeline(deps: ToolCallPipelineDeps): ToolCallPipe
         const candidateOutputs = candidate
           ? observedToolOutputs.filter((item) => item.output.includes(candidate)).map((item) => item.output)
           : [];
+        const groundingCalls = candidate
+          ? observedToolOutputs.filter((item) => item.output.includes(candidate))
+          : [];
         const validation = validateSubmission({
           policy: deps.submissionPolicy,
           status: input.status === "completed" ? "completed" : "blocked",
@@ -242,6 +245,8 @@ export function createToolCallPipeline(deps: ToolCallPipelineDeps): ToolCallPipe
           independentObservedOutputs: candidateOutputs.slice(1),
           verification,
           independentlyVerified: input.independentlyVerified === true,
+          groundingToolCallIds: groundingCalls.map((item) => item.toolCallId),
+          groundingCallArgs: groundingCalls.map((item) => item.args),
         });
         state.submissionValidation = validation;
         await audit.append("submission.validation", validation, { source: "system", actor: "submission-gate", correlationId: toolCall.toolCallId, parentSequence: requested.sequence });
@@ -330,7 +335,7 @@ export function createToolCallPipeline(deps: ToolCallPipelineDeps): ToolCallPipe
       if (!isError && !OBSERVATION_EXCLUDED_TOOLS.has(toolCall.toolName)) {
         const observation = JSON.stringify({ content: persistedContent, details: persistedDetails });
         if (observation) {
-          observedToolOutputs.push({ toolCallId: toolCall.toolCallId, output: observation.slice(0, 12_000) });
+          observedToolOutputs.push({ toolCallId: toolCall.toolCallId, output: observation.slice(0, 12_000), args: JSON.stringify(toolCall.args ?? {}).slice(0, 12_000) });
           if (observedToolOutputs.length > 32) observedToolOutputs.shift();
         }
       }

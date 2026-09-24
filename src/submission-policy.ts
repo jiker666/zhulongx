@@ -11,6 +11,10 @@ export interface SubmissionValidationInput {
   verification: readonly string[];
   independentlyVerified: boolean;
   checkedAt?: string;
+  /** Distinct tool-call ids whose outputs contain the candidate (grounding diversity). */
+  groundingToolCallIds?: readonly string[];
+  /** Arguments (JSON) of the grounding tool calls, to detect echo-grounding. */
+  groundingCallArgs?: readonly string[];
 }
 
 const IDENTIFIER_ONLY = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -109,6 +113,21 @@ export function validateSubmission(input: SubmissionValidationInput): Submission
   const conflicts = conflictingVariants(candidate, input.observedOutputs);
   if (conflicts.length > 0 && !conflicts.every((variant) => input.verification.some((item) => item.includes(variant)))) {
     return result(input, "pending", `Near-duplicate flag-like variants were also observed in tool outputs (${conflicts.join(" | ")}). Two decodes diverged: re-derive the value deterministically from the original artifact bytes, identify which variant the raw evidence supports, and address every listed variant in verification before submitting.`, true, false);
+  }
+  // A flag-shaped answer must survive its own production: grounded only by tool
+  // calls whose inputs already contained the candidate is an echo, not evidence,
+  // and a single grounding call cannot distinguish a corrupted literal in a
+  // hand-written script from a real derivation off the artifact bytes.
+  if (/[{][^{}]{4,}[}]/.test(candidate) || candidate.length >= 15) {
+    const echoGroundedOnly = (input.groundingCallArgs?.length ?? 0) > 0
+      && input.groundingCallArgs!.every((args) => args.includes(candidate));
+    if (echoGroundedOnly) {
+      return result(input, "pending", "The candidate is grounded only by tool calls whose own inputs already contained it (an echo). Re-derive the value deterministically from the original artifact bytes in a fresh script and submit that output's exact string.", true, false);
+    }
+    const distinctGroundingCalls = new Set(input.groundingToolCallIds ?? []).size;
+    if (input.groundingToolCallIds !== undefined && distinctGroundingCalls < 2) {
+      return result(input, "pending", "The candidate was observed in only one tool call, which cannot distinguish a corrupted transcription inside a hand-written script from a real derivation. Re-run the deterministic derivation as a separate successful tool call and submit the exact string it prints.", true, false);
+    }
   }
   if (!input.independentlyVerified) return result(input, "pending", "The candidate is grounded but was not independently verified.", true, false);
   const independentOutputs = input.independentObservedOutputs ?? input.observedOutputs;
