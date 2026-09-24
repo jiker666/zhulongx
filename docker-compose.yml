@@ -11,6 +11,11 @@ services:
     environment:
       XUANSHU_MODEL_API_KEY: ${XUANSHU_MODEL_API_KEY:-}
       XUANSHU_SERVER_TOKEN: ${XUANSHU_SERVER_TOKEN:?set XUANSHU_SERVER_TOKEN}
+      # The SDK CLI hard-fails a run when a single model response exceeds its
+      # 32k-token output cap (observed: a pwn s1 turn dumping binary content
+      # inline, run died at 16 turns). Raise the ceiling; env propagates to the
+      # CLI through buildAgentSubprocessEnv's process.env spread.
+      CLAUDE_CODE_MAX_OUTPUT_TOKENS: "64000"
     volumes:
       - ./workspace:/workspace/input:ro
       - xuanshu-work:/workspace/work
