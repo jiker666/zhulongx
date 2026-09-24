@@ -221,6 +221,9 @@ async function waitForProvision(attemptId, problem, maxWaitMs) {
     }
     console.log(`[arena] waiting for problem provisioning (content=${(candidate?.content ?? "").length}B annex=${annexUrls(candidate?.annex).length} urls=${urls(candidate).length})...`);
   }
+  // Deadline expiry is otherwise silent and reads as a provisioning success
+  // in the log; the caller decides what to do with the un-materialized problem.
+  console.warn(`[arena] provisioning wait expired without material (content=${(problem.content ?? "").length}B annex=${annexUrls(problem.annex).length} urls=${urls(problem).length})`);
   return problem;
 }
 
@@ -262,9 +265,15 @@ async function cmdRun(options) {
   const attemptId = attempt.id;
   lastRunAttemptId = attemptId;
   let problem = await waitForProvision(attemptId, attempt.problem);
-  if ((problem.content ?? "").trim() === "" && annexUrls(problem.annex).length === 0
-      && (Array.isArray(problem.container?.url) ? problem.container.url.length : 0) === 0) {
-    console.log(`[arena] attempt ${attemptId} never received any problem material; abandoning`);
+  const materialUrls = Array.isArray(problem.container?.url) ? problem.container.url : [];
+  const hasAnnex = annexUrls(problem.annex).length > 0;
+  // A container challenge whose app never started (container_enabled with the
+  // container record dead — create_date null, no urls for the whole wait) is
+  // unsolvable from the title text alone; recycling the attempt immediately
+  // beats burning a 52-minute run on nothing (9498).
+  const containerNeverCame = problem.container_enabled === true && materialUrls.length === 0 && !hasAnnex;
+  if (((problem.content ?? "").trim() === "" && !hasAnnex && materialUrls.length === 0) || containerNeverCame) {
+    console.log(`[arena] attempt ${attemptId} ${containerNeverCame ? "promised a container that never provisioned" : "never received any problem material"}; abandoning`);
     await nss(`/attempt/${attemptId}/abandon/`, { method: "POST", body: "{}" });
     await record({ attemptId, outcome: "empty-problem-abandoned" });
     return 2;
