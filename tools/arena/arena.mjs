@@ -62,7 +62,7 @@ async function xuanshu(path, options = {}) {
   return fetchJson(`${XUANSHU_BASE}${path}`, {
     ...options,
     headers: { authorization: `Bearer ${SERVER_TOKEN}`, ...(options.headers ?? {}) },
-  }, 15_000);
+  }, 45_000);
 }
 
 function annexUrls(annex) {
