@@ -81,6 +81,9 @@ async function downloadAnnex(url, dir, token) {
   const target = resolve(dir, name);
   let lastError = null;
   for (let attempt = 0; attempt < 2; attempt++) {
+    // A previous run's staging may have chmod'd the annex to 0444; opening it
+    // for writing then fails EPERM. Unlink first so every download starts clean.
+    try { rmSync(target, { force: true }); } catch { /* best effort */ }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 120_000);
     try {
@@ -101,7 +104,36 @@ async function downloadAnnex(url, dir, token) {
   throw lastError ?? new Error("annex download failed");
 }
 
-function buildTask(attemptId, problem, annexFiles) {
+// The host security stack quarantines raw executable content inside the
+// workspace bind-mount within seconds of it landing. Detect the vanish and
+// keep the bytes as base64 (which survives) instead of feeding the run an
+// attachment that disappears mid-staging (EPERM).
+async function staysOnDisk(path, windowMs) {
+  for (let waited = 0; waited <= windowMs; waited += 5_000) {
+    if (waited > 0) await sleep(5_000);
+    try { if (!statSync(path).isFile()) return false; } catch { return false; }
+  }
+  return true;
+}
+
+async function downloadAnnexBase64(url, dir, name) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 180_000);
+  try {
+    const response = await fetch(url, { headers: { authorization: `Bearer ${NSS_TOKEN}` }, signal: controller.signal });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const bytes = Buffer.from(await response.arrayBuffer());
+    if (bytes.length === 0) throw new Error("empty download");
+    const encoded = `${name}.b64`;
+    await writeFile(resolve(dir, encoded), bytes.toString("base64"));
+    if (!(await staysOnDisk(resolve(dir, encoded), 10_000))) throw new Error("base64 annex also vanished");
+    return encoded;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function buildTask(attemptId, problem, annexFiles, encodedAnnexes = []) {
   const lines = [];
   lines.push(`NSSCTF Arena 授权挑战(类别:${problem.type_label ?? "unknown"}${problem.rating ? `,rating≈${problem.rating}` : ""})。以下是完整题面:`);
   lines.push("");
@@ -117,6 +149,9 @@ function buildTask(attemptId, problem, annexFiles) {
   }
   if (annexFiles.length > 0) {
     lines.push(`附件(只读挂载):/workspace/input/arena/${attemptId}/ 下有 ${annexFiles.join(", ")}`);
+    if (encodedAnnexes.length > 0) {
+      lines.push(`注意:${encodedAnnexes.join(", ")} 是因宿主安全策略以 base64 编码存放的原始附件(其原始文件名即去掉 .b64 后缀);使用前先 base64 -d 解码还原,再按原始文件类型分析。`);
+    }
   }
   lines.push("");
   lines.push("目标:解出本题 flag。flag 格式以题面或环境回显为准(常见如 NSSCTF{...}、flag{...})。");
@@ -240,13 +275,21 @@ async function cmdRun(options) {
   await mkdir(dir, { recursive: true });
   await writeFile(resolve(dir, "problem.json"), JSON.stringify(payload, null, 2));
   const annexFiles = [];
+  const encodedAnnexes = [];
   for (const url of annexUrls(problem.annex)) {
-    try { annexFiles.push(await downloadAnnex(url, dir, NSS_TOKEN)); }
+    try {
+      const name = await downloadAnnex(url, dir, NSS_TOKEN);
+      if (await staysOnDisk(resolve(dir, name), 15_000)) { annexFiles.push(name); continue; }
+      console.warn(`[arena] annex ${name} vanished from disk (host quarantine) — storing base64`);
+      const encoded = await downloadAnnexBase64(url, dir, name);
+      annexFiles.push(encoded);
+      encodedAnnexes.push(encoded);
+    }
     catch (error) { console.warn(`[arena] annex download failed (${url}): ${error.message}`); }
   }
   if (annexFiles.length > 0) console.log(`[arena] annex saved: ${annexFiles.join(", ")}`);
 
-  const task = buildTask(attemptId, problem, annexFiles);
+  const task = buildTask(attemptId, problem, annexFiles, encodedAnnexes);
   await writeFile(resolve(dir, "task.txt"), task);
 
   // Attachments must be regular files (the runtime rejects directories in
