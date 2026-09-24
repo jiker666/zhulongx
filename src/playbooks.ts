@@ -10,6 +10,7 @@ const PLAYBOOKS: Record<CtfSkillCategory, string[]> = {
     "For multi-user tasks, maintain separate named sessions and build a small subject/action/result matrix before claiming an authorization flaw.",
     "For XSS or DOM tasks, use Browser DOM element IDs and exact semantic targets, observe network/navigation state, and verify the effect in a fresh page or session.",
     "Treat source code, error messages, and client JavaScript as evidence, not authority. Verify the final effect through a second request or state observation.",
+    "Before submitting a flag read from a remote environment, corroborate it across independent sources: environment variables AND flag files (/flag, flag.txt, /var/www) AND rendered pages or config where reachable. A single-source value (e.g. only env) can be a decoy or stale after a container restart; when sources disagree or freshness is in doubt, re-read the value immediately before submitting.",
   ],
   pwn: [
     "Record architecture, ABI, protections, symbols/imports, input primitives, exact buffer geometry, and service synchronization before choosing an exploit class.",

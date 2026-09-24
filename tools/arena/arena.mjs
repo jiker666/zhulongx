@@ -458,8 +458,10 @@ async function main() {
     case "submit": {
       const [attemptId, flag] = rest;
       if (!attemptId || !flag) die("submit requires <attemptId> <flag>");
-      await submitFlag(attemptId, flag);
-      await record({ attemptId, outcome: "manual-submit", submission: flag });
+      const verdict = await submitFlag(attemptId, flag);
+      // Persist the verdict: an unpersisted verdict once hid a wrong-flag
+      // rejection and prompted a blind duplicate submit (9436).
+      await record({ attemptId: Number(attemptId) || attemptId, outcome: "manual-submit", submission: flag, verdict });
       return 0;
     }
     case "abandon": {
