@@ -3,6 +3,7 @@ import { renderCuratedCtfSkill, resolveCtfSkillCategory, type CtfSkillCategory }
 const PLAYBOOKS: Record<CtfSkillCategory, string[]> = {
   web: [
     "Map the smallest observable attack surface first: routes, methods, parameters, cookies, redirects, source disclosures, and response differences.",
+    "For imported or re-hosted challenges (framework fingerprints, known competition names, classic vuln classes), spend an EARLY bounded slice of the budget — roughly the first 10-15% — researching the intended technique in public writeups, and let that knowledge steer the work: knowing the intended gadget/chain/technique converts the remaining budget from open-ended research into execution. Writeup TECHNIQUE knowledge is legitimate and usually intended; only the historical flag VALUES are untrustworthy (platforms regenerate them). Deferring research to the end after exhausting self-derivation wastes the budget proving what does not work.",
     "Create a named HTTP session before authentication; reuse its sessionId for Cookie Jar continuity, and use form or string-only multipart fields instead of hand-encoding requests.",
     "Follow redirects only when the redirect chain is part of the hypothesis; preserve requestIds so a clean request can be replayed or compared without copying secrets into notes.",
     "Separate authentication, authorization, parsing, file/path, template, request-forgery, deserialization, and business-logic hypotheses; test one variable at a time.",
