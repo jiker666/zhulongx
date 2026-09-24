@@ -1,8 +1,8 @@
 model:
   provider: anthropic
-  id: glm-5.3-flash
-  name: GLM 5.3 Flash
-  baseUrl: https://api.anthropic.com
+  id: glm-5.3
+  name: GLM 5.3
+  baseUrl: https://open.bigmodel.cn/api/anthropic
   apiKeyEnv: XUANSHU_MODEL_API_KEY
   reasoning: true
   contextWindow: 400000
