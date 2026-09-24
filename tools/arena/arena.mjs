@@ -211,7 +211,9 @@ async function cmdRun(options) {
   if (!NSS_TOKEN) die("NSS_AGENT_TOKEN missing in .env");
   if (!SERVER_TOKEN) die("XUANSHU_SERVER_TOKEN missing in .env");
 
-  const { payload, attempt } = await fetchAttempt(600);
+  // Rescue re-runs launch against a held-open attempt with little TTL left;
+  // the floor decides when an attempt is too far gone to reuse vs abandon.
+  const { payload, attempt } = await fetchAttempt(options.minRemaining);
   const attemptId = attempt.id;
   let problem = await waitForProvision(attemptId, attempt.problem);
   if ((problem.content ?? "").trim() === "" && annexUrls(problem.annex).length === 0
@@ -423,7 +425,7 @@ function usage() {
   console.log(`Usage:
   node tools/arena/arena.mjs current
   node tools/arena/arena.mjs next
-  node tools/arena/arena.mjs run [--max-minutes 45]
+  node tools/arena/arena.mjs run [--max-minutes 45] [--min-remaining 600]
   node tools/arena/arena.mjs loop [--target 3000] [--max-minutes 40]
   node tools/arena/arena.mjs submit <attemptId> <flag>
   node tools/arena/arena.mjs abandon <attemptId>
@@ -436,7 +438,7 @@ async function main() {
     const index = process.argv.indexOf(`--${name}`);
     return index > 0 && process.argv[index + 1] ? process.argv[index + 1] : fallback;
   };
-  const options = { maxMinutes: Number(arg("max-minutes", 40)) || 40, target: Number(arg("target", 3000)) || 3000 };
+  const options = { maxMinutes: Number(arg("max-minutes", 40)) || 40, target: Number(arg("target", 3000)) || 3000, minRemaining: Number(arg("min-remaining", 600)) || 600 };
   switch (command) {
     case "current": {
       const result = await nss("/current/");
