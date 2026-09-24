@@ -79,6 +79,7 @@ const PLAYBOOKS: Record<CtfSkillCategory, string[]> = {
     "Represent each transform as a reversible step and assert the output shape at every stage; pivot when a layer violates expected invariants.",
     "For pickle and language jails, disassemble or model the accepted grammar and opcode/state transition first; use pickora only to assemble an evidence-supported minimal payload rather than spraying variants.",
     "For media and steganography, record format metadata first, then use the available image, OCR, audio, modem, barcode, or stego tool to create one bounded derivative in scratch and inspect that derivative directly.",
+    "For animated or multi-frame media (GIF/APNG/WebP/video), decompose every frame before concluding: diff consecutive frames (pixel deltas, rotation/crop transforms, palette changes, dimension changes) to find the intended invariant, sweep stego channels (LSB planes, palette indices, alpha) per frame AND across the reassembled full sequence rather than one representative frame, and treat frame timing/delay fields, frame count, and per-frame transforms (e.g. rotation angles) as potential data channels in their own right. A tiny embedded marker word (watermark, badge, overlay) names the hiding scheme or location — treat it as a pointer to the next extraction step, not as a flag fragment.",
     "Verify the final value against the original prompt, wrapper semantics, and an independent round trip.",
   ],
   osint: [
