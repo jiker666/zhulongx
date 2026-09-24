@@ -14,6 +14,7 @@ const PLAYBOOKS: Record<CtfSkillCategory, string[]> = {
   ],
   pwn: [
     "Record architecture, ABI, protections, symbols/imports, input primitives, exact buffer geometry, and service synchronization before choosing an exploit class.",
+    "When a remote endpoint is available, run cheap remote recon EARLY (banner/menu framing, connection semantics, error responses, timing) and interleave it with local analysis instead of perfecting a complete exploit plan first: remote behavior disambiguates the build/libc/ASLR assumptions local analysis tends to grind on. As soon as the first primitive is confirmed locally, execute the leak-exploit chain on the remote within the same session — a fully-formed plan that never touches the remote is worth zero.",
     "Derive offsets and addresses from the supplied binary or a reproducible crash; never use guessed offsets, gadgets, libc builds, or newline behavior.",
     "Prove the smallest primitive locally, then keep payload construction separate from the scoped remote session and capture the exact remote response.",
     "When hijacking a printf-family call to system via GOT overwrite, the hijacked call executes system(buf) with buf being the very input string that performed the writes: make the payload double as the command (leading 'sh #' style bytes) or arrange for the argument register to point at a stored command string at call time.",
