@@ -425,8 +425,8 @@ function usage() {
   console.log(`Usage:
   node tools/arena/arena.mjs current
   node tools/arena/arena.mjs next
-  node tools/arena/arena.mjs run [--max-minutes 45] [--min-remaining 600]
-  node tools/arena/arena.mjs loop [--target 3000] [--max-minutes 40]
+  node tools/arena/arena.mjs run [--max-minutes 52] [--min-remaining 600]
+  node tools/arena/arena.mjs loop [--target 3000] [--max-minutes 52]
   node tools/arena/arena.mjs submit <attemptId> <flag>
   node tools/arena/arena.mjs abandon <attemptId>
   node tools/arena/arena.mjs stats`);
@@ -438,7 +438,10 @@ async function main() {
     const index = process.argv.indexOf(`--${name}`);
     return index > 0 && process.argv[index + 1] ? process.argv[index + 1] : fallback;
   };
-  const options = { maxMinutes: Number(arg("max-minutes", 40)) || 40, target: Number(arg("target", 3000)) || 3000, minRemaining: Number(arg("min-remaining", 600)) || 600 };
+  // Default 52min lets the TTL-based budget (remaining - 2min) bind on fresh
+  // attempts; a 40min cap orphaned a live run with 19min of attempt left
+  // (9436) — the attempt TTL is the real budget, this is just an outer bound.
+  const options = { maxMinutes: Number(arg("max-minutes", 52)) || 52, target: Number(arg("target", 3000)) || 3000, minRemaining: Number(arg("min-remaining", 600)) || 600 };
   switch (command) {
     case "current": {
       const result = await nss("/current/");
