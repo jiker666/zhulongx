@@ -18,6 +18,8 @@ const PLAYBOOKS: Record<CtfSkillCategory, string[]> = {
     "When hijacking a printf-family call to system via GOT overwrite, the hijacked call executes system(buf) with buf being the very input string that performed the writes: make the payload double as the command (leading 'sh #' style bytes) or arrange for the argument register to point at a stored command string at call time.",
     "A control-flow hijack that verifies by readback but yields no observable output is usually a silent crash or closed stdout, not a failed overwrite: check 16-byte stack alignment before the target (insert a plain ret gadget), and probe with a stderr side-channel (command >&2) before concluding the primitive is unusable.",
     "If the remote endpoint or required runtime is absent, retain the verified offline exploit artifact and report an infrastructure blocker instead of scanning for a host.",
+    "A first flag-looking value is not always the flag: when the environment signals continuation — a banner like 'keep on', staged second binaries, a suspiciously small flag file next to other challenge binaries — treat the read as a stage marker, sweep remaining flag locations and stages, and only submit a value the whole environment corroborates.",
+    "For an unknown interactive service, identify the protocol with bounded probes first (hexdump the initial exchange, note prompt/echo/framing, try each common input shape once), then commit to one hypothesis instead of re-reading the same banner.",
   ],
   crypto: [
     "Transcribe all givens with exact encodings, integer widths, endianness, modulus domains, and known/unknown relationships before selecting an attack.",
@@ -36,6 +38,7 @@ const PLAYBOOKS: Record<CtfSkillCategory, string[]> = {
   ],
   reverse: [
     "Identify format, architecture, packing, imports, sections, strings, entry points, and anti-analysis signals before deep decompilation.",
+    "Time-box static triage: if after roughly a quarter of the run budget the check routine or transform is not identified, persist a checkpoint of what is ruled out and pivot to dynamic instrumentation, targeted decompilation of callers, or emulation — open-ended cataloguing does not converge by itself.",
     "Check the negotiated sandbox capability once. Use only reported programs; when it is unavailable, pivot immediately to inspect_artifact, search_artifact, and offset-based read_file instead of retrying denied commands.",
     "For native PE or ELF files, collect file/type metadata, section and entry-point information, bounded strings, and a short disassembly or symbol/import listing before following any one hypothesis.",
     "Use structured offsets from the artifact parser to inspect headers, section raw data, and candidate tables; never infer a file offset from an RVA without recording the section mapping.",
