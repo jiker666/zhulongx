@@ -109,7 +109,7 @@ function buildTask(attemptId, problem, annexFiles) {
   }
   lines.push("");
   lines.push("目标:解出本题 flag。flag 格式以题面或环境回显为准(常见如 NSSCTF{...}、flag{...})。");
-  lines.push("要求:只测试本题给出的目标与附件;严格提交纪律生效——finish_task 的提交值必须来自成功工具输出且经独立验证;时间预算有限,优先高价值路径,确实无法解出时以 blocked 结束,严禁伪造 flag。");
+  lines.push("要求:只测试本题给出的目标与附件;严格提交纪律生效——finish_task 的提交值必须来自成功工具输出且经独立验证,且提交字符串必须与验证输出中的候选逐字符一致(直接复制粘贴,严禁凭记忆重写或'纠正'拼写——leet/解码文本中的异常拼写是出题人有意为之,一字之差即判错);时间预算有限,优先高价值路径,确实无法解出时以 blocked 结束,严禁伪造 flag。");
   return lines.join("\n");
 }
 
