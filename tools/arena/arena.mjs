@@ -4,7 +4,7 @@
 // Credentials come from .env (gitignored): NSS_AGENT_TOKEN, XUANSHU_SERVER_TOKEN.
 
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
-import { createWriteStream, existsSync, readFileSync } from "node:fs";
+import { createWriteStream, existsSync, readFileSync, rmSync, statSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Readable } from "node:stream";
@@ -78,16 +78,27 @@ function annexUrls(annex) {
 
 async function downloadAnnex(url, dir, token) {
   const name = basename(new URL(url).pathname) || "annex.bin";
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 120_000);
-  try {
-    const response = await fetch(url, { headers: { authorization: `Bearer ${token}` }, signal: controller.signal });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    await pipeline(Readable.fromWeb(response.body), createWriteStream(resolve(dir, name)));
-    return name;
-  } finally {
-    clearTimeout(timer);
+  const target = resolve(dir, name);
+  let lastError = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 120_000);
+    try {
+      const response = await fetch(url, { headers: { authorization: `Bearer ${token}` }, signal: controller.signal });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      await pipeline(Readable.fromWeb(response.body), createWriteStream(target));
+      // A "saved" annex that is not actually on disk (or is empty) poisons the
+      // run at attachment time with EPERM — verify the bytes really landed.
+      if (statSync(target).size === 0) throw new Error("downloaded file is empty");
+      return name;
+    } catch (error) {
+      lastError = error;
+      try { rmSync(target, { force: true }); } catch { /* best effort */ }
+    } finally {
+      clearTimeout(timer);
+    }
   }
+  throw lastError ?? new Error("annex download failed");
 }
 
 function buildTask(attemptId, problem, annexFiles) {
@@ -206,15 +217,15 @@ async function ensureModel() {
 }
 
 let lastRunCorrect = false;
+let lastRunAttemptId = null;
 
 async function cmdRun(options) {
   if (!NSS_TOKEN) die("NSS_AGENT_TOKEN missing in .env");
   if (!SERVER_TOKEN) die("XUANSHU_SERVER_TOKEN missing in .env");
 
-  // Rescue re-runs launch against a held-open attempt with little TTL left;
-  // the floor decides when an attempt is too far gone to reuse vs abandon.
   const { payload, attempt } = await fetchAttempt(options.minRemaining);
   const attemptId = attempt.id;
+  lastRunAttemptId = attemptId;
   let problem = await waitForProvision(attemptId, attempt.problem);
   if ((problem.content ?? "").trim() === "" && annexUrls(problem.annex).length === 0
       && (Array.isArray(problem.container?.url) ? problem.container.url.length : 0) === 0) {
@@ -347,6 +358,7 @@ async function cmdLoop(options) {
     }
     await ensureModel();
     lastRunCorrect = false;
+    const previousAttemptId = lastRunAttemptId;
     try {
       await cmdRun(options);
     } catch (error) {
@@ -359,6 +371,9 @@ async function cmdLoop(options) {
       console.warn(`[loop] run crashed: ${error?.message ?? error}; pausing 60s`);
       await sleep(60_000);
     }
+    // Misses do not carry across problems: a fresh attempt gets a full retry
+    // budget of its own (the carryover made 9445's first miss read as "miss 2").
+    if (lastRunAttemptId !== previousAttemptId) missesOnAttempt = 0;
     if (lastRunCorrect) { missesOnAttempt = 0; consecutiveAbandons = 0; }
     else {
       missesOnAttempt++;
