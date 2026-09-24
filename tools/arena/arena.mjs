@@ -355,6 +355,37 @@ async function cmdLoop(options) {
     if (lastRunCorrect) { missesOnAttempt = 0; consecutiveAbandons = 0; }
     else {
       missesOnAttempt++;
+      console.warn(`[loop] no correct submission (miss ${missesOnAttempt} on this attempt) — opening rescue window`);
+      // Rescue window: the attempt stays active (TTL, up to 20 wrong) after a
+      // miss, so hold off retry/abandon and give the operator room to review
+      // the failed run and salvage the points manually. Exits when the attempt
+      // leaves the active state (manual solve or expiry).
+      let rescueId = null;
+      try { rescueId = unwrap((await nss("/current/")).json)?.attempt?.id ?? null; } catch { /* keep null */ }
+      let pollFailures = 0;
+      while (pollFailures < 5) {
+        await sleep(60_000);
+        try {
+          const cur = unwrap((await nss("/current/")).json);
+          if (cur?.attempt?.state_label !== "active") break;
+          console.log(`[loop] RESCUE WINDOW open for attempt ${cur.attempt.id} (${cur.attempt.remaining_seconds}s left)`);
+          pollFailures = 0;
+        } catch (error) {
+          pollFailures++;
+          console.warn(`[loop] rescue poll failed (${error?.message ?? error}) ${pollFailures}/5`);
+        }
+      }
+      let rescued = false;
+      if (rescueId) {
+        try { rescued = unwrap((await nss(`/attempt/${rescueId}/`)).json)?.attempt?.state_label === "solved"; } catch { /* not rescued */ }
+      }
+      if (rescued) {
+        console.log("[loop] attempt solved during rescue window — continuing marathon");
+        missesOnAttempt = 0;
+        consecutiveAbandons = 0;
+        continue;
+      }
+      console.warn(`[loop] rescue window closed without a solve (miss ${missesOnAttempt})`);
       let attemptRemaining = null;
       try {
         const current = unwrap((await nss("/current/")).json);
@@ -363,7 +394,6 @@ async function cmdLoop(options) {
       // Retrying needs a real shot: a fresh run that cannot finish inside the
       // attempt TTL is guaranteed waste — abandon and take a new problem.
       const tooLate = typeof attemptRemaining === "number" && attemptRemaining < 1_500;
-      console.warn(`[loop] no correct submission (miss ${missesOnAttempt} on this attempt, ${attemptRemaining ?? "?"}s left${tooLate ? " — too late to retry" : ""})`);
       if (missesOnAttempt >= 2 || tooLate) {
         try {
           const current = unwrap((await nss("/current/")).json);
