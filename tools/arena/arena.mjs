@@ -251,7 +251,12 @@ async function cmdRun(options) {
   const runId = created.json.id;
   console.log(`[arena] xuanshu run ${runId} queued (log: workspace/arena/${attemptId}/task.txt)`);
 
-  const runBudgetMs = Math.min(options.maxMinutes * 60_000, Math.max(attempt.remaining_seconds * 1000 - 120_000, 300_000));
+  // Budget from the TTL as of RUN CREATION, not attempt fetch: provisioning
+  // waits consume the clock before the run even starts, and a fetch-time
+  // budget overshoots into the attempt's last minutes with no submitter.
+  let remainingNow = attempt.remaining_seconds;
+  try { remainingNow = unwrap((await nss("/current/")).json)?.attempt?.remaining_seconds ?? remainingNow; } catch { /* keep fetch-time value */ }
+  const runBudgetMs = Math.min(options.maxMinutes * 60_000, Math.max(remainingNow * 1000 - 120_000, 300_000));
   const deadline = Date.now() + runBudgetMs;
   let terminal = null;
   while (Date.now() < deadline) {
