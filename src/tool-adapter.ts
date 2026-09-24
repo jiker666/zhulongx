@@ -190,6 +190,43 @@ export interface ToolCallPipelineDeps {
   persistState: (state: RunState) => Promise<void>;
   webReasoningPersistState?: boolean;
   signal?: AbortSignal;
+  /** Mid-session user-message injection for observer escalations (no-op until the agent session exists). */
+  escalate?: (text: string) => void;
+}
+
+/**
+ * Observer anomalies are record-only by design, but a run grinding the SAME
+ * call or drifting without checkpoints (9445, 9475: 14 identical run_command
+ * invocations over 24 minutes, checkpoint gaps of 12-13) never sees its own
+ * loop from inside. Crossing these thresholds escalates once per kind into
+ * the conversation as an advisory user message.
+ */
+export const OBSERVER_ESCALATION_THRESHOLDS: Readonly<Record<string, number>> = {
+  repeated_action: 5,
+  checkpoint_gap: 12,
+};
+
+export interface ObserverAnomalySummary {
+  kind: string;
+  detail: string;
+  occurrences: number;
+}
+
+/** Anomalies that should escalate now, given the kinds already escalated. */
+export function observerEscalations(
+  anomalies: readonly ObserverAnomalySummary[],
+  alreadyEscalated: ReadonlySet<string>,
+): Array<{ kind: string; text: string }> {
+  const advisories: Array<{ kind: string; text: string }> = [];
+  for (const anomaly of anomalies) {
+    const threshold = OBSERVER_ESCALATION_THRESHOLDS[anomaly.kind];
+    if (threshold === undefined || anomaly.occurrences < threshold || alreadyEscalated.has(anomaly.kind)) continue;
+    const text = anomaly.kind === "repeated_action"
+      ? `Observer escalation: you have now repeated the same call pattern ${anomaly.occurrences} times (${anomaly.detail}). An identical invocation will keep returning an identical result. Stop the loop: checkpoint what these attempts have ruled out, then change the approach — a different tool, a different hypothesis, or revisit an earlier assumption you have not re-examined.`
+      : `Observer escalation: ${anomaly.occurrences} actions have elapsed without a decision checkpoint. Persist a checkpoint now summarizing confirmed facts, ruled-out hypotheses, and the single next concrete step so the remaining budget stays recoverable.`;
+    advisories.push({ kind: anomaly.kind, text });
+  }
+  return advisories;
 }
 
 export interface ToolCallPipeline {
@@ -211,6 +248,7 @@ export function createToolCallPipeline(deps: ToolCallPipelineDeps): ToolCallPipe
   const toolRequestSequences = new Map<string, number>();
   const observedToolOutputs: Array<{ toolCallId: string; output: string; args: string }> = [];
   const observer = new RunObserver(state, deps.runtime);
+  const escalatedKinds = new Set<string>();
   let settled = false;
 
   return {
@@ -327,10 +365,18 @@ export function createToolCallPipeline(deps: ToolCallPipelineDeps): ToolCallPipe
         correlationId: toolCall.toolCallId,
         ...(toolRequestSequences.get(toolCall.toolCallId) !== undefined ? { parentSequence: toolRequestSequences.get(toolCall.toolCallId)! } : {}),
       });
-      // Record-only bypass observation: anomalies are noted, never gated.
-      for (const anomaly of observer.observe({ toolName: toolCall.toolName, args: toolCall.args, isError })) {
+      // Record-only bypass observation: anomalies are noted, never gated —
+      // but high-occurrence anomalies escalate once per kind into the chat.
+      const anomalies = observer.observe({ toolName: toolCall.toolName, args: toolCall.args, isError });
+      for (const anomaly of anomalies) {
         await audit.append("observer.anomaly", anomaly, { source: "orchestrator", actor: "run-observer", correlationId: toolCall.toolCallId });
         await emit("observer.anomaly", { kind: anomaly.kind, detail: anomaly.detail, occurrences: anomaly.occurrences });
+      }
+      for (const escalation of observerEscalations(anomalies, escalatedKinds)) {
+        escalatedKinds.add(escalation.kind);
+        await audit.append("observer.escalated", { kind: escalation.kind, injected: true, text: escalation.text }, { source: "orchestrator", actor: "run-observer", correlationId: toolCall.toolCallId });
+        await emit("observer.escalated", { kind: escalation.kind, injected: true });
+        deps.escalate?.(escalation.text);
       }
       if (!isError && !OBSERVATION_EXCLUDED_TOOLS.has(toolCall.toolName)) {
         const observation = JSON.stringify({ content: persistedContent, details: persistedDetails });

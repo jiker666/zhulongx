@@ -616,6 +616,9 @@ export class XuanShuRuntime {
     };
     gateway.setRoute(runKey, routeOptions);
     let lengthRecoveryAttempts = 0;
+    // The pipeline is built before the agent session exists; observer
+    // escalations ride this holder so they inject into the live session.
+    let agentPrompt: ((text: string) => void) | undefined;
     const pipeline = createToolCallPipeline({
       state,
       runtime: runtimeConfig,
@@ -627,6 +630,7 @@ export class XuanShuRuntime {
       submissionPolicy,
       allowedToolNames: toolSet.tools.map((tool) => tool.name),
       emit,
+      escalate: (text) => agentPrompt?.(text),
       persistState: (current) => writeRunState(runDirectory, current),
       webReasoningPersistState: this.config.webReasoning?.persistState !== false,
       ...(options.signal ? { signal: options.signal } : {}),
@@ -810,6 +814,8 @@ export class XuanShuRuntime {
           ...(options.signal ? { signal: options.signal } : {}),
           onEvent: handleDriverEvent,
         });
+        const activeSession = session;
+        agentPrompt = (text) => activeSession.prompt(text);
         session.prompt(promptSections.map((section) => section.content).join("\n\n"));
         const result = await session.done;
         const lastAssistant = [...session.messages].reverse().find((message) => message.role === "assistant");
