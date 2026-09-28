@@ -94,4 +94,16 @@ describe("run observer", () => {
     expect((run.observerAnomalies ?? []).length).toBeLessThanOrEqual(12);
     expect((run.observerAnomalies ?? []).every((item) => item.kind === "repeated_action" && item.occurrences >= 1)).toBe(true);
   });
+
+  it("hands over an auto-captured evidence tail when nothing was persisted (9841)", () => {
+    const run = state();
+    run.evidenceTail = [
+      { tool: "write_scratch_file", summary: "Wrote 3882 bytes to scratch:exploit4.py" },
+      { tool: "run_command", summary: "leak 0x7f4148768083 shown_rbp 0x7ffc2bd74e20 libc aligned" },
+    ];
+    const handoff = renderRunHandoff(run);
+    expect(handoff).toContain("auto-captured");
+    expect(handoff).toContain("[run_command] leak 0x7f4148768083");
+    expect(handoff).toContain("Wrote 3882 bytes to scratch:exploit4.py");
+  });
 });

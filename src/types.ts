@@ -364,6 +364,14 @@ export interface RunState {
   tokenUsage?: TokenUsageSummary;
   /** Record-only notes from the bypass observer; never gates actions. */
   observerAnomalies?: ObserverAnomaly[];
+  /**
+   * Bounded auto-captured tail of recent successful tool outputs. The settle
+   * handoff renders only persisted state; a run that never checkpointed
+   * (9841: 84 turns, zero findings, budget-dead mid-exploit) hands over an
+   * empty bag. This tail rides the state so the abort handoff carries the
+   * frontier regardless.
+   */
+  evidenceTail?: Array<{ tool: string; summary: string }>;
   turns: number;
   toolCalls: number;
   imageObservations: number;

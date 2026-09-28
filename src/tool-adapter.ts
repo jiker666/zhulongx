@@ -405,6 +405,15 @@ export function createToolCallPipeline(deps: ToolCallPipelineDeps): ToolCallPipe
           observedToolOutputs.push({ toolCallId: toolCall.toolCallId, output: observation.slice(0, 12_000), args: JSON.stringify(toolCall.args ?? {}).slice(0, 12_000) });
           if (observedToolOutputs.length > 32) observedToolOutputs.shift();
         }
+        // observedToolOutputs dies with the pipeline; the settle-time handoff
+        // renders only persisted state. Mirror a bounded text digest onto the
+        // run state so an aborted run's frontier survives without the model
+        // ever calling checkpoint (9841: 52 min of work, empty handoff).
+        const texts = (persistedContent as ToolContent[]).flatMap((block) => (block.type === "text" ? [block.text] : []));
+        const summary = texts.join(" | ").replace(/\s+/g, " ").trim().slice(0, 400);
+        if (summary) {
+          state.evidenceTail = [...(state.evidenceTail ?? []), { tool: toolCall.toolName, summary }].slice(-8);
+        }
       }
       if (isError && !FAILURE_EXCLUDED_TOOLS.has(toolCall.toolName)) {
         state.strategyRevisionRequired = true;

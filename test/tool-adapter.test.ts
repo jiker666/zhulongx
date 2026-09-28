@@ -47,6 +47,7 @@ function fakeAudit() {
 }
 
 const ECHO_DESCRIPTOR: ToolDescriptor = { name: "mcp.echo", source: "mcp", kind: "read", effect: "pure_readonly", executionMode: "parallel", capabilityRequirements: [], sideEffects: ["Echoes bounded text"], riskEvaluator: () => ({ level: "read", summary: "Echo", requiresApproval: false }) };
+const DECODE_DESCRIPTOR: ToolDescriptor = { name: "mcp.decode", source: "mcp", kind: "read", effect: "pure_readonly", executionMode: "parallel", capabilityRequirements: [], sideEffects: ["Decodes a blob"], riskEvaluator: () => ({ level: "read", summary: "Decode", requiresApproval: false }) };
 const LOOKUP_DESCRIPTOR: ToolDescriptor = { name: "mcp.lookup", source: "mcp", kind: "search", effect: "network", executionMode: "parallel", capabilityRequirements: [], sideEffects: ["Issues one read-only lookup"], networkTargetFields: ["url"], riskEvaluator: () => ({ level: "network", summary: "External lookup", requiresApproval: true }) };
 const BOOM_DESCRIPTOR: ToolDescriptor = { name: "mcp.boom", source: "mcp", kind: "read", effect: "pure_readonly", executionMode: "parallel", capabilityRequirements: [], sideEffects: ["Fails on purpose"], riskEvaluator: () => ({ level: "read", summary: "Boom", requiresApproval: false }) };
 const IMAGE_DESCRIPTOR: ToolDescriptor = { name: "mcp.image", source: "mcp", kind: "read", effect: "pure_readonly", executionMode: "parallel", capabilityRequirements: [], sideEffects: ["Returns an image"], riskEvaluator: () => ({ level: "read", summary: "Image", requiresApproval: false }) };
@@ -77,6 +78,25 @@ function lookupTool(): ToolShape {
     async execute(_id, params) {
       const input = params as { url: string };
       return { content: [{ type: "text" as const, text: `looked up ${input.url}` }], details: { url: input.url } };
+    },
+  };
+}
+
+// A derivation whose INPUT never contains the candidate: the grounding the
+// hardened gate accepts (echo-grounding alone is rejected since 399a83b).
+function decodeTool(): ToolShape {
+  return {
+    name: "mcp.decode",
+    label: "decode",
+    description: "Decode",
+    parameters: Type.Object({ blob: Type.String({ minLength: 1, maxLength: 200 }) }),
+    async execute(_id, params) {
+      const blob = (params as { blob: string }).blob;
+      const text = blob.replace(/[a-z]/gi, (ch) => {
+        const base = ch <= "Z" ? 65 : 97;
+        return String.fromCharCode(((ch.charCodeAt(0) - base + 13) % 26) + base);
+      });
+      return { content: [{ type: "text" as const, text }], details: { blob } };
     },
   };
 }
@@ -183,7 +203,7 @@ function harness(options: HarnessOptions = {}) {
     webReasoning,
     ...(options.permissionGate ? { permissionGate: options.permissionGate } : {}),
     submissionPolicy: options.submissionPolicy ?? "advisory",
-    allowedToolNames: ["mcp.echo", "mcp.lookup", "mcp.boom", "mcp.image", "finish_task"],
+    allowedToolNames: ["mcp.echo", "mcp.lookup", "mcp.boom", "mcp.image", "mcp.decode", "finish_task"],
     emit: (type, data) => {
       emitted.push({ type, data });
     },
@@ -380,8 +400,8 @@ describe("wrapXuanShuTools", () => {
   });
 
   it("enforces the strict finish_task submission gate on grounded candidates", async () => {
-    const h = harness({ submissionPolicy: "strict" });
-    const tools = wrapXuanShuTools({ tools: [echoTool(), finishTool()], pipeline: h.pipeline });
+    const h = harness({ submissionPolicy: "strict", external: [ECHO_DESCRIPTOR, DECODE_DESCRIPTOR] });
+    const tools = wrapXuanShuTools({ tools: [echoTool(), decodeTool(), finishTool()], pipeline: h.pipeline });
     const finishArgs = {
       status: "completed" as const,
       summary: "done",
@@ -390,19 +410,30 @@ describe("wrapXuanShuTools", () => {
       remainingRisks: [],
       nextSteps: [],
       confidence: 1,
-      verification: ["echo confirmed flag-was-observed-42"],
+      verification: ["decoder printed flag-was-observed-42"],
       independentlyVerified: true,
     };
-    const ungrounded = await tools[1]!.invoke(finishArgs, "call-f1");
+    const ungrounded = await tools[2]!.invoke(finishArgs, "call-f1");
     expect(ungrounded.isError).toBe(true);
     expect(ungrounded.content[0]).toMatchObject({ type: "text", text: expect.stringContaining("Submission gate:") });
     expect(h.audit.events.map((event) => event.type)).toEqual(["tool.requested", "submission.validation"]);
     expect(h.run.submissionValidation).toMatchObject({ status: "pending" });
     expect(h.run.toolCalls).toBe(0);
 
+    // Echo-grounding alone is no longer acceptable evidence (399a83b): every
+    // grounding call's own inputs contained the candidate.
     await tools[0]!.invoke({ text: "flag-was-observed-42" }, "call-1");
     await tools[0]!.invoke({ text: "flag-was-observed-42" }, "call-2");
-    const accepted = await tools[1]!.invoke(finishArgs, "call-f2");
+    const echoed = await tools[2]!.invoke(finishArgs, "call-f2");
+    expect(echoed.isError).toBe(true);
+    expect(echoed.content[0]).toMatchObject({ type: "text", text: expect.stringContaining("(an echo)") });
+    expect(h.run.submissionValidation).toMatchObject({ status: "pending" });
+
+    // A deterministic derivation whose inputs never contained the candidate
+    // grounds the submission: two distinct decode calls, then finish.
+    await tools[1]!.invoke({ blob: "synt-jnf-bofreirq-42" }, "call-3");
+    await tools[1]!.invoke({ blob: "synt-jnf-bofreirq-42" }, "call-4");
+    const accepted = await tools[2]!.invoke(finishArgs, "call-f3");
     expect(accepted.isError).toBeUndefined();
     expect(h.run.submissionValidation).toMatchObject({ status: "accepted" });
     expect(h.pipeline.isSettled()).toBe(true);
