@@ -4,7 +4,7 @@
 // Credentials come from .env (gitignored): NSS_AGENT_TOKEN, XUANSHU_SERVER_TOKEN.
 
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
-import { createWriteStream, existsSync, readFileSync, rmSync, statSync } from "node:fs";
+import { createWriteStream, existsSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Readable } from "node:stream";
@@ -146,9 +146,31 @@ async function downloadAnnexBase64(url, dir, name) {
   }
 }
 
+// A rejected submission on a still-active attempt must not be re-derived and
+// re-submitted verbatim (9442/9785 class): the value is correct per the
+// artifact but the platform expects a different wrapper. Retry runs see the
+// rejected value and the wrapper-variant ladder instead. Persisted on disk
+// so a fresh one-shot `run` process sees it too.
+function wrongSubmissionPath(attemptId) {
+  return resolve(ARENA_DIR, `wrong-${attemptId}.json`);
+}
+
+function rejectedSubmissionFor(attemptId) {
+  try {
+    const raw = JSON.parse(readFileSync(wrongSubmissionPath(attemptId), "utf8"));
+    if (raw && typeof raw.value === "string") return raw.value;
+  } catch { /* no record for this attempt */ }
+  return null;
+}
+
 function buildTask(attemptId, problem, annexFiles, encodedAnnexes = []) {
   const lines = [];
   lines.push(`NSSCTF Arena 授权挑战(类别:${problem.type_label ?? "unknown"}${problem.rating ? `,rating≈${problem.rating}` : ""})。以下是完整题面:`);
+  const rejected = rejectedSubmissionFor(attemptId);
+  if (rejected) {
+    lines.push("");
+    lines.push(`重要:本尝试的上一轮已提交 ${rejected} 且被平台判为错误(尝试仍存活)。严禁重复提交该字符串或重新推导后原样再交。若你的推导已通过 artifact 级验证(前向重放/原二进制自身校验通过),则该值本身大概率正确、差异在包装:快速重放验证后依次尝试包装变体——(1)去掉原始包装只交内部内容;(2)NSSCTF{内部内容};(3)题面如有其他指定包装则用之。每交一个变体前用工具输出确认候选字符串逐字符正确。若上一轮的验证不充分,先补齐 artifact 级验证再决定。`);
+  }
   lines.push("");
   lines.push(String(problem.content ?? "").trim());
   if (problem.hint) { lines.push(""); lines.push(`提示:${String(problem.hint).trim()}`); }
@@ -375,6 +397,12 @@ async function cmdRun(options) {
   if (terminal.status === "completed" && terminal.submission) {
     const verdict = await submitFlag(attemptId, terminal.submission);
     lastRunCorrect = verdict?.data?.correct === true;
+    if (verdict?.data?.correct === false) {
+      writeFileSync(wrongSubmissionPath(attemptId), JSON.stringify({ attemptId, value: terminal.submission, rejectedAt: new Date().toISOString() }, null, 2));
+      console.warn(`[arena] submission rejected on attempt ${attemptId}: ${terminal.submission} (retry will carry the wrapper-variant ladder)`);
+    } else {
+      try { rmSync(wrongSubmissionPath(attemptId), { force: true }); } catch { /* nothing to clear */ }
+    }
     await record({ attemptId, runId, type: problem.type_label, rating: problem.rating, outcome: "submitted", runStatus: terminal.status, submission: terminal.submission, verdict });
     return 0;
   }
