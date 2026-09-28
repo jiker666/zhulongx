@@ -835,6 +835,17 @@ export function createApiServer(config: AppConfig, dependencies: ApiServerDepend
         json(response, 200, await loadDecisionTrace(config.runtime.artifactRoot, traceMatch[1]));
         return;
       }
+      const stopMatch = url.pathname.match(/^\/v1\/runs\/([0-9a-f-]+)\/stop$/i);
+      if (request.method === "POST" && stopMatch?.[1]) {
+        // Without this route the driver's budget-exhaustion stop posted into a
+        // 404 and the still-streaming run kept running server-side long after
+        // its attempt died (9798: a 20+ min in-flight model response survived
+        // the attempt, competing for resources with the next attempt's run).
+        const stopped = manager.stop(stopMatch[1]);
+        if (!stopped && !manager.get(stopMatch[1])) { json(response, 404, { error: "run not found" }); return; }
+        json(response, 200, { id: stopMatch[1], stopped, status: manager.get(stopMatch[1])?.status ?? "unknown" });
+        return;
+      }
       const continuationMatch = url.pathname.match(/^\/v1\/runs\/([0-9a-f-]+)\/(fork|resume)$/i);
       if (request.method === "POST" && continuationMatch?.[1] && continuationMatch[2]) {
         const parentRunId = continuationMatch[1];
