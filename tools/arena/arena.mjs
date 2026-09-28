@@ -65,6 +65,19 @@ async function xuanshu(path, options = {}) {
   }, 45_000);
 }
 
+// An attempt fetched while the local API is down can never run; it expires
+// unsolved and settles ~-10..-21 rating, compounding for the whole outage
+// (2026-09-25..09-28: 57h outage, -671 rating, 82 solved unchanged). Gate
+// every loop iteration on the API answering at all before touching /next/.
+async function apiHealthy() {
+  try {
+    const probe = await xuanshu("/v1/settings/model");
+    return probe.status < 500;
+  } catch {
+    return false;
+  }
+}
+
 function annexUrls(annex) {
   if (!annex) return [];
   if (typeof annex === "string") return [annex];
@@ -407,6 +420,11 @@ async function cmdLoop(options) {
       console.warn("[loop] three fresh problems missed in a row — pausing 10 minutes");
       await sleep(600_000);
       consecutiveAbandons = 0;
+    }
+    if (!(await apiHealthy())) {
+      console.warn(`[loop] ${new Date().toISOString()} xuanshu API unreachable — holding off on new attempts (fetching now only burns them); retrying in 60s`);
+      await sleep(60_000);
+      continue;
     }
     await ensureModel();
     lastRunCorrect = false;
