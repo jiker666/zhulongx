@@ -835,6 +835,19 @@ export function createApiServer(config: AppConfig, dependencies: ApiServerDepend
         json(response, 200, await loadDecisionTrace(config.runtime.artifactRoot, traceMatch[1]));
         return;
       }
+      const handoffMatch = url.pathname.match(/^\/v1\/runs\/([0-9a-f-]+)\/handoff$/i);
+      if (request.method === "GET" && handoffMatch?.[1]) {
+        // The API writes handoff.md on EVERY settle — including aborts, where
+        // the state's findings/nextSteps stay empty. A budget-exhausted run's
+        // analysis is recoverable only through this file (9833).
+        try {
+          const handoffText = await readFile(resolve(config.runtime.artifactRoot, handoffMatch[1], "handoff.md"), "utf8");
+          json(response, 200, { id: handoffMatch[1], handoff: handoffText.slice(0, 6000) });
+        } catch {
+          json(response, 404, { error: "handoff not found" });
+        }
+        return;
+      }
       const stopMatch = url.pathname.match(/^\/v1\/runs\/([0-9a-f-]+)\/stop$/i);
       if (request.method === "POST" && stopMatch?.[1]) {
         // Without this route the driver's budget-exhaustion stop posted into a

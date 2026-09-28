@@ -197,7 +197,7 @@ function persistHandoff(attemptId, runId, terminal) {
 function handoffFor(attemptId) {
   try {
     const raw = JSON.parse(readFileSync(handoffPath(attemptId), "utf8"));
-    if (raw && (raw.findings?.length || raw.nextSteps?.length || raw.summary)) return raw;
+    if (raw && (raw.findings?.length || raw.nextSteps?.length || raw.summary || raw.handoffText)) return raw;
   } catch { /* no handoff for this attempt */ }
   return null;
 }
@@ -222,6 +222,7 @@ function buildTask(attemptId, problem, annexFiles, encodedAnnexes = []) {
     if (priorHandoff.summary) lines.push(`前一轮总结:${priorHandoff.summary}`);
     for (const finding of priorHandoff.findings ?? []) lines.push(`- [已验证] ${finding}`);
     for (const step of priorHandoff.nextSteps ?? []) lines.push(`- [下一步] ${step}`);
+    if (priorHandoff.handoffText) lines.push(`前一轮 handoff 原文(含未决假设,按需核实):\n${priorHandoff.handoffText}`);
     lines.push("");
   }
   lines.push(String(problem.content ?? "").trim());
@@ -441,13 +442,17 @@ async function cmdRun(options) {
 
   if (!terminal) {
     console.warn(`[arena] driver budget exhausted; stopping run ${runId}`);
-    // The run may still be mid-flight server-side; persist whatever the last
-    // poll saw so a retry inherits the frontier instead of restarting cold.
-    try {
-      const last = unwrap((await xuanshu(`/v1/runs/${runId}`)).json)?.state;
-      if (last) persistHandoff(attemptId, runId, last);
-    } catch { /* snapshot unavailable — proceed */ }
     await stopRun(runId);
+    // An aborted run's state findings/nextSteps are empty, but the API writes
+    // handoff.md on every settle — fetch it so the retry inherits the frontier
+    // instead of restarting cold (9833).
+    try {
+      const handoff = unwrap((await xuanshu(`/v1/runs/${runId}/handoff`)).json)?.handoff;
+      if (typeof handoff === "string" && handoff.trim() !== "") {
+        writeFileSync(handoffPath(attemptId), JSON.stringify({ attemptId, from: runId, at: new Date().toISOString(), handoffText: handoff.slice(0, 4000) }, null, 2));
+        console.log(`[arena] handoff text persisted for attempt ${attemptId} (${handoff.length} chars)`);
+      }
+    } catch { /* handoff unavailable — proceed */ }
     await record({ attemptId, runId, type: problem.type_label, rating: problem.rating, outcome: "driver-timeout", note: "run stopped by driver" });
     return 2;
   }
