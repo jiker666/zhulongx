@@ -269,10 +269,15 @@ async function ensureModel() {
 
 let lastRunCorrect = false;
 let lastRunAttemptId = null;
+// Set by cmdRun when the attempt's container was promised but never
+// provisioned — a run on such an attempt can at best exhaust the offline
+// annex; a flag that lives only remote can never be produced.
+let containerAbsent = false;
 
 async function cmdRun(options) {
   if (!NSS_TOKEN) die("NSS_AGENT_TOKEN missing in .env");
   if (!SERVER_TOKEN) die("XUANSHU_SERVER_TOKEN missing in .env");
+  containerAbsent = false;
 
   const { payload, attempt } = await fetchAttempt(options.minRemaining);
   const attemptId = attempt.id;
@@ -280,6 +285,7 @@ async function cmdRun(options) {
   let problem = await waitForProvision(attemptId, attempt.problem);
   const materialUrls = Array.isArray(problem.container?.url) ? problem.container.url : [];
   const hasAnnex = annexUrls(problem.annex).length > 0;
+  containerAbsent = problem.container_enabled === true && materialUrls.length === 0;
   // A container challenge whose app never started (container_enabled with the
   // container record dead — create_date null, no urls for the whole wait) is
   // unsolvable from the title text alone; recycling the attempt immediately
@@ -447,6 +453,27 @@ async function cmdLoop(options) {
     if (lastRunCorrect) { missesOnAttempt = 0; consecutiveAbandons = 0; }
     else {
       missesOnAttempt++;
+      if (containerAbsent) {
+        // The container stayed dead through the whole provisioning window and
+        // the run finished without a submission (9783: exploit solved offline,
+        // flag lives only in the missing remote). No rerun can conjure the
+        // remote — recycle the attempt now instead of grinding a rescue
+        // window plus a retry cycle on an unrunnable problem.
+        console.warn(`[loop] container never provisioned and the run made no submission — abandoning attempt ${lastRunAttemptId}`);
+        try {
+          const cur = unwrap((await nss("/current/")).json);
+          const at = cur?.attempt;
+          if (at && at.id === lastRunAttemptId && at.state_label === "active") {
+            await nss(`/attempt/${lastRunAttemptId}/abandon/`, { method: "POST", body: "{}" });
+            await record({ attemptId: lastRunAttemptId, outcome: "loop-abandoned-dead-container" });
+          }
+        } catch (error) { console.warn(`[loop] dead-container abandon failed (${error?.message ?? error})`); }
+        missesOnAttempt = 0;
+        consecutiveAbandons++;
+        containerAbsent = false;
+        await sleep(5_000);
+        continue;
+      }
       console.warn(`[loop] no correct submission (miss ${missesOnAttempt} on this attempt) — opening rescue window`);
       // Rescue window: the attempt stays active (TTL, up to 20 wrong) after a
       // miss, so hold off retry/abandon and give the operator room to review
