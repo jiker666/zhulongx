@@ -163,6 +163,45 @@ function rejectedSubmissionFor(attemptId) {
   return null;
 }
 
+// A blocked or budget-expired run leaves verified analysis behind (gadget maps,
+// proven chains, exhausted sweeps) that a retry run would otherwise re-derive
+// from scratch — 9822 burned a whole budget re-proving what its predecessor
+// had already verified. Persist the terminal state's findings/nextSteps and
+// inject them into the retry task: the next run starts at the frontier.
+function handoffPath(attemptId) {
+  return resolve(ARENA_DIR, `handoff-${attemptId}.json`);
+}
+
+function findingText(item) {
+  if (typeof item === "string") return item.slice(0, 600);
+  if (item && typeof item === "object") {
+    const parts = [String(item.title ?? "").slice(0, 300)];
+    const detail = item.content ?? item.detail ?? item.text ?? item.note;
+    if (typeof detail === "string") parts.push(detail.slice(0, 600));
+    return parts.filter(Boolean).join(": ");
+  }
+  return null;
+}
+
+function persistHandoff(attemptId, runId, terminal) {
+  const findings = (Array.isArray(terminal?.findings) ? terminal.findings : [])
+    .map(findingText).filter(Boolean).slice(0, 8);
+  const nextSteps = (Array.isArray(terminal?.nextSteps) ? terminal.nextSteps : [])
+    .filter((step) => typeof step === "string").map((step) => step.slice(0, 400)).slice(0, 6);
+  const summary = String(terminal?.summary ?? "").slice(0, 1200);
+  if (findings.length === 0 && nextSteps.length === 0 && summary === "") return;
+  writeFileSync(handoffPath(attemptId), JSON.stringify({ attemptId, from: runId, at: new Date().toISOString(), summary, findings, nextSteps }, null, 2));
+  console.log(`[arena] handoff persisted for attempt ${attemptId} (${findings.length} findings, ${nextSteps.length} next steps)`);
+}
+
+function handoffFor(attemptId) {
+  try {
+    const raw = JSON.parse(readFileSync(handoffPath(attemptId), "utf8"));
+    if (raw && (raw.findings?.length || raw.nextSteps?.length || raw.summary)) return raw;
+  } catch { /* no handoff for this attempt */ }
+  return null;
+}
+
 function buildTask(attemptId, problem, annexFiles, encodedAnnexes = []) {
   const lines = [];
   lines.push(`NSSCTF Arena 授权挑战(类别:${problem.type_label ?? "unknown"}${problem.rating ? `,rating≈${problem.rating}` : ""})。以下是完整题面:`);
@@ -177,6 +216,14 @@ function buildTask(attemptId, problem, annexFiles, encodedAnnexes = []) {
     }
   }
   lines.push("");
+  const priorHandoff = handoffFor(attemptId);
+  if (priorHandoff) {
+    lines.push(`重要:本尝试的前一轮已完成大量分析但未得出提交(预算耗尽或受阻)。以下是前一轮的结论与遗留步骤——已验证的发现视为事实,严禁从零重做;直接从「下一步」继续,把剩余预算花在增量推进上:`);
+    if (priorHandoff.summary) lines.push(`前一轮总结:${priorHandoff.summary}`);
+    for (const finding of priorHandoff.findings ?? []) lines.push(`- [已验证] ${finding}`);
+    for (const step of priorHandoff.nextSteps ?? []) lines.push(`- [下一步] ${step}`);
+    lines.push("");
+  }
   lines.push(String(problem.content ?? "").trim());
   if (problem.hint) { lines.push(""); lines.push(`提示:${String(problem.hint).trim()}`); }
   lines.push("");
@@ -394,6 +441,12 @@ async function cmdRun(options) {
 
   if (!terminal) {
     console.warn(`[arena] driver budget exhausted; stopping run ${runId}`);
+    // The run may still be mid-flight server-side; persist whatever the last
+    // poll saw so a retry inherits the frontier instead of restarting cold.
+    try {
+      const last = unwrap((await xuanshu(`/v1/runs/${runId}`)).json)?.state;
+      if (last) persistHandoff(attemptId, runId, last);
+    } catch { /* snapshot unavailable — proceed */ }
     await stopRun(runId);
     await record({ attemptId, runId, type: problem.type_label, rating: problem.rating, outcome: "driver-timeout", note: "run stopped by driver" });
     return 2;
@@ -407,12 +460,14 @@ async function cmdRun(options) {
       console.warn(`[arena] submission rejected on attempt ${attemptId}: ${terminal.submission} (retry will carry the wrapper-variant ladder)`);
     } else {
       try { rmSync(wrongSubmissionPath(attemptId), { force: true }); } catch { /* nothing to clear */ }
+      try { rmSync(handoffPath(attemptId), { force: true }); } catch { /* nothing to clear */ }
     }
     await record({ attemptId, runId, type: problem.type_label, rating: problem.rating, outcome: "submitted", runStatus: terminal.status, submission: terminal.submission, verdict });
     return 0;
   }
 
   console.log(`[arena] run settled as ${terminal.status} without a submission; attempt left active for manual work`);
+  if (!terminal.submission) persistHandoff(attemptId, runId, terminal);
   await record({ attemptId, runId, type: problem.type_label, rating: problem.rating, outcome: terminal.status, runStatus: terminal.status, submission: terminal.submission ?? null, summary: (terminal.summary ?? "").slice(0, 500) });
   return terminal.status === "completed" ? 0 : 2;
 }
