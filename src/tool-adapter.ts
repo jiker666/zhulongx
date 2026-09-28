@@ -198,8 +198,11 @@ export interface ToolCallPipelineDeps {
  * Observer anomalies are record-only by design, but a run grinding the SAME
  * call or drifting without checkpoints (9445, 9475: 14 identical run_command
  * invocations over 24 minutes, checkpoint gaps of 12-13) never sees its own
- * loop from inside. Crossing these thresholds escalates once per kind into
- * the conversation as an advisory user message.
+ * loop from inside. Crossing a threshold escalates into the conversation as
+ * an advisory user message — and because a single advisory failed to break
+ * 9837's loop (identical run_command x1280 long after the tier-1 nudge),
+ * escalation re-fires at higher occurrence tiers with progressively harder
+ * directives instead of firing once per kind.
  */
 export const OBSERVER_ESCALATION_THRESHOLDS: Readonly<Record<string, number>> = {
   repeated_action: 5,
@@ -212,19 +215,37 @@ export interface ObserverAnomalySummary {
   occurrences: number;
 }
 
-/** Anomalies that should escalate now, given the kinds already escalated. */
+/** Tier for an anomaly kind at its current occurrence count (0 = none). */
+export function observerEscalationTier(kind: string, occurrences: number): number {
+  const threshold = OBSERVER_ESCALATION_THRESHOLDS[kind];
+  if (threshold === undefined) return 0;
+  if (occurrences >= threshold * 16) return 3;
+  if (occurrences >= threshold * 4) return 2;
+  if (occurrences >= threshold) return 1;
+  return 0;
+}
+
+/** Anomalies that should escalate now, at a tier higher than last escalated. */
 export function observerEscalations(
   anomalies: readonly ObserverAnomalySummary[],
-  alreadyEscalated: ReadonlySet<string>,
-): Array<{ kind: string; text: string }> {
-  const advisories: Array<{ kind: string; text: string }> = [];
+  escalatedTiers: ReadonlyMap<string, number>,
+): Array<{ kind: string; tier: number; text: string }> {
+  const advisories: Array<{ kind: string; tier: number; text: string }> = [];
   for (const anomaly of anomalies) {
-    const threshold = OBSERVER_ESCALATION_THRESHOLDS[anomaly.kind];
-    if (threshold === undefined || anomaly.occurrences < threshold || alreadyEscalated.has(anomaly.kind)) continue;
-    const text = anomaly.kind === "repeated_action"
-      ? `Observer escalation: you have now repeated the same call pattern ${anomaly.occurrences} times (${anomaly.detail}). An identical invocation will keep returning an identical result. Stop the loop: checkpoint what these attempts have ruled out, then change the approach — a different tool, a different hypothesis, or revisit an earlier assumption you have not re-examined.`
-      : `Observer escalation: ${anomaly.occurrences} actions have elapsed without a decision checkpoint. Persist a checkpoint now summarizing confirmed facts, ruled-out hypotheses, and the single next concrete step so the remaining budget stays recoverable.`;
-    advisories.push({ kind: anomaly.kind, text });
+    const tier = observerEscalationTier(anomaly.kind, anomaly.occurrences);
+    if (tier === 0 || tier <= (escalatedTiers.get(anomaly.kind) ?? 0)) continue;
+    const text: string = anomaly.kind === "repeated_action"
+      ? (tier === 1
+        ? `Observer escalation: you have now repeated the same call pattern ${anomaly.occurrences} times (${anomaly.detail}). An identical invocation will keep returning an identical result. Stop the loop: checkpoint what these attempts have ruled out, then change the approach — a different tool, a different hypothesis, or revisit an earlier assumption you have not re-examined.`
+        : tier === 2
+          ? `Observer escalation (tier 2): the same call pattern has now repeated ${anomaly.occurrences} times DESPITE the earlier advisory — this approach is exhausted. Identical invocations return identical results. Stop it entirely: write the ruled-out set to a scratch file, then switch to a structurally different method (a different tool, a different technique, or step back and re-examine a core assumption).`
+          : `Observer escalation (final): the degenerate loop has persisted through two advisories (${anomaly.occurrences} identical calls). Abandon this approach: record the negative result and either pivot to a genuinely different technique or end the run as blocked with the evidence — further identical calls are the worst possible use of the remaining budget.`)
+      : (tier === 1
+        ? `Observer escalation: ${anomaly.occurrences} actions have elapsed without a decision checkpoint. Persist a checkpoint now summarizing confirmed facts, ruled-out hypotheses, and the single next concrete step so the remaining budget stays recoverable.`
+        : tier === 2
+          ? `Observer escalation (tier 2): ${anomaly.occurrences} actions have now elapsed without a checkpoint despite the earlier advisory — the session is drifting. Persist a full checkpoint immediately (confirmed facts, ruled-out hypotheses, next concrete step), then execute that single next step before anything else.`
+          : `Observer escalation (final): ${anomaly.occurrences} actions without a decision checkpoint. Persist a complete checkpoint NOW, then either execute its single next step or end the run as blocked — an uncheckable session cannot recover its own budget.`);
+    advisories.push({ kind: anomaly.kind, tier, text });
   }
   return advisories;
 }
@@ -248,7 +269,7 @@ export function createToolCallPipeline(deps: ToolCallPipelineDeps): ToolCallPipe
   const toolRequestSequences = new Map<string, number>();
   const observedToolOutputs: Array<{ toolCallId: string; output: string; args: string }> = [];
   const observer = new RunObserver(state, deps.runtime);
-  const escalatedKinds = new Set<string>();
+  const escalatedTiers = new Map<string, number>();
   let settled = false;
 
   return {
@@ -372,8 +393,8 @@ export function createToolCallPipeline(deps: ToolCallPipelineDeps): ToolCallPipe
         await audit.append("observer.anomaly", anomaly, { source: "orchestrator", actor: "run-observer", correlationId: toolCall.toolCallId });
         await emit("observer.anomaly", { kind: anomaly.kind, detail: anomaly.detail, occurrences: anomaly.occurrences });
       }
-      for (const escalation of observerEscalations(anomalies, escalatedKinds)) {
-        escalatedKinds.add(escalation.kind);
+      for (const escalation of observerEscalations(anomalies, escalatedTiers)) {
+        escalatedTiers.set(escalation.kind, escalation.tier);
         await audit.append("observer.escalated", { kind: escalation.kind, injected: true, text: escalation.text }, { source: "orchestrator", actor: "run-observer", correlationId: toolCall.toolCallId });
         await emit("observer.escalated", { kind: escalation.kind, injected: true });
         deps.escalate?.(escalation.text);
