@@ -445,14 +445,19 @@ async function cmdRun(options) {
     await stopRun(runId);
     // An aborted run's state findings/nextSteps are empty, but the API writes
     // handoff.md on every settle — fetch it so the retry inherits the frontier
-    // instead of restarting cold (9833).
-    try {
-      const handoff = unwrap((await xuanshu(`/v1/runs/${runId}/handoff`)).json)?.handoff;
-      if (typeof handoff === "string" && handoff.trim() !== "") {
-        writeFileSync(handoffPath(attemptId), JSON.stringify({ attemptId, from: runId, at: new Date().toISOString(), handoffText: handoff.slice(0, 4000) }, null, 2));
-        console.log(`[arena] handoff text persisted for attempt ${attemptId} (${handoff.length} chars)`);
-      }
-    } catch { /* handoff unavailable — proceed */ }
+    // instead of restarting cold (9833). The file lands a beat AFTER the stop
+    // returns; retry a few times before giving up (9837 race).
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        const handoff = unwrap((await xuanshu(`/v1/runs/${runId}/handoff`)).json)?.handoff;
+        if (typeof handoff === "string" && handoff.trim() !== "") {
+          writeFileSync(handoffPath(attemptId), JSON.stringify({ attemptId, from: runId, at: new Date().toISOString(), handoffText: handoff.slice(0, 4000) }, null, 2));
+          console.log(`[arena] handoff text persisted for attempt ${attemptId} (${handoff.length} chars)`);
+          break;
+        }
+      } catch { /* not written yet — retry */ }
+      await sleep(3_000);
+    }
     await record({ attemptId, runId, type: problem.type_label, rating: problem.rating, outcome: "driver-timeout", note: "run stopped by driver" });
     return 2;
   }
