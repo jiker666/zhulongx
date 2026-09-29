@@ -519,7 +519,11 @@ async function cmdRun(options) {
   }
 
   console.log(`[arena] run settled as ${terminal.status} without a submission; attempt left active for manual work`);
-  if (!terminal.submission) persistHandoff(attemptId, runId, terminal);
+  // Persist the handoff on EVERY non-submitted settle — including blocked runs
+  // that put a non-flag string in the submission field (9943: finish_task with
+  // status=blocked carried "Disallow: /webinfo.md" as its submission; the old
+  // !terminal.submission guard dropped two findings and forced a cold retry).
+  persistHandoff(attemptId, runId, terminal);
   await record({ attemptId, runId, type: problem.type_label, rating: problem.rating, outcome: terminal.status, runStatus: terminal.status, submission: terminal.submission ?? null, summary: (terminal.summary ?? "").slice(0, 500) });
   return terminal.status === "completed" ? 0 : 2;
 }
