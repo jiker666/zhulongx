@@ -587,6 +587,12 @@ async function cmdLoop(options) {
       // leaves the active state (manual solve or expiry).
       let rescueId = null;
       try { rescueId = unwrap((await nss("/current/")).json)?.attempt?.id ?? null; } catch { /* keep null */ }
+      // A budget-cut run that persisted a handoff does not need the full
+      // operator window: the next iteration's next/ reuse injects the handoff
+      // and continues at the frontier autonomously. Hold the full window only
+      // when there is nothing to inject (diagnosis must start from scratch).
+      const boundedRescue = Boolean(handoffFor(lastRunAttemptId));
+      const rescueDeadline = Date.now() + 4 * 60_000;
       let pollFailures = 0;
       while (pollFailures < 5) {
         await sleep(60_000);
@@ -594,6 +600,10 @@ async function cmdLoop(options) {
           const cur = unwrap((await nss("/current/")).json);
           if (cur?.attempt?.state_label !== "active") break;
           console.log(`[loop] RESCUE WINDOW open for attempt ${cur.attempt.id} (${cur.attempt.remaining_seconds}s left)`);
+          if (boundedRescue && Date.now() >= rescueDeadline) {
+            console.warn("[loop] bounded rescue window elapsed with a handoff present — self-retrying via next/ reuse");
+            break;
+          }
           pollFailures = 0;
         } catch (error) {
           pollFailures++;
@@ -617,8 +627,12 @@ async function cmdLoop(options) {
         attemptRemaining = current?.attempt?.remaining_seconds ?? null;
       } catch { /* fetched again in the abandon path if needed */ }
       // Retrying needs a real shot: a fresh run that cannot finish inside the
-      // attempt TTL is guaranteed waste — abandon and take a new problem.
-      const tooLate = typeof attemptRemaining === "number" && attemptRemaining < 1_500;
+      // attempt TTL is guaranteed waste — abandon and take a new problem. A
+      // handoff-carrying retry is a continuation, not a fresh run: the 38-min
+      // fresh cut leaves ~1300s, below the 1500s floor but plenty to finish
+      // from the frontier, so it gets a lower floor.
+      const retryFloor = handoffFor(lastRunAttemptId) ? 1_050 : 1_500;
+      const tooLate = typeof attemptRemaining === "number" && attemptRemaining < retryFloor;
       if (missesOnAttempt >= 2 || tooLate) {
         try {
           const current = unwrap((await nss("/current/")).json);
