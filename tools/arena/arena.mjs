@@ -413,9 +413,17 @@ async function cmdRun(options) {
   // Budget from the TTL as of RUN CREATION, not attempt fetch: provisioning
   // waits consume the clock before the run even starts, and a fetch-time
   // budget overshoots into the attempt's last minutes with no submitter.
+  // A FRESH run caps at 38min (not the TTL): a 52min run on a 60min attempt
+  // leaves ~7min — two consecutive budget deaths (9841, 9843) each preserved
+  // a rich handoff frontier with no time left to use it. 38 + handoff leaves
+  // a ~20min continuation window; since the stop route + handoff + evidence
+  // tail make a mid-work stop non-lossy, the cut buys retryability. A retry
+  // (handoff present) gets the full remaining budget — it starts at the
+  // frontier and should run to the TTL.
   let remainingNow = attempt.remaining_seconds;
   try { remainingNow = unwrap((await nss("/current/")).json)?.attempt?.remaining_seconds ?? remainingNow; } catch { /* keep fetch-time value */ }
-  const runBudgetMs = Math.min(options.maxMinutes * 60_000, Math.max(remainingNow * 1000 - 120_000, 300_000));
+  const freshCapMinutes = handoffFor(attemptId) ? options.maxMinutes : Math.min(options.maxMinutes, 38);
+  const runBudgetMs = Math.min(freshCapMinutes * 60_000, Math.max(remainingNow * 1000 - 120_000, 300_000));
   const deadline = Date.now() + runBudgetMs;
   let terminal = null;
   while (Date.now() < deadline) {
