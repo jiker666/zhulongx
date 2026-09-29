@@ -158,9 +158,18 @@ function wrongSubmissionPath(attemptId) {
 function rejectedSubmissionFor(attemptId) {
   try {
     const raw = JSON.parse(readFileSync(wrongSubmissionPath(attemptId), "utf8"));
-    if (raw && typeof raw.value === "string") return raw.value;
+    if (Array.isArray(raw.values)) return raw.values.filter((v) => typeof v === "string");
+    if (raw && typeof raw.value === "string") return [raw.value];
   } catch { /* no record for this attempt */ }
   return null;
+}
+
+// Rejections ACCUMULATE (9869: retry #2 overwrote retry #1's rejected value,
+// hiding that the lowercased-wrapper form was already burned). The ladder
+// needs the whole history to forbid every dead variant and rank what's left.
+function recordRejectedSubmission(attemptId, value) {
+  const values = [...(rejectedSubmissionFor(attemptId) ?? []), value].slice(-8);
+  writeFileSync(wrongSubmissionPath(attemptId), JSON.stringify({ attemptId, values, last: value, rejectedAt: new Date().toISOString() }, null, 2));
 }
 
 // A blocked or budget-expired run leaves verified analysis behind (gadget maps,
@@ -223,14 +232,16 @@ function handoffFor(attemptId) {
 function buildTask(attemptId, problem, annexFiles, encodedAnnexes = []) {
   const lines = [];
   lines.push(`NSSCTF Arena 授权挑战(类别:${problem.type_label ?? "unknown"}${problem.rating ? `,rating≈${problem.rating}` : ""})。以下是完整题面:`);
-  const rejected = rejectedSubmissionFor(attemptId);
-  if (rejected) {
+  const rejectedList = rejectedSubmissionFor(attemptId);
+  if (rejectedList && rejectedList.length > 0) {
     lines.push("");
+    lines.push(`重要:本尝试已被平台判错的提交(全部,严禁再次提交其中任何一个):${rejectedList.map((v) => `"${v}"`).join("、")}。`);
     const formatStated = /NSSCTF\s*\{/.test(`${problem.content ?? ""}\n${problem.hint ?? ""}`);
+    const rejected = rejectedList[rejectedList.length - 1];
     if (formatStated && /^\s*NSSCTF\{.*\}\s*$/.test(rejected)) {
       lines.push(`重要:本尝试的上一轮已提交 ${rejected} 且被平台判为错误(尝试仍存活)。该提交已经符合题面指定的 NSSCTF{} 包装,因此问题几乎必然出在内部字符串本身(拼写/标点/空格/大小写)。严禁再提交相同内部内容(无论换什么包装),也不要凭语感"修复"标点。请重新恢复内部内容:(1)优先无损通道——若文本经图像/音频/隐写层承载,直接从数据层(像素 LSB、频谱、流数据)提取字节,而非 OCR 有损识别;(2)必须 OCR 时先改善输入(定位区域裁剪、放大、二值化、多引擎/多参数),只接受多次独立识别完全一致的字节序列;(3)若歧义只落在少数几个可枚举位置(若干标点/空格/大小写决策),先列出完整变体空间并按可能性排序,用工具输出逐字符确认每个候选后按序提交——本尝试剩余可错次数有限,先计算变体总数确保可枚举完。`);
     } else {
-      lines.push(`重要:本尝试的上一轮已提交 ${rejected} 且被平台判为错误(尝试仍存活)。严禁重复提交该字符串或重新推导后原样再交。若你的推导已通过 artifact 级验证(前向重放/原二进制自身校验通过),则该值本身大概率正确、差异在包装或变换:快速重放验证后依次尝试变体——(0)若上一轮提交值相对 artifact 原文做过大小写转换(题面有"为小写/为大写"之类描述),先提交 artifact 原文逐字符原样的值(包括原大小写与原包装)——题面的大小写描述只是提示,解出什么交什么;(1)去掉原始包装只交内部内容;(2)NSSCTF{内部内容};(3)题面如有其他指定包装则用之。每交一个变体前用工具输出确认候选字符串逐字符正确。若上一轮的验证不充分,先补齐 artifact 级验证再决定。`);
+      lines.push(`重要:本尝试已提交过上述被判错的值(尝试仍存活),严禁重新推导后原样再交任何一个。若你的推导已通过 artifact 级验证(前向重放/原二进制自身校验通过),则内容大概率正确、差异在包装/大小写变换。按以下顺序逐个生成并提交未试过的候选,每个候选必须与已判错列表逐字符不同——(0)artifact 原文逐字符原样的值(完全按解出时的原始大小写与原始包装,不做任何变换;若它与已判错值不同,这是最优先候选);(1)NSSCTF{内部内容};(2)去掉包装只交内部内容;(3)题面如有其他指定包装则用之。每交一个变体前用工具输出确认候选字符串逐字符正确,并明确对照已判错列表排除重复。若上一轮的验证不充分,先补齐 artifact 级验证再决定。`);
     }
   }
   lines.push("");
@@ -492,7 +503,7 @@ async function cmdRun(options) {
     const verdict = await submitFlag(attemptId, terminal.submission);
     lastRunCorrect = verdict?.data?.correct === true;
     if (verdict?.data?.correct === false) {
-      writeFileSync(wrongSubmissionPath(attemptId), JSON.stringify({ attemptId, value: terminal.submission, rejectedAt: new Date().toISOString() }, null, 2));
+      recordRejectedSubmission(attemptId, terminal.submission);
       console.warn(`[arena] submission rejected on attempt ${attemptId}: ${terminal.submission} (retry will carry the wrapper-variant ladder)`);
     } else {
       try { rmSync(wrongSubmissionPath(attemptId), { force: true }); } catch { /* nothing to clear */ }
