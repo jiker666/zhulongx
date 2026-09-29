@@ -629,9 +629,11 @@ async function cmdLoop(options) {
       // Retrying needs a real shot: a fresh run that cannot finish inside the
       // attempt TTL is guaranteed waste — abandon and take a new problem. A
       // handoff-carrying retry is a continuation, not a fresh run: the 38-min
-      // fresh cut leaves ~1300s, below the 1500s floor but plenty to finish
-      // from the frontier, so it gets a lower floor.
-      const retryFloor = handoffFor(lastRunAttemptId) ? 1_050 : 1_500;
+      // fresh cut leaves ~1300s and the bounded rescue window eats 4 of those
+      // minutes before the decision, so the floor must sit BELOW the
+      // window-closing remaining (~1060s) with real margin (9855's reuse
+      // cleared a 1050s floor by seconds).
+      const retryFloor = handoffFor(lastRunAttemptId) ? 900 : 1_500;
       const tooLate = typeof attemptRemaining === "number" && attemptRemaining < retryFloor;
       if (missesOnAttempt >= 2 || tooLate) {
         try {
