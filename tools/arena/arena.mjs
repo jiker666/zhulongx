@@ -190,8 +190,26 @@ function persistHandoff(attemptId, runId, terminal) {
     .filter((step) => typeof step === "string").map((step) => step.slice(0, 400)).slice(0, 6);
   const summary = String(terminal?.summary ?? "").slice(0, 1200);
   if (findings.length === 0 && nextSteps.length === 0 && summary === "") return;
-  writeFileSync(handoffPath(attemptId), JSON.stringify({ attemptId, from: runId, at: new Date().toISOString(), summary, findings, nextSteps }, null, 2));
+  writeHandoff(attemptId, { attemptId, from: runId, at: new Date().toISOString(), summary, findings, nextSteps });
   console.log(`[arena] handoff persisted for attempt ${attemptId} (${findings.length} findings, ${nextSteps.length} next steps)`);
+}
+
+// Handoffs ACCUMULATE across a chain: a continuation that records nothing
+// would otherwise erase its predecessor's verified findings (9855: run 1
+// persisted findings, run 2 none — the overwrite threw the facts away).
+// Prior entries first (they are older, verified facts), new ones appended,
+// deduped, capped at the per-run limits.
+function writeHandoff(attemptId, payload) {
+  const prior = handoffFor(attemptId);
+  const dedupe = (items) => [...new Set(items)];
+  const merged = {
+    ...payload,
+    findings: dedupe([...(prior?.findings ?? []), ...(payload.findings ?? [])]).slice(0, 8),
+    nextSteps: dedupe([...(prior?.nextSteps ?? []), ...(payload.nextSteps ?? [])]).slice(0, 6),
+    summary: payload.summary?.trim() ? payload.summary : (prior?.summary ?? ""),
+    handoffText: payload.handoffText ?? prior?.handoffText,
+  };
+  writeFileSync(handoffPath(attemptId), JSON.stringify(merged, null, 2));
 }
 
 function handoffFor(attemptId) {
@@ -459,7 +477,7 @@ async function cmdRun(options) {
       try {
         const handoff = unwrap((await xuanshu(`/v1/runs/${runId}/handoff`)).json)?.handoff;
         if (typeof handoff === "string" && handoff.trim() !== "") {
-          writeFileSync(handoffPath(attemptId), JSON.stringify({ attemptId, from: runId, at: new Date().toISOString(), handoffText: handoff.slice(0, 4000) }, null, 2));
+          writeHandoff(attemptId, { attemptId, from: runId, at: new Date().toISOString(), handoffText: handoff.slice(0, 4000) });
           console.log(`[arena] handoff text persisted for attempt ${attemptId} (${handoff.length} chars)`);
           break;
         }
