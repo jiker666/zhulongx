@@ -229,7 +229,7 @@ function handoffFor(attemptId) {
   return null;
 }
 
-function buildTask(attemptId, problem, annexFiles, encodedAnnexes = []) {
+function buildTask(attemptId, problem, annexFiles, encodedAnnexes = [], budgetMinutes = null) {
   const lines = [];
   lines.push(`NSSCTF Arena 授权挑战(类别:${problem.type_label ?? "unknown"}${problem.rating ? `,rating≈${problem.rating}` : ""})。以下是完整题面:`);
   const rejectedList = rejectedSubmissionFor(attemptId);
@@ -248,6 +248,7 @@ function buildTask(attemptId, problem, annexFiles, encodedAnnexes = []) {
   const priorHandoff = handoffFor(attemptId);
   if (priorHandoff) {
     lines.push(`重要:本尝试的前一轮已完成大量分析但未得出提交(预算耗尽或受阻)。以下是前一轮的结论与遗留步骤——已验证的发现视为事实,严禁从零重做;直接从「下一步」继续,把剩余预算花在增量推进上:`);
+    lines.push(`重要:这是续跑(前一轮遗留分析的延续)。严禁重新反汇编/重新下载/重新推导前一轮已验证的任何内容——前几轮失败常见原因就是把续跑窗口浪费在重做 recon 上。开局直接读上述发现与遗留步骤,第一轮工具调用就该是增量实验(直接跑下一步的 payload/命令)。`);
     if (priorHandoff.summary) lines.push(`前一轮总结:${priorHandoff.summary}`);
     for (const finding of priorHandoff.findings ?? []) lines.push(`- [已验证] ${finding}`);
     for (const step of priorHandoff.nextSteps ?? []) lines.push(`- [下一步] ${step}`);
@@ -271,6 +272,9 @@ function buildTask(attemptId, problem, annexFiles, encodedAnnexes = []) {
     }
   }
   lines.push("");
+  if (typeof budgetMinutes === "number" && budgetMinutes > 0) {
+    lines.push(`时间预算:本次运行约 ${budgetMinutes} 分钟(超时会被强制中止,中止前未固化的推理即丢失)。按此预算规划路径深度:优先单条最高价值主线,放弃旁支枚举;临近预算时把已验证的关键值/中间结果用 record_finding 或 scratch 文件固化,便于续跑接手。`);
+  }
   lines.push("目标:解出本题 flag。flag 格式以题面或环境回显为准(常见如 NSSCTF{...}、flag{...})。注意:题面对 flag 的大小写描述(如「flag为小写/大写」)是核对提示,不是改写指令——以附件/环境中实际解出的原样值逐字符提交,严禁对解出值做大小写或拼写变换。");
   lines.push("要求:只测试本题给出的目标与附件;严格提交纪律生效——finish_task 的提交值必须来自成功工具输出且经独立验证,且提交字符串必须与验证输出中的候选逐字符一致(直接复制粘贴,严禁凭记忆重写或'纠正'拼写——leet/解码文本中的异常拼写是出题人有意为之,一字之差即判错);时间预算有限,优先高价值路径,确实无法解出时以 blocked 结束,严禁伪造 flag。");
   return lines.join("\n");
@@ -421,7 +425,22 @@ async function cmdRun(options) {
   }
   if (annexFiles.length > 0) console.log(`[arena] annex saved: ${annexFiles.join(", ")}`);
 
-  const task = buildTask(attemptId, problem, annexFiles, encodedAnnexes);
+  // Budget from the TTL as of RUN CREATION, not attempt fetch: provisioning
+  // waits consume the clock before the run even starts, and a fetch-time
+  // budget overshoots into the attempt's last minutes with no submitter.
+  // A FRESH run caps at 38min (not the TTL): a 52min run on a 60min attempt
+  // leaves ~7min — two consecutive budget deaths (9841, 9843) each preserved
+  // a rich handoff frontier with no time left to use it. 38 + handoff leaves
+  // a ~20min continuation window; since the stop route + handoff + evidence
+  // tail make a mid-work stop non-lossy, the cut buys retryability. A retry
+  // (handoff present) gets the full remaining budget — it starts at the
+  // frontier and should run to the TTL.
+  let remainingNow = attempt.remaining_seconds;
+  try { remainingNow = unwrap((await nss("/current/")).json)?.attempt?.remaining_seconds ?? remainingNow; } catch { /* keep fetch-time value */ }
+  const freshCapMinutes = handoffFor(attemptId) ? options.maxMinutes : Math.min(options.maxMinutes, 38);
+  const runBudgetMs = Math.min(freshCapMinutes * 60_000, Math.max(remainingNow * 1000 - 120_000, 300_000));
+
+  const task = buildTask(attemptId, problem, annexFiles, encodedAnnexes, Math.round(runBudgetMs / 60_000));
   await writeFile(resolve(dir, "task.txt"), task);
 
   // Attachments must be regular files (the runtime rejects directories in
@@ -439,20 +458,6 @@ async function cmdRun(options) {
   const runId = created.json.id;
   console.log(`[arena] xuanshu run ${runId} queued (log: workspace/arena/${attemptId}/task.txt)`);
 
-  // Budget from the TTL as of RUN CREATION, not attempt fetch: provisioning
-  // waits consume the clock before the run even starts, and a fetch-time
-  // budget overshoots into the attempt's last minutes with no submitter.
-  // A FRESH run caps at 38min (not the TTL): a 52min run on a 60min attempt
-  // leaves ~7min — two consecutive budget deaths (9841, 9843) each preserved
-  // a rich handoff frontier with no time left to use it. 38 + handoff leaves
-  // a ~20min continuation window; since the stop route + handoff + evidence
-  // tail make a mid-work stop non-lossy, the cut buys retryability. A retry
-  // (handoff present) gets the full remaining budget — it starts at the
-  // frontier and should run to the TTL.
-  let remainingNow = attempt.remaining_seconds;
-  try { remainingNow = unwrap((await nss("/current/")).json)?.attempt?.remaining_seconds ?? remainingNow; } catch { /* keep fetch-time value */ }
-  const freshCapMinutes = handoffFor(attemptId) ? options.maxMinutes : Math.min(options.maxMinutes, 38);
-  const runBudgetMs = Math.min(freshCapMinutes * 60_000, Math.max(remainingNow * 1000 - 120_000, 300_000));
   const deadline = Date.now() + runBudgetMs;
   let terminal = null;
   while (Date.now() < deadline) {
