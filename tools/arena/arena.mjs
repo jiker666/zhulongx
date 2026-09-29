@@ -627,9 +627,12 @@ async function cmdLoop(options) {
       try { rescueId = unwrap((await nss("/current/")).json)?.attempt?.id ?? null; } catch { /* keep null */ }
       // A budget-cut run that persisted a handoff does not need the full
       // operator window: the next iteration's next/ reuse injects the handoff
-      // and continues at the frontier autonomously. Hold the full window only
-      // when there is nothing to inject (diagnosis must start from scratch).
-      const boundedRescue = Boolean(handoffFor(lastRunAttemptId));
+      // and continues at the frontier autonomously. A REJECTION miss is the
+      // same: the wrapper-variant ladder is a concrete correction path — the
+      // full window would just idle until attempt expiry and the retry would
+      // then be too late (9955 class). Hold the full window only when there is
+      // neither a handoff nor a rejected value to act on.
+      const boundedRescue = Boolean(handoffFor(lastRunAttemptId)) || Boolean(rejectedSubmissionFor(lastRunAttemptId));
       const rescueDeadline = Date.now() + 4 * 60_000;
       let pollFailures = 0;
       while (pollFailures < 5) {
