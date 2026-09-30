@@ -711,8 +711,19 @@ export function createApiServer(config: AppConfig, dependencies: ApiServerDepend
           json(response, 400, { error: "body must contain task and optional string attachments" });
           return;
         }
-        const id = manager.start(input);
-        json(response, 202, { id, status: "queued", statusUrl: `/v1/runs/${id}` });
+        // An explicit lineage.parentRunId opts the run into bounded parent
+        // scratch inheritance (exp scripts, ledgers survive the retry hop)
+        // while the caller keeps full control of the task text — unlike
+        // /resume, which replays the parent's (now stale) task verbatim.
+        const lineageInput = (input as { lineage?: unknown }).lineage;
+        const parentRunId = lineageInput && typeof lineageInput === "object"
+          && typeof (lineageInput as { parentRunId?: unknown }).parentRunId === "string"
+          ? (lineageInput as { parentRunId: string }).parentRunId
+          : undefined;
+        const id = manager.start(input, parentRunId
+          ? { lineage: { parentRunId, boundarySequence: 0, mode: "resume" as const, inheritedEventCount: 0, context: "" } }
+          : {});
+        json(response, 202, { id, status: "queued", statusUrl: `/v1/runs/${id}`, ...(parentRunId ? { parentRunId } : {}) });
         return;
       }
       if (request.method === "POST" && url.pathname === "/v1/manual/uploads") {

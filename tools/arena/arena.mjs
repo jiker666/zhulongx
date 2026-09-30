@@ -458,6 +458,11 @@ async function cmdRun(options) {
     body: JSON.stringify({
       task,
       attachments: attachmentPaths,
+      // A retry inherits the prior run's scratch (exp scripts, ledgers, dumps)
+      // via lineage — without it every warm start re-types verified code from
+      // the handoff text, costing minutes the 15-20min continuation window
+      // does not have (9968 phar builder, 9970 gadget dumps, 9972 exp3.py).
+      ...(handoffFor(attemptId)?.from ? { lineage: { parentRunId: handoffFor(attemptId).from } } : {}),
       metadata: { source: "question-bank", questionId: `arena-${attemptId}`, category: categoryOf(problem.type_label) },
     }),
   });
