@@ -262,6 +262,13 @@ function buildTask(attemptId, problem, annexFiles, encodedAnnexes = [], budgetMi
   if (problem.container_enabled && urls.length > 0) {
     lines.push(`远程环境(本题唯一授权测试目标,限时开放):${urls.join(", ")}(剩余约 ${Math.round((problem.container?.remaining_seconds ?? 3600) / 60)} 分钟)`);
     lines.push("平台约定:重托管题的 flag 由平台生成、只存在于远程环境内(常见 NSSCTF{uuid} 格式,拿到 shell 后 cat flag / cat /flag / env 常见可得)。flag 必须实际从远程环境读取;网络 writeup 里的历史 flag 属于原比赛环境,与本环境不同,不得采信或作为提交值。");
+    if (priorHandoff) {
+      // A retry on a remote problem must first re-establish that the remote is
+      // still alive: instances killed mid-attempt (self-inflicted scan bursts,
+      // crashes) do not self-heal (9967), and grinding a dead target burns the
+      // whole window while nothing can ever be read from it.
+      lines.push("重要(续跑前的存活确认):开局先对远程发一个轻量请求确认存活。若连接被拒/超时,最多再确认一次(间隔数十秒);两次都失败则远程已死且不会自愈——立即以 blocked 结束并在 summary 里写明「远程容器已死亡、无法读取 flag」,严禁把剩余预算花在反复探测、换路径绕过或寻找替代目标上。若存活,直接按遗留步骤增量推进,且继续保持低并发(远程是脆弱的单实例,高并发扫描可能直接打死它)。");
+    }
   } else {
     lines.push("本题无远程容器,基于附件离线解题。提交格式规则:若题面明确指定了提交格式(如「得到的flag使用NSSCTF{}格式提交」),则取解出的 flag 的内部内容(去掉其原始包装,如 pctf{...} 只取省略号部分)放入题面指定的包装中,严禁双层嵌套大括号;若题面未指定格式,则将附件中实际解出的完整 flag(含原始包装)原样提交,不改写、不重新包装。若题面或附件引用了外部比赛或仓库,历史 writeup 的 flag 不可信(平台导入时可能重新生成),应以题面与附件的实际内容为准。");
   }
