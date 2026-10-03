@@ -559,6 +559,9 @@ async function cmdLoop(options) {
   // its depth and grinding on would just burn rating — stop and report.
   let missesOnAttempt = 0;
   let consecutiveAbandons = 0;
+  // Stamp at iteration END (finally) — one iteration CONTAINS a whole 38-52min
+  // run watch + rescue window, so an iteration-top stamp made every healthy
+  // run look like a freeze (42-min "jump" = just a solved-adjacent cycle).
   let lastIterationAt = Date.now();
   while (true) {
     // Freeze guard: a wall-time jump >15min between iterations means the host
@@ -574,7 +577,7 @@ async function cmdLoop(options) {
       }
       await sleep(60_000);
     }
-    lastIterationAt = iterationStart;
+    try {
     let rating;
     try {
       const detail = unwrap((await nss("/current/")).json);
@@ -729,6 +732,11 @@ async function cmdLoop(options) {
       }
     }
     await sleep(10_000);
+    } finally {
+      // End-of-iteration stamp: the guard must measure inter-iteration gaps,
+      // not run duration (one iteration holds a whole 38-52min run + rescue).
+      lastIterationAt = Date.now();
+    }
   }
 }
 

@@ -473,6 +473,9 @@ async function cmdLoop(options) {
   if (!CTF2_TOKEN) die("CTF2_AGENT_TOKEN missing in .env");
   if (!SERVER_TOKEN) die("XUANSHU_SERVER_TOKEN missing in .env");
   let consecutiveMisses = 0;
+  // Stamp at iteration END — one iteration CONTAINS a whole 40-46min solveOne,
+  // so an iteration-top stamp makes every healthy solve look like a freeze
+  // (arena driver burned ~1min of probes+settle per run on this false alarm).
   let lastIterationAt = Date.now();
   while (true) {
     const iterationStart = Date.now();
@@ -489,7 +492,7 @@ async function cmdLoop(options) {
       }
       await sleep(60_000); // one stability minute before touching the platform
     }
-    lastIterationAt = iterationStart;
+    try {
 
     if (consecutiveMisses >= 4) {
       console.warn("[ctf2] four challenges missed in a row — pausing 10 minutes");
@@ -535,6 +538,9 @@ async function cmdLoop(options) {
       }
     }
     await sleep(10_000);
+    } finally {
+      lastIterationAt = Date.now();
+    }
   }
 }
 
