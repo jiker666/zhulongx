@@ -438,6 +438,10 @@ async function solveOne(challenge, options) {
       await sleep(3_000);
     }
     await record({ challengeId: challenge.id, runId, name: challenge.name, outcome: "driver-timeout" });
+    // Mark the miss or a too-hard challenge loops FOREVER: blocked settles and
+    // driver timeouts never touched the ledger, so the candidate filter kept
+    // re-picking the same challenge (only env failures and crashes marked).
+    ledgerMark(challenge.id, "miss");
     return false;
   }
 
@@ -466,6 +470,7 @@ async function solveOne(challenge, options) {
 
   console.log(`[ctf2] run settled as ${terminal.status} without a submission`);
   await record({ challengeId: challenge.id, runId, name: challenge.name, outcome: terminal.status });
+  ledgerMark(challenge.id, "miss");
   return false;
 }
 
