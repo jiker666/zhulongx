@@ -275,6 +275,15 @@ export function createToolCallPipeline(deps: ToolCallPipelineDeps): ToolCallPipe
   let conflictScanPrefix: readonly string[] | null = null;
   const observer = new RunObserver(state, deps.runtime);
   const escalatedTiers = new Map<string, number>();
+  // Categorical force gate (tier-3 checkpoint_gap): 16x advisories have proven
+  // ignorable (10100: 53 minutes across two runs, zero findings persisted, the
+  // final advisory read and skipped). Blocking every non-persisting call until
+  // a checkpoint or finding lands converts the last advisory from advice into
+  // protocol — one forced checkpoint turn is the cost, an empty handoff at
+  // budget death is the alternative.
+  let checkpointForceArmed = false;
+  const CHECKPOINT_SATISFYING = new Set(["checkpoint", "record_finding"]);
+  const FORCE_GATE_ALWAYS_ALLOWED = new Set(["finish_task", "submit_plan", "update_plan_steps", "record_lesson", "read_shared_evidence"]);
   let settled = false;
 
   return {
@@ -289,6 +298,11 @@ export function createToolCallPipeline(deps: ToolCallPipelineDeps): ToolCallPipe
       if (settled) {
         return { block: true, reason: "The task has already been settled; provide the final answer without further tool calls." };
       }
+      if (checkpointForceArmed && !CHECKPOINT_SATISFYING.has(toolCall.toolName) && !FORCE_GATE_ALWAYS_ALLOWED.has(toolCall.toolName)) {
+        await audit.append("observer.force_gate", { toolCallId: toolCall.toolCallId, toolName: toolCall.toolName }, { source: "orchestrator", actor: "run-observer", correlationId: toolCall.toolCallId });
+        return { block: true, reason: "Checkpoint force gate: this session crossed the FINAL no-checkpoint escalation. Call checkpoint() or record_finding() NOW to persist confirmed facts, ruled-out hypotheses, and the single next concrete step. Every other tool stays blocked until something is persisted; finish_task also remains available if the right move is ending the run as blocked." };
+      }
+      if (CHECKPOINT_SATISFYING.has(toolCall.toolName)) checkpointForceArmed = false;
       if (toolCall.toolName === "finish_task" && deps.submissionPolicy === "strict") {
         const input = toolCall.args && typeof toolCall.args === "object" ? toolCall.args as Record<string, unknown> : {};
         const verification = Array.isArray(input.verification)
@@ -405,6 +419,10 @@ export function createToolCallPipeline(deps: ToolCallPipelineDeps): ToolCallPipe
         await audit.append("observer.escalated", { kind: escalation.kind, injected: true, text: escalation.text }, { source: "orchestrator", actor: "run-observer", correlationId: toolCall.toolCallId });
         await emit("observer.escalated", { kind: escalation.kind, injected: true });
         deps.escalate?.(escalation.text);
+        if (escalation.kind === "checkpoint_gap" && escalation.tier >= 3 && !checkpointForceArmed) {
+          checkpointForceArmed = true;
+          await audit.append("observer.force_gate.armed", { kind: escalation.kind, occurrences: anomalies.find((a) => a.kind === "checkpoint_gap")?.occurrences }, { source: "orchestrator", actor: "run-observer", correlationId: toolCall.toolCallId });
+        }
       }
       if (!isError && !OBSERVATION_EXCLUDED_TOOLS.has(toolCall.toolName)) {
         const observation = JSON.stringify({ content: persistedContent, details: persistedDetails });

@@ -538,3 +538,43 @@ describe("createXuanShuMcpServer", () => {
     expect(typeof server.instance.connect).toBe("function");
   });
 });
+
+describe("checkpoint force gate (tier-3 checkpoint_gap)", () => {
+  function callRecord(name: string, id = name) {
+    return { toolCallId: `tc-${id}`, toolName: name, args: {}, description: "" } as never;
+  }
+
+  function toolResult() {
+    return { content: [{ type: "text" as const, text: "ok" }], details: {} };
+  }
+
+  it("blocks non-persisting calls after the final checkpoint_gap escalation until a checkpoint lands", async () => {
+    const { run, pipeline } = harness();
+    // Seed the anomaly near tier 3 and put the counter above the gap threshold
+    // so the next observation escalates and arms the gate.
+    // Drive past every configurable threshold (runtime values vary).
+    run.actionsSinceCheckpoint = 10_000;
+    run.observerAnomalies = [{
+      kind: "checkpoint_gap",
+      detail: "many actions elapsed without a decision checkpoint",
+      occurrences: 10_000,
+      firstSeenAt: new Date().toISOString(),
+      lastSeenAt: new Date().toISOString(),
+    }];
+    await pipeline.afterToolCall(callRecord("mcp.echo", "arm"), toolResult(), false);
+
+    const blocked = await pipeline.beforeToolCall(callRecord("mcp.echo", "work"));
+    expect(blocked?.block).toBe(true);
+    expect(blocked?.reason).toContain("Checkpoint force gate");
+
+    // finish_task stays available so a doomed run can still end itself.
+    const finish = await pipeline.beforeToolCall(callRecord("finish_task", "end"));
+    expect(finish?.reason ?? "").not.toContain("Checkpoint force gate");
+
+    // A checkpoint call is allowed and disarms the gate.
+    const checkpoint = await pipeline.beforeToolCall(callRecord("checkpoint", "ckpt"));
+    expect(checkpoint?.reason ?? "").not.toContain("Checkpoint force gate");
+    const resumed = await pipeline.beforeToolCall(callRecord("mcp.echo", "resume"));
+    expect(resumed?.reason ?? "").not.toContain("Checkpoint force gate");
+  });
+});
