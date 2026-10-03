@@ -559,7 +559,22 @@ async function cmdLoop(options) {
   // its depth and grinding on would just burn rating — stop and report.
   let missesOnAttempt = 0;
   let consecutiveAbandons = 0;
+  let lastIterationAt = Date.now();
   while (true) {
+    // Freeze guard: a wall-time jump >15min between iterations means the host
+    // slept (Oct 1-3 holiday: ~100 attempts burned at ~-10 each while the VM
+    // froze mid-run and attempts expired on the platform). After a freeze,
+    // verify the stack is stable before burning another attempt.
+    const iterationStart = Date.now();
+    if (iterationStart - lastIterationAt > 15 * 60_000) {
+      console.warn(`[loop] wall-clock jump of ${Math.round((iterationStart - lastIterationAt) / 60_000)} min — freeze/sleep recovery; verifying stack before touching the platform`);
+      for (let probe = 0; probe < 6 && !(await apiHealthy()); probe++) {
+        console.warn("[loop] API not healthy after freeze; waiting 60s");
+        await sleep(60_000);
+      }
+      await sleep(60_000);
+    }
+    lastIterationAt = iterationStart;
     let rating;
     try {
       const detail = unwrap((await nss("/current/")).json);
@@ -647,11 +662,12 @@ async function cmdLoop(options) {
       const boundedRescue = Boolean(handoffFor(lastRunAttemptId)) || Boolean(rejectedSubmissionFor(lastRunAttemptId));
       const rescueDeadline = Date.now() + 4 * 60_000;
       let pollFailures = 0;
+      let attemptWentTerminal = false;
       while (pollFailures < 5) {
         await sleep(60_000);
         try {
           const cur = unwrap((await nss("/current/")).json);
-          if (cur?.attempt?.state_label !== "active") break;
+          if (cur?.attempt?.state_label !== "active") { attemptWentTerminal = true; break; }
           console.log(`[loop] RESCUE WINDOW open for attempt ${cur.attempt.id} (${cur.attempt.remaining_seconds}s left)`);
           if (boundedRescue && Date.now() >= rescueDeadline) {
             console.warn("[loop] bounded rescue window elapsed with a handoff present — self-retrying via next/ reuse");
@@ -672,6 +688,14 @@ async function cmdLoop(options) {
         missesOnAttempt = 0;
         consecutiveAbandons = 0;
         continue;
+      }
+      // Breaker hole fix: an attempt that expired during the rescue window
+      // (host sleep froze the loop mid-window — the Oct 1-3 collapse pattern)
+      // must count toward the miss streak, or the circuit breaker never trips
+      // and the loop bleeds rating indefinitely (2111 -> 1727 over a weekend).
+      if (attemptWentTerminal) {
+        consecutiveAbandons++;
+        console.warn(`[loop] attempt ${lastRunAttemptId} went terminal during the rescue window — counting toward breaker (${consecutiveAbandons} consecutive)`);
       }
       console.warn(`[loop] rescue window closed without a solve (miss ${missesOnAttempt})`);
       let attemptRemaining = null;

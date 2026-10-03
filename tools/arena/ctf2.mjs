@@ -1,0 +1,530 @@
+#!/usr/bin/env node
+// DASCTF CTF2 (ctf2.dasctf.com) practice-ground driver for 烛龙·玄枢.
+// MCP-over-HTTP bridge: ctf2 agent tools <-> local xuanshu /v1 API.
+// Runs CONCURRENTLY with the NSSCTF arena loop; both share the xuanshu API.
+// Credentials come from .env (gitignored): CTF2_AGENT_TOKEN, XUANSHU_SERVER_TOKEN.
+
+import { mkdir, writeFile } from "node:fs/promises";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const ROOT = resolve(fileURLToPath(import.meta.url), "../../..");
+const WORK_DIR = resolve(ROOT, "workspace/ctf2");
+const LOG_PATH = resolve(ROOT, ".xuan-shu/arena/ctf2-results.jsonl");
+const MCP_BASE = process.env.CTF2_MCP_BASE ?? "https://ctf2.dasctf.com/api/ai/v1/mcp";
+const XUANSHU_BASE = process.env.XUANSHU_BASE ?? "http://127.0.0.1:7318";
+
+function loadEnvFile() {
+  const envPath = resolve(ROOT, ".env");
+  if (!existsSync(envPath)) return;
+  for (const line of readFileSync(envPath, "utf8").split(/\r?\n/)) {
+    const match = line.match(/^([A-Z0-9_]+)=(.*)$/);
+    if (match && !process.env[match[1]]) process.env[match[1]] = match[2];
+  }
+}
+loadEnvFile();
+
+const CTF2_TOKEN = process.env.CTF2_AGENT_TOKEN;
+const SERVER_TOKEN = process.env.XUANSHU_SERVER_TOKEN;
+
+const die = (message) => { console.error(`[ctf2] ${message}`); process.exit(1); };
+const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
+
+// ---------------------------------------------------------------- xuanshu API
+
+async function xuanshu(path, options = {}, timeoutMs = 45_000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(`${XUANSHU_BASE}${path}`, {
+      ...options,
+      signal: controller.signal,
+      ...(options.body ? { headers: { "content-type": "application/json", authorization: `Bearer ${SERVER_TOKEN}`, ...(options.headers ?? {}) } } : { headers: { authorization: `Bearer ${SERVER_TOKEN}` } }),
+    });
+    const text = await response.text();
+    let json;
+    try { json = JSON.parse(text); } catch { json = { raw: text.slice(0, 800) }; }
+    return { status: response.status, json };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// The gateway holds model settings session-scoped; re-assert each iteration so
+// an API restart cannot silently break every run (same lesson as the arena).
+async function ensureModel() {
+  const apiKey = process.env.BIGMODEL_API_KEY;
+  if (!apiKey) return;
+  try {
+    const result = await xuanshu("/v1/settings/model", {
+      method: "POST",
+      body: JSON.stringify({ modelId: process.env.ARENA_MODEL_ID ?? "glm-5.3", apiKey, baseUrl: process.env.BIGMODEL_BASE_URL ?? "https://open.bigmodel.cn/api/anthropic", reasoning: true }),
+    });
+    if (result.status >= 300) console.warn(`[ctf2] ensureModel -> ${result.status}`);
+  } catch (error) {
+    console.warn(`[ctf2] ensureModel failed (${error?.message ?? error})`);
+  }
+}
+
+async function apiHealthy() {
+  try {
+    const probe = await xuanshu("/v1/settings/model");
+    return probe.status < 500;
+  } catch {
+    return false;
+  }
+}
+
+// ------------------------------------------------------------------- MCP client
+
+let mcpSession = null;
+let mcpRequestId = 10;
+
+function parseMcpBody(raw) {
+  try { return JSON.parse(raw); } catch { /* SSE framing */ }
+  for (const line of raw.split(/\r?\n/)) {
+    if (line.startsWith("data: ")) {
+      try { return JSON.parse(line.slice(6)); } catch { /* skip bad frame */ }
+    }
+  }
+  throw new Error("unparseable MCP response");
+}
+
+async function mcpPost(payload, timeoutMs = 30_000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(MCP_BASE, {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        authorization: `Bearer ${CTF2_TOKEN}`,
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        ...(mcpSession ? { "mcp-session-id": mcpSession } : {}),
+      },
+      body: JSON.stringify(payload),
+    });
+    const sessionId = response.headers.get("mcp-session-id");
+    if (sessionId) mcpSession = sessionId;
+    const text = await response.text();
+    if (response.status === 404 || response.status === 400) {
+      // Session expired/invalid: drop it so the next call re-initializes.
+      mcpSession = null;
+      throw Object.assign(new Error(`MCP HTTP ${response.status}: ${text.slice(0, 200)}`), { sessionLost: true });
+    }
+    if (response.status === 429) {
+      const retryAfter = Number(response.headers.get("retry-after-ms") ?? 5_000);
+      throw Object.assign(new Error("MCP rate limited"), { retryAfter });
+    }
+    return parseMcpBody(text);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function mcpInitialize() {
+  const result = await mcpPost({
+    jsonrpc: "2.0", id: mcpRequestId++,
+    method: "initialize",
+    params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "zhulongx-ctf2-driver", version: "1.0" } },
+  });
+  await mcpPost({ jsonrpc: "2.0", method: "notifications/initialized" }).catch(() => undefined);
+  return result;
+}
+
+async function mcpCall(name, args = {}) {
+  if (!mcpSession) await mcpInitialize();
+  try {
+    const response = await mcpPost({ jsonrpc: "2.0", id: mcpRequestId++, method: "tools/call", params: { name, arguments: args } });
+    if (response.error) throw new Error(`MCP error ${response.error.code}: ${response.error.message}`);
+    const result = response.result ?? {};
+    if (result.isError) {
+      const structured = result.structuredContent ?? {};
+      const err = new Error(`MCP tool error ${structured.code ?? "?"}: ${structured.message ?? JSON.stringify(result).slice(0, 200)}`);
+      if (structured.retryable) err.retryAfter = Number(structured.retry_after_ms ?? 5_000);
+      throw err;
+    }
+    const text = (result.content ?? []).filter((block) => block.type === "text").map((block) => block.text).join("\n");
+    let parsed = null;
+    try { parsed = JSON.parse(text); } catch { /* plain text result */ }
+    return parsed ?? text;
+  } catch (error) {
+    if (error.sessionLost) {
+      // One transparent retry after re-initialization; a second failure raises.
+      if (!mcpSession) throw error;
+      mcpSession = null;
+      return mcpCall(name, args);
+    }
+    throw error;
+  }
+}
+
+// ------------------------------------------------------------------ run ledger
+
+async function record(entry) {
+  await mkdir(resolve(LOG_PATH, ".."), { recursive: true });
+  const { appendFile } = await import("node:fs/promises");
+  await appendFile(LOG_PATH, `${JSON.stringify({ ts: new Date().toISOString(), ...entry })}\n`);
+}
+
+// Local skip ledger: challenges already attempted (solved or twice-missed) so
+// the loop always moves forward instead of re-attacking the same wall.
+function ledgerPath() { return resolve(WORK_DIR, "ledger.json"); }
+function readLedger() {
+  try { return JSON.parse(readFileSync(ledgerPath(), "utf8")); } catch { return { done: {} }; }
+}
+function writeLedger(ledger) { writeFileSync(ledgerPath(), JSON.stringify(ledger, null, 2)); }
+function ledgerMark(challengeId, status) {
+  const ledger = readLedger();
+  const prior = ledger.done[challengeId] ?? { misses: 0 };
+  ledger.done[challengeId] = { ...prior, status, misses: prior.misses + (status === "miss" ? 1 : 0), at: new Date().toISOString() };
+  writeLedger(ledger);
+}
+function ledgerMisses(challengeId) { return readLedger().done[challengeId]?.misses ?? 0; }
+
+// Handoff carry across retries of the same challenge (arena-proven pattern).
+function handoffPath(challengeId) { return resolve(WORK_DIR, `handoff-${challengeId}.json`); }
+function handoffFor(challengeId) {
+  try { return JSON.parse(readFileSync(handoffPath(challengeId), "utf8")); } catch { return null; }
+}
+function writeHandoff(challengeId, payload) {
+  const prior = handoffFor(challengeId);
+  const dedupe = (items) => [...new Set(items)];
+  const merged = {
+    ...payload,
+    findings: dedupe([...(prior?.findings ?? []), ...(payload.findings ?? [])]).slice(0, 8),
+    nextSteps: dedupe([...(prior?.nextSteps ?? []), ...(payload.nextSteps ?? [])]).slice(0, 6),
+    summary: payload.summary?.trim() ? payload.summary : (prior?.summary ?? ""),
+    handoffText: payload.handoffText ?? prior?.handoffText,
+  };
+  writeFileSync(handoffPath(challengeId), JSON.stringify(merged, null, 2));
+}
+
+// ---------------------------------------------------------------- task builder
+
+function categoryOf(label) {
+  const key = String(label ?? "").toLowerCase();
+  const known = ["web", "crypto", "reverse", "pwn", "misc", "forensics"];
+  return known.includes(key) ? key : "misc";
+}
+
+function buildTask(challenge, detail, env, annexFiles, budgetMinutes) {
+  const lines = [];
+  lines.push(`CTF2 平台(DASCTF)授权练习题(练习场:${challenge.practice_ground_name ?? "unknown"},类别:${challenge.category ?? "unknown"},难度:${challenge.difficulty ?? "?"})。以下是完整题面:`);
+  const priorHandoff = handoffFor(challenge.id);
+  if (priorHandoff) {
+    lines.push("");
+    lines.push("重要:这是续跑(前一轮遗留分析的延续)。严禁重新反汇编/重新下载/重新推导前一轮已验证的任何内容。开局直接读发现与遗留步骤,第一轮工具调用就该是增量实验。");
+    if (priorHandoff.summary) lines.push(`前一轮总结:${priorHandoff.summary}`);
+    for (const finding of priorHandoff.findings ?? []) lines.push(`- [已验证] ${finding}`);
+    for (const step of priorHandoff.nextSteps ?? []) lines.push(`- [下一步] ${step}`);
+    if (priorHandoff.handoffText) lines.push(`前一轮 handoff 原文:\n${priorHandoff.handoffText}`);
+    lines.push("");
+  }
+  const body = typeof detail === "object"
+    ? [detail.description ?? detail.content ?? detail.title, detail.hint].filter(Boolean).join("\n")
+    : String(detail ?? "");
+  lines.push(String(challenge.name ?? "").trim());
+  lines.push(body.trim() || "(题面无更多文字,以附件/环境为准)");
+  lines.push("");
+  const urls = env?.access_urls ?? env?.urls ?? [];
+  if (env && urls.length > 0) {
+    lines.push(`远程环境(本题唯一授权测试目标):${Array.isArray(urls) ? urls.join(", ") : urls}(环境剩余约 ${Math.round((env.remaining_seconds ?? env.remaining_minutes * 60 ?? 3600) / 60)} 分钟)。远程是脆弱的单实例:串行探测、最多 2 个连接、严禁并发扫描。续跑开局先发一个轻量请求确认存活,死亡则立即以 blocked 结束。`);
+    lines.push("平台约定:重托管题的 flag 由平台生成、只存在于远程环境内;flag 必须实际从远程环境读取,网络 writeup 里的历史 flag 属于原比赛环境,不得采信或作为提交值。");
+  } else if (env) {
+    lines.push(`远程环境状态:${JSON.stringify(env).slice(0, 400)}`);
+  }
+  if (annexFiles.length > 0) lines.push(`附件(只读挂载):/workspace/input/ctf2/${challenge.id}/ 下有 ${annexFiles.join(", ")}`);
+  lines.push("");
+  if (budgetMinutes > 0) {
+    lines.push(`时间预算:本次运行约 ${budgetMinutes} 分钟(超时会被强制中止,中止前未固化的推理即丢失)。按此预算规划路径深度:优先单条最高价值主线;临近预算时把已验证的关键值/中间结果用 record_finding 或 scratch 文件固化,便于续跑接手。`);
+  }
+  lines.push("目标:解出本题 flag,以题面或环境回显的实际格式逐字符提交,严禁大小写/拼写改写。要求:只测试本题给出的目标与附件;finish_task 的提交值必须来自成功工具输出且经独立验证,与验证输出逐字符一致;确实无法解出时以 blocked 结束,严禁伪造 flag。");
+  return lines.join("\n");
+}
+
+// ------------------------------------------------------------------- main flow
+
+async function fetchAttachment(name, signedUrl, dir) {
+  const { basename } = await import("node:path");
+  const { Readable } = await import("node:stream");
+  const { pipeline } = await import("node:stream/promises");
+  const { createWriteStream, statSync } = await import("node:fs");
+  const target = resolve(dir, basename(new URL(signedUrl).pathname) || name || "annex.bin");
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 180_000);
+  try {
+    const response = await fetch(signedUrl, { signal: controller.signal });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    await pipeline(Readable.fromWeb(response.body), createWriteStream(target));
+    if (statSync(target).size === 0) throw new Error("empty download");
+    return basename(target);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function submitFlag(challenge, flag, detail) {
+  const args = { practice_ground_id: challenge.practice_ground_id, challenge_id: challenge.id, flag, confirmation: true };
+  const subFlagId = typeof detail === "object" ? detail?.suite?.sub_flag_id ?? detail?.sub_flag_id : undefined;
+  if (subFlagId) args.sub_flag_id = subFlagId;
+  const verdict = await mcpCall("ctf2_submit_flag", args);
+  console.log(`[ctf2] submit verdict (${challenge.friendly_id ?? challenge.id}): ${JSON.stringify(verdict).slice(0, 400)}`);
+  return verdict;
+}
+
+async function stopRun(runId) {
+  const result = await xuanshu(`/v1/runs/${runId}/stop`, { method: "POST", body: "{}" });
+  if (result.status >= 300) console.warn(`[ctf2] stop run ${runId} -> ${result.status}`);
+}
+
+async function watchRun(runId, deadlineMs) {
+  const deadline = Date.now() + deadlineMs;
+  while (Date.now() < deadline) {
+    await sleep(20_000);
+    let snapshot;
+    try {
+      snapshot = await xuanshu(`/v1/runs/${runId}`);
+    } catch (error) {
+      console.warn(`[ctf2] poll ${runId} failed (${error?.message ?? error}); continuing`);
+      continue;
+    }
+    const status = snapshot.json?.status ?? snapshot.json?.state?.status;
+    if (snapshot.status !== 200 || !status) continue;
+    console.log(`[xuanshu] ${runId.slice(0, 8)} status=${status}`);
+    if (["completed", "blocked", "failed", "aborted"].includes(status)) {
+      const state = snapshot.json.state ?? snapshot.json ?? {};
+      return state;
+    }
+  }
+  return null;
+}
+
+// The agent owns exactly ONE environment slot. Track its holder in the local
+// ledger so switching challenges destroys the old environment first (there is
+// no global env query — only per-challenge get_environment).
+async function ensureEnvironment(challenge, budgetMs) {
+  const urls = (candidate) => (Array.isArray(candidate?.access_urls) ? candidate.access_urls : Array.isArray(candidate?.urls) ? candidate.urls : []);
+  const ids = (target) => ({ practice_ground_id: target.practice_ground_id, challenge_id: target.id });
+  const ledger = readLedger();
+  const holder = ledger.currentEnvChallenge;
+  if (holder && holder.id !== challenge.id) {
+    console.log(`[ctf2] destroying held environment of ${holder.id} (single-slot policy)`);
+    await mcpCall("ctf2_user_delete_practice_id_challenges_challengeid_environment", ids(holder)).catch((e) => console.warn(`[ctf2] destroy failed: ${e.message}`));
+    ledger.currentEnvChallenge = null;
+    writeLedger(ledger);
+  }
+  if (holder && holder.id === challenge.id) {
+    const current = await mcpCall("ctf2_get_environment", ids(challenge)).catch(() => null);
+    if (current && urls(current).length > 0) {
+      if ((current.remaining_seconds ?? 3600) < 600) {
+        await mcpCall("ctf2_extend_environment", ids(challenge)).catch(() => undefined);
+      }
+      return current;
+    }
+  }
+  const started = await mcpCall("ctf2_start_challenge_environment", ids(challenge));
+  ledger.currentEnvChallenge = { id: challenge.id, practice_ground_id: challenge.practice_ground_id };
+  writeLedger(ledger);
+  const waitDeadline = Date.now() + Math.min(budgetMs, 5 * 60_000);
+  let env = started;
+  while (Date.now() < waitDeadline) {
+    if (env?.status === "access_ready" || urls(env).length > 0) return env;
+    await sleep(10_000);
+    env = await mcpCall("ctf2_get_environment", ids(challenge)).catch(() => env);
+  }
+  return env;
+}
+
+async function solveOne(challenge, options) {
+  console.log(`[ctf2] challenge ${challenge.friendly_id ?? challenge.id} ${challenge.name} (${challenge.category} ${challenge.difficulty}, ${challenge.solve_count} solves)`);
+  const detail = await mcpCall("ctf2_get_practice_challenge", { practice_ground_id: challenge.practice_ground_id, challenge_id: challenge.id });
+
+  const dir = resolve(WORK_DIR, challenge.id);
+  await mkdir(dir, { recursive: true });
+  await writeFile(resolve(dir, "challenge.json"), JSON.stringify({ challenge, detail }, null, 2));
+
+  const annexFiles = [];
+  const attachments = typeof detail === "object" ? (detail.attachments ?? detail.files ?? []) : [];
+  for (const attachment of attachments.slice(0, 6)) {
+    const name = attachment.name ?? attachment.filename ?? String(attachment);
+    const fileId = attachment.file_id ?? attachment.id;
+    if (!fileId) continue;
+    try {
+      const signed = await mcpCall("ctf2_get_attachment_url", { practice_ground_id: challenge.practice_ground_id, challenge_id: challenge.id, file_id: fileId });
+      const url = typeof signed === "object" ? (signed.url ?? signed.signed_url) : String(signed);
+      annexFiles.push(await fetchAttachment(name, url, dir));
+    } catch (error) {
+      console.warn(`[ctf2] attachment ${name} failed: ${error.message}`);
+    }
+  }
+
+  const priorHandoff = handoffFor(challenge.id);
+  const budgetMs = (priorHandoff ? 46 : 40) * 60_000;
+  let env = null;
+  if (challenge.has_container) env = await ensureEnvironment(challenge, budgetMs);
+  if (challenge.has_container && env && !(env.access_urls ?? env.urls ?? []).length) {
+    console.warn(`[ctf2] environment never became ready (${JSON.stringify(env).slice(0, 200)}); skipping challenge`);
+    ledgerMark(challenge.id, "miss");
+    return false;
+  }
+
+  const task = buildTask(challenge, detail, env, annexFiles, Math.round(budgetMs / 60_000));
+  await writeFile(resolve(dir, "task.txt"), task);
+  const attachmentPaths = annexFiles.map((name) => `/workspace/input/ctf2/${challenge.id}/${name}`);
+  const created = await xuanshu("/v1/runs", {
+    method: "POST",
+    body: JSON.stringify({
+      task,
+      attachments: attachmentPaths,
+      ...(priorHandoff?.from ? { lineage: { parentRunId: priorHandoff.from } } : {}),
+      metadata: { source: "question-bank", questionId: `ctf2-${challenge.id}`, category: categoryOf(challenge.category) },
+    }),
+  });
+  if (created.status !== 202) die(`xuanshu run creation failed: ${created.status} ${JSON.stringify(created.json).slice(0, 300)}`);
+  const runId = created.json.id;
+  console.log(`[ctf2] xuanshu run ${runId} queued`);
+
+  const terminal = await watchRun(runId, budgetMs);
+  if (!terminal) {
+    console.warn(`[ctf2] driver budget exhausted; stopping run ${runId}`);
+    await stopRun(runId);
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        const handoff = (await xuanshu(`/v1/runs/${runId}/handoff`)).json;
+        const text = handoff?.handoff ?? handoff?.data?.handoff;
+        if (typeof text === "string" && text.trim() !== "") {
+          writeHandoff(challenge.id, { from: runId, at: new Date().toISOString(), handoffText: text.slice(0, 4000) });
+          break;
+        }
+      } catch { /* not written yet */ }
+      await sleep(3_000);
+    }
+    await record({ challengeId: challenge.id, runId, name: challenge.name, outcome: "driver-timeout" });
+    return false;
+  }
+
+  const submission = terminal.submission ?? null;
+  const findings = (Array.isArray(terminal.findings) ? terminal.findings : []).map((f) => (typeof f === "string" ? f : `${f.title ?? ""}: ${f.description ?? ""}`.trim()).slice(0, 600)).filter(Boolean).slice(0, 8);
+  const nextSteps = (Array.isArray(terminal.nextSteps) ? terminal.nextSteps : []).filter((s) => typeof s === "string").map((s) => s.slice(0, 400)).slice(0, 6);
+  writeHandoff(challenge.id, { from: runId, at: new Date().toISOString(), summary: String(terminal.summary ?? "").slice(0, 1200), findings, nextSteps });
+
+  if (terminal.status === "completed" && submission && !/wrote \d+ bytes|permission denied/i.test(submission)) {
+    const verdict = await submitFlag(challenge, submission, detail);
+    const solved = typeof verdict === "object" && (verdict.correct === true || verdict.solved === true || verdict.is_correct === true);
+    await record({ challengeId: challenge.id, runId, name: challenge.name, outcome: "submitted", submission, verdict });
+    ledgerMark(challenge.id, solved ? "solved" : "miss");
+    if (solved) {
+      try { readFileSync(handoffPath(challenge.id)); } catch { /* nothing to clear */ }
+      const { rmSync } = await import("node:fs");
+      try { rmSync(handoffPath(challenge.id), { force: true }); } catch { /* best effort */ }
+      await mcpCall("ctf2_agent_log_note", { challenge_id: challenge.id, kind: "result", content: `solved by zhulongx run ${runId}` }).catch(() => undefined);
+      return true;
+    }
+    console.warn(`[ctf2] submission rejected for ${challenge.friendly_id ?? challenge.id}`);
+    return false;
+  }
+
+  console.log(`[ctf2] run settled as ${terminal.status} without a submission`);
+  await record({ challengeId: challenge.id, runId, name: challenge.name, outcome: terminal.status });
+  return false;
+}
+
+async function cmdLoop(options) {
+  if (!CTF2_TOKEN) die("CTF2_AGENT_TOKEN missing in .env");
+  if (!SERVER_TOKEN) die("XUANSHU_SERVER_TOKEN missing in .env");
+  let consecutiveMisses = 0;
+  let lastIterationAt = Date.now();
+  while (true) {
+    const iterationStart = Date.now();
+    // Freeze guard: a multi-minute wall-time jump means the host (or VM) was
+    // suspended — the NSSCTF collapse of Oct 1-3 burned ~100 attempts in
+    // wake/sleep cycles. After a freeze, verify the full stack is stable
+    // before burning any platform quota.
+    if (iterationStart - lastIterationAt > 15 * 60_000) {
+      console.warn(`[ctf2] wall-clock jump of ${Math.round((iterationStart - lastIterationAt) / 60_000)} min detected — freeze/sleep recovery; verifying stack stability`);
+      for (let probe = 0; probe < 6; probe++) {
+        if (await apiHealthy()) break;
+        console.warn("[ctf2] API not healthy after freeze; waiting 60s");
+        await sleep(60_000);
+      }
+      await sleep(60_000); // one stability minute before touching the platform
+    }
+    lastIterationAt = iterationStart;
+
+    if (consecutiveMisses >= 4) {
+      console.warn("[ctf2] four challenges missed in a row — pausing 10 minutes");
+      await sleep(600_000);
+      consecutiveMisses = 0;
+    }
+    if (!(await apiHealthy())) {
+      console.warn(`[ctf2] ${new Date().toISOString()} xuanshu API unreachable — holding (fetching would only waste quota); retrying in 60s`);
+      await sleep(60_000);
+      continue;
+    }
+    await ensureModel();
+
+    let next;
+    try {
+      next = await mcpCall("ctf2_agent_next_challenges", {});
+    } catch (error) {
+      if (error.retryAfter) { console.warn(`[ctf2] rate limited; waiting ${error.retryAfter + 1000}ms`); await sleep(error.retryAfter + 1_000); continue; }
+      console.warn(`[ctf2] next_challenges failed (${error.message}); retrying in 60s`);
+      await sleep(60_000);
+      continue;
+    }
+    const items = (next?.items ?? []).filter((item) => !item.is_solved);
+    const ledger = readLedger();
+    const candidate = items.find((item) => (ledger.done[item.id]?.status !== "solved") && (ledger.done[item.id]?.misses ?? 0) < (handoffFor(item.id) ? 2 : 1));
+    if (!candidate) {
+      console.log("[ctf2] no eligible challenge from recommendations; waiting 5 minutes");
+      await sleep(300_000);
+      continue;
+    }
+    try {
+      const solved = await solveOne(candidate, options);
+      consecutiveMisses = solved ? 0 : consecutiveMisses + 1;
+    } catch (error) {
+      if (error.retryAfter) {
+        console.warn(`[ctf2] rate limited mid-challenge; waiting ${error.retryAfter + 1000}ms`);
+        await sleep(error.retryAfter + 1_000);
+      } else {
+        console.warn(`[ctf2] solveOne crashed: ${error?.message ?? error}; pausing 60s`);
+        ledgerMark(candidate.id, "miss");
+        await sleep(60_000);
+      }
+    }
+    await sleep(10_000);
+  }
+}
+
+async function main() {
+  const [command] = process.argv.slice(2);
+  const options = {};
+  switch (command) {
+    case "loop": return cmdLoop(options);
+    case "whoami": {
+      const profile = await mcpCall("ctf2_agent_whoami", {});
+      console.log(JSON.stringify(profile, null, 2));
+      return 0;
+    }
+    case "next": {
+      const next = await mcpCall("ctf2_agent_next_challenges", {});
+      console.log(JSON.stringify(next, null, 2));
+      return 0;
+    }
+    case "env": {
+      // Requires a challenge context; report the ledger-held slot instead.
+      const ledger = readLedger();
+      console.log(JSON.stringify(ledger.currentEnvChallenge ?? { holder: null }, null, 2));
+      return 0;
+    }
+    default:
+      console.log("Usage:\n  node tools/arena/ctf2.mjs loop\n  node tools/arena/ctf2.mjs whoami\n  node tools/arena/ctf2.mjs next\n  node tools/arena/ctf2.mjs env");
+      return command ? 1 : 0;
+  }
+}
+
+process.exit(await main());
