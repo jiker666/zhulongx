@@ -156,7 +156,7 @@ async function mcpCall(name, args = {}) {
     // them turns the list into a bare array — every caller reading .items
     // then saw an empty recommendation set ("no eligible" forever).
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      for (const key of ["environment", "challenge", "ground", "url"]) {
+      for (const key of ["environment", "challenge", "ground", "attachment", "url"]) {
         if (parsed[key] !== undefined) return parsed[key];
       }
     }
@@ -377,7 +377,10 @@ async function solveOne(challenge, options) {
   const annexFiles = [];
   const attachments = typeof detail === "object" ? (detail.attachments ?? detail.files ?? []) : [];
   for (const attachment of attachments.slice(0, 6)) {
-    const name = attachment.name ?? attachment.filename ?? String(attachment);
+    // Attachment records carry no top-level name — the display name lives at
+    // file.original_name (and file_name on the signed-URL response). Never
+    // String() the raw object; that is how "[object Object]" leaked into logs.
+    const name = attachment.file?.original_name ?? attachment.name ?? attachment.filename ?? attachment.file_name ?? attachment.id;
     const fileId = attachment.file_id ?? attachment.id;
     if (!fileId) continue;
     try {
