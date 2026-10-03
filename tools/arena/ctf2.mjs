@@ -216,13 +216,20 @@ function writeHandoff(challengeId, payload) {
 // ---------------------------------------------------------------- task builder
 
 // Environment records expose their access point as access_url (a SINGLE
-// string), not access_urls — reading the array forms only made every
-// readiness check and the task's remote-URL line come up empty.
+// string) and access_urls (an array of OBJECTS like {url, type, nc_ssl}) —
+// returning the raw array made the task text interpolate "[object Object]"
+// as the authorized target (WarmUp blocked after 41 turns hunting a URL the
+// prompt never contained). Normalize every element to a plain string.
 function envUrls(candidate) {
-  if (Array.isArray(candidate?.access_urls)) return candidate.access_urls;
-  if (Array.isArray(candidate?.urls)) return candidate.urls;
-  if (typeof candidate?.access_url === "string" && candidate.access_url.trim() !== "") return [candidate.access_url];
-  return [];
+  const normalize = (entry) => {
+    if (typeof entry === "string") return entry.trim() !== "" ? entry : null;
+    if (entry && typeof entry === "object" && typeof entry.url === "string" && entry.url.trim() !== "") return entry.url;
+    return null;
+  };
+  const raw = Array.isArray(candidate?.access_urls) ? candidate.access_urls
+    : Array.isArray(candidate?.urls) ? candidate.urls
+    : (typeof candidate?.access_url === "string" && candidate.access_url.trim() !== "" ? [candidate.access_url] : []);
+  return raw.map(normalize).filter(Boolean);
 }
 
 function categoryOf(label) {
