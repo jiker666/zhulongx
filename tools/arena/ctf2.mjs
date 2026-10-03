@@ -280,7 +280,10 @@ async function fetchAttachment(name, signedUrl, dir) {
   const { Readable } = await import("node:stream");
   const { pipeline } = await import("node:stream/promises");
   const { createWriteStream, statSync } = await import("node:fs");
-  const target = resolve(dir, basename(new URL(signedUrl).pathname) || name || "annex.bin");
+  const fromPath = basename(new URL(signedUrl).pathname);
+  // Signed download URLs end in a generic /download/ segment; keep the
+  // platform-provided file name instead of that meaningless last segment.
+  const target = resolve(dir, fromPath && !/^(download|file|files|get)$/i.test(fromPath) ? fromPath : (name || "annex.bin"));
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 180_000);
   try {
@@ -386,7 +389,8 @@ async function solveOne(challenge, options) {
     try {
       const signed = await mcpCall("ctf2_get_attachment_url", { practice_ground_id: challenge.practice_ground_id, challenge_id: challenge.id, file_id: fileId });
       const url = typeof signed === "object" ? (signed.url ?? signed.signed_url) : String(signed);
-      annexFiles.push(await fetchAttachment(name, url, dir));
+      const suggested = typeof signed === "object" && typeof signed.file_name === "string" ? signed.file_name : undefined;
+      annexFiles.push(await fetchAttachment(name ?? suggested, url, dir));
     } catch (error) {
       console.warn(`[ctf2] attachment ${name} failed: ${error.message}`);
     }
