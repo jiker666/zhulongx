@@ -441,7 +441,9 @@ async function solveOne(challenge, options) {
 
   if (terminal.status === "completed" && submission && !/wrote \d+ bytes|permission denied/i.test(submission)) {
     const verdict = await submitFlag(challenge, submission, detail);
-    const solved = typeof verdict === "object" && (verdict.correct === true || verdict.solved === true || verdict.is_correct === true);
+    // ctf2 verdict keys are accepted/is_solved (WarmUp solved but was ledger-
+    // marked miss because the check read correct/solved/is_correct instead).
+    const solved = typeof verdict === "object" && (verdict.accepted === true || verdict.is_solved === true || verdict.correct === true || verdict.is_correct === true);
     await record({ challengeId: challenge.id, runId, name: challenge.name, outcome: "submitted", submission, verdict });
     ledgerMark(challenge.id, solved ? "solved" : "miss");
     if (solved) {
