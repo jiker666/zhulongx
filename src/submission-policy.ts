@@ -7,6 +7,16 @@ export interface SubmissionValidationInput {
   status: "completed" | "blocked";
   candidate?: string;
   observedOutputs: readonly string[];
+  /**
+   * Outputs scanned for conflicting near-duplicate variants. Defaults to
+   * observedOutputs. The driver freezes this at the FIRST finish_task attempt:
+   * disambiguation experiments legitimately emit more near-miss readings
+   * (OCR noise at new scales), and a conflict set that regrows after every
+   * rejection cannot be addressed — the first-blocked OCR solve hit 7
+   * consecutive rejections this way. Grounding/verification still use the
+   * full history.
+   */
+  conflictScanOutputs?: readonly string[];
   independentObservedOutputs?: readonly string[];
   verification: readonly string[];
   independentlyVerified: boolean;
@@ -110,9 +120,9 @@ export function validateSubmission(input: SubmissionValidationInput): Submission
   }
   const grounded = input.observedOutputs.some((output) => output.includes(candidate));
   if (!grounded) return result(input, "pending", "The exact candidate was not observed in a successful tool result.", false, false);
-  const conflicts = conflictingVariants(candidate, input.observedOutputs);
+  const conflicts = conflictingVariants(candidate, input.conflictScanOutputs ?? input.observedOutputs);
   if (conflicts.length > 0 && !conflicts.every((variant) => input.verification.some((item) => item.includes(variant)))) {
-    return result(input, "pending", `Near-duplicate flag-like variants were also observed in tool outputs (${conflicts.join(" | ")}). Two decodes diverged: re-derive the value deterministically from the original artifact bytes, identify which variant the raw evidence supports, and address every listed variant in verification before submitting.`, true, false);
+    return result(input, "pending", `Near-duplicate flag-like variants were also observed in tool outputs (${conflicts.join(" | ")}). Two decodes diverged. Mechanical remedy, step by step: (1) identify which variant the raw artifact bytes support by re-deriving the value deterministically from the ORIGINAL bytes (never from your transcription of a prior output); (2) submit finish_task with its verification array containing EVERY listed variant copied VERBATIM as its own string element, e.g. verification: ["<variant1>", "<variant2>"] — a mention inside prose, scratch notes, or findings does NOT count, only the finish_task verification array does. Later tool outputs will not add new blocking variants.`, true, false);
   }
   // A flag-shaped answer must survive its own production: grounded only by tool
   // calls whose inputs already contained the candidate is an echo, not evidence,

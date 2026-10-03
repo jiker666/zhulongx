@@ -57,6 +57,72 @@ describe("submission policy", () => {
     expect(submissionPolicyFor({ metadata: {} })).toBe("advisory");
     expect(submissionPolicyFor({ metadata: { submissionPolicy: "strict" } })).toBe("strict");
   });
+
+  it("blocks on near-duplicate variants observed before the first submission attempt", () => {
+    const validation = validateSubmission({
+      policy: "strict",
+      status: "completed",
+      candidate: "flag{converged_answer_ok}",
+      observedOutputs: [
+        "ocr pass 1: converged_answEr_ok",
+        "final decode: flag{converged_answer_ok}",
+      ],
+      conflictScanOutputs: [
+        "ocr pass 1: converged_answEr_ok",
+        "final decode: flag{converged_answer_ok}",
+      ],
+      independentObservedOutputs: ["replay: flag{converged_answer_ok}"],
+      verification: ["Independent replay returned flag{converged_answer_ok}"],
+      independentlyVerified: true,
+    });
+    expect(validation.status).toBe("pending");
+    expect(validation.reason).toContain("Near-duplicate");
+    expect(validation.reason).toContain("converged_answEr_ok");
+  });
+
+  it("clears the block once every pre-attempt variant is addressed verbatim in the verification array", () => {
+    const validation = validateSubmission({
+      policy: "strict",
+      status: "completed",
+      candidate: "flag{converged_answer_ok}",
+      observedOutputs: [
+        "ocr pass 1: converged_answEr_ok",
+        "final decode: flag{converged_answer_ok}",
+      ],
+      conflictScanOutputs: [
+        "ocr pass 1: converged_answEr_ok",
+        "final decode: flag{converged_answer_ok}",
+      ],
+      independentObservedOutputs: ["replay: flag{converged_answer_ok}"],
+      verification: [
+        "Ruled out converged_answEr_ok (1->l misread at 200% scale)",
+        "Independent replay returned flag{converged_answer_ok}",
+      ],
+      independentlyVerified: true,
+    });
+    expect(validation.status).toBe("accepted");
+  });
+
+  it("does not add new blocking variants from post-attempt disambiguation outputs", () => {
+    const validation = validateSubmission({
+      policy: "strict",
+      status: "completed",
+      candidate: "flag{converged_answer_ok}",
+      // The 300% OCR diagnostic ran AFTER the first rejected attempt, so its
+      // fresh noise reading must not regenerate the conflict set.
+      observedOutputs: [
+        "final decode: flag{converged_answer_ok}",
+        "ocr 300% diagnostic: converged_answ0k_ok",
+      ],
+      conflictScanOutputs: [
+        "final decode: flag{converged_answer_ok}",
+      ],
+      independentObservedOutputs: ["replay: flag{converged_answer_ok}"],
+      verification: ["Independent replay returned flag{converged_answer_ok}"],
+      independentlyVerified: true,
+    });
+    expect(validation.status).toBe("accepted");
+  });
 });
 
 describe("run handoff", () => {

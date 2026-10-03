@@ -268,6 +268,11 @@ export function createToolCallPipeline(deps: ToolCallPipelineDeps): ToolCallPipe
   const { state, audit, policy, descriptors, webReasoning, emit } = deps;
   const toolRequestSequences = new Map<string, number>();
   const observedToolOutputs: Array<{ toolCallId: string; output: string; args: string }> = [];
+  // Frozen at the FIRST finish_task attempt: near-duplicate conflict scanning
+  // must not see outputs produced after it, or the disambiguation experiments
+  // the gate itself demands regenerate new near-miss readings and the block
+  // can never be addressed (OCR-converged solves hit 7 consecutive rejections).
+  let conflictScanPrefix: readonly string[] | null = null;
   const observer = new RunObserver(state, deps.runtime);
   const escalatedTiers = new Map<string, number>();
   let settled = false;
@@ -296,11 +301,13 @@ export function createToolCallPipeline(deps: ToolCallPipelineDeps): ToolCallPipe
         const groundingCalls = candidate
           ? observedToolOutputs.filter((item) => item.output.includes(candidate))
           : [];
+        if (conflictScanPrefix === null) conflictScanPrefix = observedToolOutputs.map((item) => item.output);
         const validation = validateSubmission({
           policy: deps.submissionPolicy,
           status: input.status === "completed" ? "completed" : "blocked",
           ...(typeof input.submission === "string" ? { candidate: input.submission } : {}),
           observedOutputs: observedToolOutputs.map((item) => item.output),
+          conflictScanOutputs: conflictScanPrefix,
           independentObservedOutputs: candidateOutputs.slice(1),
           verification,
           independentlyVerified: input.independentlyVerified === true,
