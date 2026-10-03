@@ -200,6 +200,21 @@ function handoffPath(challengeId) { return resolve(WORK_DIR, `handoff-${challeng
 function handoffFor(challengeId) {
   try { return JSON.parse(readFileSync(handoffPath(challengeId), "utf8")); } catch { return null; }
 }
+// Rejected submissions persist per challenge: a warm retry that cannot see the
+// burned values resubmits one verbatim and wastes the retry (arena-proven
+// wrong-<id>.json pattern, ported for ctf2 after 传感器 rejected flag{FED31F...}
+// and its retry inherited the value as "已验证" with no rejection warning).
+function wrongPath(challengeId) { return resolve(WORK_DIR, `wrong-${challengeId}.json`); }
+function rejectedValues(challengeId) {
+  try {
+    const raw = JSON.parse(readFileSync(wrongPath(challengeId), "utf8"));
+    return Array.isArray(raw.values) ? raw.values.filter((v) => typeof v === "string") : [];
+  } catch { return []; }
+}
+function recordRejected(challengeId, value) {
+  const values = [...rejectedValues(challengeId), value].slice(-8);
+  writeFileSync(wrongPath(challengeId), JSON.stringify({ challengeId, values, last: value, rejectedAt: new Date().toISOString() }, null, 2));
+}
 function writeHandoff(challengeId, payload) {
   const prior = handoffFor(challengeId);
   const dedupe = (items) => [...new Set(items)];
@@ -249,6 +264,11 @@ function buildTask(challenge, detail, env, annexFiles, budgetMinutes) {
     for (const finding of priorHandoff.findings ?? []) lines.push(`- [已验证] ${finding}`);
     for (const step of priorHandoff.nextSteps ?? []) lines.push(`- [下一步] ${step}`);
     if (priorHandoff.handoffText) lines.push(`前一轮 handoff 原文:\n${priorHandoff.handoffText}`);
+    lines.push("");
+  }
+  const rejectedList = rejectedValues(challenge.id);
+  if (rejectedList.length > 0) {
+    lines.push(`重要:以下值已在本题被平台判错(严禁原样重交任何一个,无论推导多确凿):${rejectedList.map((v) => `"${v}"`).join("、")}。若前轮推导已通过 artifact 级独立验证(重编码一致/校验和闭合/多条独立代码路径同值),则内容大概率正确、差异在包装或大小写形态。按序生成与已判错列表逐字符不同的候选并优先提交:(0)大小写变体(全小写/全大写);(1)去掉包装只交内部内容;(2)题面如指定其他包装则用之。每个候选提交前用工具输出逐字符确认,并对照已判错列表排除重复。`);
     lines.push("");
   }
   const body = typeof detail === "object"
@@ -455,12 +475,13 @@ async function solveOne(challenge, options) {
     // ctf2 verdict keys are accepted/is_solved (WarmUp solved but was ledger-
     // marked miss because the check read correct/solved/is_correct instead).
     const solved = typeof verdict === "object" && (verdict.accepted === true || verdict.is_solved === true || verdict.correct === true || verdict.is_correct === true);
+    if (!solved) recordRejected(challenge.id, submission);
     await record({ challengeId: challenge.id, runId, name: challenge.name, outcome: "submitted", submission, verdict });
     ledgerMark(challenge.id, solved ? "solved" : "miss");
     if (solved) {
-      try { readFileSync(handoffPath(challenge.id)); } catch { /* nothing to clear */ }
       const { rmSync } = await import("node:fs");
       try { rmSync(handoffPath(challenge.id), { force: true }); } catch { /* best effort */ }
+      try { rmSync(wrongPath(challenge.id), { force: true }); } catch { /* best effort */ }
       await mcpCall("ctf2_agent_log_note", { challenge_id: challenge.id, kind: "result", content: `solved by zhulongx run ${runId}` }).catch(() => undefined);
       return true;
     }
