@@ -149,6 +149,17 @@ async function mcpCall(name, args = {}) {
     const text = (result.content ?? []).filter((block) => block.type === "text").map((block) => block.text).join("\n");
     let parsed = null;
     try { parsed = JSON.parse(text); } catch { /* plain text result */ }
+    // ctf2 wraps single resources in an envelope key ({"environment": {...}},
+    // {"challenge": {...}}) — unwrap so callers see the resource directly.
+    // ONLY singular-resource keys: "items"/"challenges" are the NATURAL shape
+    // of list responses (next_challenges -> {"items": [...]}), and stripping
+    // them turns the list into a bare array — every caller reading .items
+    // then saw an empty recommendation set ("no eligible" forever).
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      for (const key of ["environment", "challenge", "ground", "url"]) {
+        if (parsed[key] !== undefined) return parsed[key];
+      }
+    }
     return parsed ?? text;
   } catch (error) {
     if (error.sessionLost) {
@@ -204,6 +215,16 @@ function writeHandoff(challengeId, payload) {
 
 // ---------------------------------------------------------------- task builder
 
+// Environment records expose their access point as access_url (a SINGLE
+// string), not access_urls — reading the array forms only made every
+// readiness check and the task's remote-URL line come up empty.
+function envUrls(candidate) {
+  if (Array.isArray(candidate?.access_urls)) return candidate.access_urls;
+  if (Array.isArray(candidate?.urls)) return candidate.urls;
+  if (typeof candidate?.access_url === "string" && candidate.access_url.trim() !== "") return [candidate.access_url];
+  return [];
+}
+
 function categoryOf(label) {
   const key = String(label ?? "").toLowerCase();
   const known = ["web", "crypto", "reverse", "pwn", "misc", "forensics"];
@@ -229,7 +250,7 @@ function buildTask(challenge, detail, env, annexFiles, budgetMinutes) {
   lines.push(String(challenge.name ?? "").trim());
   lines.push(body.trim() || "(题面无更多文字,以附件/环境为准)");
   lines.push("");
-  const urls = env?.access_urls ?? env?.urls ?? [];
+  const urls = envUrls(env);
   if (env && urls.length > 0) {
     lines.push(`远程环境(本题唯一授权测试目标):${Array.isArray(urls) ? urls.join(", ") : urls}(环境剩余约 ${Math.round((env.remaining_seconds ?? env.remaining_minutes * 60 ?? 3600) / 60)} 分钟)。远程是脆弱的单实例:串行探测、最多 2 个连接、严禁并发扫描。续跑开局先发一个轻量请求确认存活,死亡则立即以 blocked 结束。`);
     lines.push("平台约定:重托管题的 flag 由平台生成、只存在于远程环境内;flag 必须实际从远程环境读取,网络 writeup 里的历史 flag 属于原比赛环境,不得采信或作为提交值。");
@@ -306,7 +327,7 @@ async function watchRun(runId, deadlineMs) {
 // ledger so switching challenges destroys the old environment first (there is
 // no global env query — only per-challenge get_environment).
 async function ensureEnvironment(challenge, budgetMs) {
-  const urls = (candidate) => (Array.isArray(candidate?.access_urls) ? candidate.access_urls : Array.isArray(candidate?.urls) ? candidate.urls : []);
+  const urls = envUrls;
   const ids = (target) => ({ practice_ground_id: target.practice_ground_id, challenge_id: target.id });
   const ledger = readLedger();
   const holder = ledger.currentEnvChallenge;
@@ -331,7 +352,7 @@ async function ensureEnvironment(challenge, budgetMs) {
   const waitDeadline = Date.now() + Math.min(budgetMs, 5 * 60_000);
   let env = started;
   while (Date.now() < waitDeadline) {
-    if (env?.status === "access_ready" || urls(env).length > 0) return env;
+    if (env?.access_ready === true || urls(env).length > 0) return env;
     await sleep(10_000);
     env = await mcpCall("ctf2_get_environment", ids(challenge)).catch(() => env);
   }
@@ -365,7 +386,7 @@ async function solveOne(challenge, options) {
   const budgetMs = (priorHandoff ? 46 : 40) * 60_000;
   let env = null;
   if (challenge.has_container) env = await ensureEnvironment(challenge, budgetMs);
-  if (challenge.has_container && env && !(env.access_urls ?? env.urls ?? []).length) {
+  if (challenge.has_container && env && envUrls(env).length === 0) {
     console.warn(`[ctf2] environment never became ready (${JSON.stringify(env).slice(0, 200)}); skipping challenge`);
     ledgerMark(challenge.id, "miss");
     return false;
@@ -475,11 +496,12 @@ async function cmdLoop(options) {
       await sleep(60_000);
       continue;
     }
-    const items = (next?.items ?? []).filter((item) => !item.is_solved);
+    // Defensive: accept a bare array too (any future envelope change).
+    const items = (Array.isArray(next) ? next : (next?.items ?? next?.challenges ?? [])).filter((item) => !item.is_solved);
     const ledger = readLedger();
     const candidate = items.find((item) => (ledger.done[item.id]?.status !== "solved") && (ledger.done[item.id]?.misses ?? 0) < (handoffFor(item.id) ? 2 : 1));
     if (!candidate) {
-      console.log("[ctf2] no eligible challenge from recommendations; waiting 5 minutes");
+      console.log(`[ctf2] no eligible challenge from recommendations (raw=${next?.items?.length ?? (typeof next)} unsolved=${items.length} ledgerEntries=${Object.keys(ledger.done).length}); waiting 5 minutes`);
       await sleep(300_000);
       continue;
     }
