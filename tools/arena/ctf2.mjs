@@ -495,6 +495,54 @@ async function solveOne(challenge, options) {
   return false;
 }
 
+// Full unsolved pool across practice grounds, cached 10 min. The
+// recommendation feed ranks by sort_order and surfaces 1-point items first —
+// the whole 2026-10-04..08 idle was 10 recommendation-locked challenges at
+// miss-cap while ~3.6k untouched items sat in the grounds (user directive
+// 2026-10-08: grind points, so enumerate and pick by value ourselves).
+let poolCache = { at: 0, items: [] };
+
+async function poolChallenges() {
+  if (poolCache.items.length > 0 && Date.now() - poolCache.at < 10 * 60_000) return poolCache.items;
+  const grounds = await mcpCall("ctf2_list_practice_grounds", { limit: 50 });
+  const groundItems = grounds?.items ?? grounds?.grounds ?? (Array.isArray(grounds) ? grounds : []);
+  const pool = [];
+  for (const ground of groundItems) {
+    for (let page = 1; page <= 40; page++) {
+      let list;
+      try {
+        list = await mcpCall("ctf2_list_practice_challenges", { practice_ground_id: ground.id, unsolved_only: true, limit: 100, page });
+      } catch (error) {
+        if (error.retryAfter) await sleep(error.retryAfter + 1_000);
+        else console.warn(`[ctf2] pool page ${ground.name}#${page} failed (${error.message}); continuing with partial pool`);
+        break;
+      }
+      const items = Array.isArray(list?.items) ? list.items : [];
+      if (items.length === 0) break;
+      pool.push(...items);
+      if ((list.total_page && page >= list.total_page) || items.length < 100) break;
+      await sleep(400); // stay well under the 120 reads/min quota
+    }
+  }
+  if (pool.length > 0) poolCache = { at: Date.now(), items: pool };
+  return pool;
+}
+
+// Difficulty rank for the equal-points tie-break: converting an Easy 100-pointer
+// first banks the same points with the best odds per hour.
+const DIFFICULTY_RANK = { easy: 0, medium: 1, hard: 2 };
+const byValue = (a, b) => ((b.points ?? 0) - (a.points ?? 0))
+  || ((DIFFICULTY_RANK[String(a.difficulty ?? "").toLowerCase()] ?? 3) - (DIFFICULTY_RANK[String(b.difficulty ?? "").toLowerCase()] ?? 3))
+  || ((b.solve_count ?? 0) - (a.solve_count ?? 0));
+
+function pickByPoints(items, ledger) {
+  return items
+    .filter((item) => !item.is_solved
+      && (ledger.done[item.id]?.status !== "solved")
+      && (ledger.done[item.id]?.misses ?? 0) < (handoffFor(item.id) ? 2 : 1))
+    .sort(byValue)[0] ?? null;
+}
+
 async function cmdLoop(options) {
   if (!CTF2_TOKEN) die("CTF2_AGENT_TOKEN missing in .env");
   if (!SERVER_TOKEN) die("XUANSHU_SERVER_TOKEN missing in .env");
@@ -532,21 +580,30 @@ async function cmdLoop(options) {
     }
     await ensureModel();
 
-    let next;
+    let next = null;
     try {
       next = await mcpCall("ctf2_agent_next_challenges", {});
     } catch (error) {
       if (error.retryAfter) { console.warn(`[ctf2] rate limited; waiting ${error.retryAfter + 1000}ms`); await sleep(error.retryAfter + 1_000); continue; }
-      console.warn(`[ctf2] next_challenges failed (${error.message}); retrying in 60s`);
-      await sleep(60_000);
-      continue;
+      console.warn(`[ctf2] next_challenges failed (${error.message}); continuing without recommendations`);
     }
-    // Defensive: accept a bare array too (any future envelope change).
-    const items = (Array.isArray(next) ? next : (next?.items ?? next?.challenges ?? [])).filter((item) => !item.is_solved);
+    // Prefer our own pool scan (points-first) over the sort_order-ranked
+    // recommendation feed; keep the feed as a fallback when the pool call dies.
+    let items;
+    try {
+      items = await poolChallenges();
+    } catch (error) {
+      console.warn(`[ctf2] pool scan failed (${error.message}); falling back to recommendations`);
+      items = [];
+    }
+    if (items.length === 0) {
+      // Defensive: accept a bare array too (any future envelope change).
+      items = (Array.isArray(next) ? next : (next?.items ?? next?.challenges ?? [])).filter((item) => !item.is_solved);
+    }
     const ledger = readLedger();
-    const candidate = items.find((item) => (ledger.done[item.id]?.status !== "solved") && (ledger.done[item.id]?.misses ?? 0) < (handoffFor(item.id) ? 2 : 1));
+    const candidate = pickByPoints(items, ledger);
     if (!candidate) {
-      console.log(`[ctf2] no eligible challenge from recommendations (raw=${next?.items?.length ?? (typeof next)} unsolved=${items.length} ledgerEntries=${Object.keys(ledger.done).length}); waiting 5 minutes`);
+      console.log(`[ctf2] no eligible challenge (pool=${items.length} ledgerEntries=${Object.keys(ledger.done).length}); waiting 5 minutes`);
       await sleep(300_000);
       continue;
     }
@@ -585,6 +642,19 @@ async function main() {
       console.log(JSON.stringify(next, null, 2));
       return 0;
     }
+    case "pool": {
+      const pool = await poolChallenges();
+      const ledger = readLedger();
+      const ranked = pool
+        .filter((item) => !item.is_solved)
+        .sort(byValue);
+      for (const item of ranked.slice(0, 20)) {
+        const done = ledger.done[item.id];
+        console.log(`${String(item.points ?? 0).padStart(3)}pts ${String(item.solve_count ?? 0).padStart(4)}solves ${item.category}/${item.difficulty} ${item.friendly_id} ${item.name} container=${item.has_container}${done ? ` ledger=${done.status}/${done.misses ?? 0}` : ""}`);
+      }
+      console.log(`pool=${pool.length}`);
+      return 0;
+    }
     case "env": {
       // Requires a challenge context; report the ledger-held slot instead.
       const ledger = readLedger();
@@ -592,7 +662,7 @@ async function main() {
       return 0;
     }
     default:
-      console.log("Usage:\n  node tools/arena/ctf2.mjs loop\n  node tools/arena/ctf2.mjs whoami\n  node tools/arena/ctf2.mjs next\n  node tools/arena/ctf2.mjs env");
+      console.log("Usage:\n  node tools/arena/ctf2.mjs loop\n  node tools/arena/ctf2.mjs whoami\n  node tools/arena/ctf2.mjs next\n  node tools/arena/ctf2.mjs pool\n  node tools/arena/ctf2.mjs env");
       return command ? 1 : 0;
   }
 }
