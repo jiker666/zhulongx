@@ -493,7 +493,12 @@ async function solveOneInner(challenge) {
     const solved = verdict?.correct === true;
     if (solved) {
       recordAccepted(code, submission);
-      ledgerMark(code, "solved", { progress: verdict.correct_flag_count });
+      // A banked flag on a multi-flag challenge is NOT done: pickNext filters
+      // status "solved" out entirely, and marking partial chains solved the
+      // moment flag 1 lands stranded b-01's remaining 3 flags (no lane would
+      // ever re-pick it, and its live container got reaped as a free slot).
+      const fullyDone = verdict.correct_flag_count >= verdict.total_flag_count;
+      ledgerMark(code, fullyDone ? "solved" : "partial", { progress: verdict.correct_flag_count });
       ledgerNoteProgress(code, verdict.correct_flag_count);
       const { rmSync } = await import("node:fs");
       try { rmSync(wrongPath(code), { force: true }); } catch { /* best effort */ }
@@ -531,10 +536,15 @@ const byPriority = (a, b) =>
 function pickNext(items) {
   const ledger = readLedger();
   return items
-    .filter((item) => !item.is_completed
-      && !claimFor(item.unique_code)
-      && (ledger.done[item.unique_code]?.status !== "solved")
-      && (ledger.done[item.unique_code]?.misses ?? 0) < (handoffFor(item.unique_code) ? 2 : 1))
+    .filter((item) => {
+      if (item.is_completed || claimFor(item.unique_code)) return false;
+      const done = ledger.done[item.unique_code];
+      if (done?.status === "solved") return false;
+      // Partial chains and warm handoffs both get the 2-miss retry window:
+      // each banked flag is sunk analysis the next flag builds on.
+      const cap = handoffFor(item.unique_code) || done?.status === "partial" ? 2 : 1;
+      return (done?.misses ?? 0) < cap;
+    })
     .sort(byPriority)[0] ?? null;
 }
 
