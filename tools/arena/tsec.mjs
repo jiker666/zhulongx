@@ -22,7 +22,7 @@
 //    then exits instead of spinning.
 
 import { mkdir, writeFile } from "node:fs/promises";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -244,6 +244,29 @@ function writeHandoff(code, payload) {
   writeFileSync(handoffPath(code), JSON.stringify(merged, null, 2));
 }
 
+// Cross-lane in-flight locks (user directive 2026-10-09: 并发开跑). Parallel
+// loops elect the same byPriority winner within seconds of each other; a
+// claim file (age-bounded) is the only coordination the local ledger gives
+// us. Staleness exceeds the 46-min warm budget + container wait so a crashed
+// lane's claim cannot strand a challenge for long.
+const CLAIM_STALE_MS = 55 * 60_000;
+function claimPath(code) { return resolve(WORK_DIR, `claim-${code}.json`); }
+function claimFor(code) {
+  try {
+    const claim = JSON.parse(readFileSync(claimPath(code), "utf8"));
+    if (Date.now() - Date.parse(claim.at) < CLAIM_STALE_MS) return claim;
+  } catch { /* absent or unreadable: unclaimed */ }
+  return null;
+}
+function claimCode(code, lane) {
+  if (claimFor(code)) return false;
+  writeFileSync(claimPath(code), JSON.stringify({ lane, at: new Date().toISOString(), pid: process.pid }, null, 2));
+  return true;
+}
+function releaseClaim(code) {
+  try { rmSync(claimPath(code), { force: true }); } catch { /* best effort */ }
+}
+
 // ---------------------------------------------------------------- task build
 
 const DIFFICULTY_RANK = { easy: 0, medium: 1, hard: 2 };
@@ -359,6 +382,20 @@ async function ensureContainer(challenge) {
 
 async function solveOne(challenge) {
   const code = challenge.unique_code;
+  const lane = process.env.TSEC_LANE ?? "main";
+  if (!claimCode(code, lane)) {
+    console.warn(`[tsec] ${code} is claimed by lane ${claimFor(code)?.lane ?? "?"}; skipping`);
+    throw Object.assign(new Error("already_claimed"), { claimed: true });
+  }
+  try {
+    return await solveOneInner(challenge);
+  } finally {
+    releaseClaim(code);
+  }
+}
+
+async function solveOneInner(challenge) {
+  const code = challenge.unique_code;
   console.log(`[tsec] challenge ${code} (${challenge.difficulty}, L${challenge.level}, ${challenge.total_score}pts, flags ${challenge.correct_flag_count}/${challenge.flag_count})`);
 
   const dir = resolve(WORK_DIR, code);
@@ -372,7 +409,14 @@ async function solveOne(challenge) {
     ledgerMark(code, "miss");
     return false;
   }
-  const reachable = await probeVpn(addrs);
+  let reachable = await probeVpn(addrs);
+  if (!reachable) {
+    // A just-started container often needs seconds before it listens (d-02
+    // cost a 5-minute hold for one early probe); retry once before declaring
+    // the VPN down.
+    await sleep(10_000);
+    reachable = await probeVpn(addrs);
+  }
   if (!reachable) {
     // Do NOT mark a miss: the challenge is fine, the network is not.
     console.warn(`[tsec] VPN unreachable for ${addrs.join(", ")} — connect the task's SSLVPN on this host; holding challenge`);
@@ -481,6 +525,7 @@ function pickNext(items) {
   const ledger = readLedger();
   return items
     .filter((item) => !item.is_completed
+      && !claimFor(item.unique_code)
       && (ledger.done[item.unique_code]?.status !== "solved")
       && (ledger.done[item.unique_code]?.misses ?? 0) < (handoffFor(item.unique_code) ? 2 : 1))
     .sort(byPriority)[0] ?? null;
