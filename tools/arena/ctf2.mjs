@@ -80,6 +80,9 @@ async function apiHealthy() {
 
 let mcpSession = null;
 let mcpRequestId = 10;
+// Per-lane counter of fast no-submission settles (infra-wall signature, see
+// the settle guard in solveChallenge).
+let fastFails = 0;
 
 function parseMcpBody(raw) {
   try { return JSON.parse(raw); } catch { /* SSE framing */ }
@@ -440,6 +443,7 @@ async function solveOne(challenge, options) {
   });
   if (created.status !== 202) die(`xuanshu run creation failed: ${created.status} ${JSON.stringify(created.json).slice(0, 300)}`);
   const runId = created.json.id;
+  const runStartedAt = Date.now();
   console.log(`[ctf2] xuanshu run ${runId} queued`);
 
   const terminal = await watchRun(runId, budgetMs);
@@ -475,6 +479,7 @@ async function solveOne(challenge, options) {
     // ctf2 verdict keys are accepted/is_solved (WarmUp solved but was ledger-
     // marked miss because the check read correct/solved/is_correct instead).
     const solved = typeof verdict === "object" && (verdict.accepted === true || verdict.is_solved === true || verdict.correct === true || verdict.is_correct === true);
+    fastFails = 0; // any real submit outcome clears the infra-wall signature
     if (!solved) recordRejected(challenge.id, submission);
     await record({ challengeId: challenge.id, runId, name: challenge.name, outcome: "submitted", submission, verdict });
     ledgerMark(challenge.id, solved ? "solved" : "miss");
@@ -491,6 +496,17 @@ async function solveOne(challenge, options) {
 
   console.log(`[ctf2] run settled as ${terminal.status} without a submission`);
   await record({ challengeId: challenge.id, runId, name: challenge.name, outcome: terminal.status });
+  // A settle inside 5 minutes without a submission is an infra suspect (model
+  // quota wall / outage — the agent never got a real look), not a capability
+  // miss. Miss caps are capability budgets; burning them on infra failures
+  // starves the pool (TSec quota wall 2026-10-09 capped five healthy
+  // challenges before the lane-level backoff landed).
+  if (Date.now() - runStartedAt < 5 * 60_000) {
+    fastFails += 1;
+    console.warn(`[ctf2] fast no-submission settle (${fastFails}/3) — infra suspect, miss NOT counted`);
+    if (fastFails >= 3) throw Object.assign(new Error("suspected infra wall (quota/model)"), { infraWall: true });
+    return false;
+  }
   ledgerMark(challenge.id, "miss");
   return false;
 }
@@ -614,6 +630,14 @@ async function cmdLoop(options) {
       if (error.retryAfter) {
         console.warn(`[ctf2] rate limited mid-challenge; waiting ${error.retryAfter + 1000}ms`);
         await sleep(error.retryAfter + 1_000);
+      } else if (error.infraWall) {
+        // Three fast no-submission settles in a row = quota/model wall; back
+        // off long enough to cross a refresh boundary instead of burning
+        // short runs against it (TSec 2026-10-09 lesson).
+        console.warn("[ctf2] suspected infra wall — pausing loop 15 minutes");
+        fastFails = 0;
+        consecutiveMisses = 0;
+        await sleep(15 * 60_000);
       } else {
         console.warn(`[ctf2] solveOne crashed: ${error?.message ?? error}; pausing 60s`);
         ledgerMark(candidate.id, "miss");
