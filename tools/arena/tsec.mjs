@@ -22,7 +22,7 @@
 //    then exits instead of spinning.
 
 import { mkdir, writeFile } from "node:fs/promises";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -266,6 +266,20 @@ function claimCode(code, lane) {
 function releaseClaim(code) {
   try { rmSync(claimPath(code), { force: true }); } catch { /* best effort */ }
 }
+// Sweep every claim this process still holds (a task-ended exit between the
+// claim and the finally would otherwise strand the challenge for 55 minutes).
+function releaseOwnClaims() {
+  try {
+    for (const name of readdirSync(WORK_DIR).filter((f) => f.startsWith("claim-"))) {
+      try {
+        const claim = JSON.parse(readFileSync(resolve(WORK_DIR, name), "utf8"));
+        if (claim.pid === process.pid) rmSync(resolve(WORK_DIR, name), { force: true });
+      } catch { /* unreadable claim: leave for staleness */ }
+    }
+  } catch { /* WORK_DIR unreadable */ }
+}
+// Per-lane counter of fast no-submission settles (infra-wall signature).
+let fastFails = 0;
 
 // ---------------------------------------------------------------- task build
 
@@ -403,6 +417,7 @@ async function solveOne(challenge) {
 
 async function solveOneInner(challenge) {
   const code = challenge.unique_code;
+  const startedAt = Date.now();
   console.log(`[tsec] challenge ${code} (${challenge.difficulty}, L${challenge.level}, ${challenge.total_score}pts, flags ${challenge.correct_flag_count}/${challenge.flag_count})`);
 
   const dir = resolve(WORK_DIR, code);
@@ -481,6 +496,7 @@ async function solveOneInner(challenge) {
         // value we never recorded (b-01: flag1.txt's value was duplicate yet
         // correct_flag_count stayed 1) — whatever the cause, resubmitting it
         // earns nothing, so the next task build must exclude it.
+        fastFails = 0;
         recordAccepted(code, submission);
         console.log(`[tsec] duplicate (already correct): ${submission}`);
         await record({ challenge: code, runId, outcome: "duplicate", submission });
@@ -496,6 +512,7 @@ async function solveOneInner(challenge) {
       throw error;
     }
     const solved = verdict?.correct === true;
+    fastFails = 0; // any real submit outcome clears the infra-wall signature
     if (solved) {
       recordAccepted(code, submission);
       // A banked flag on a multi-flag challenge is NOT done: pickNext filters
@@ -524,6 +541,16 @@ async function solveOneInner(challenge) {
 
   console.log(`[tsec] run settled as ${terminal.status} without a submission`);
   await record({ challenge: code, runId, outcome: terminal.status });
+  // A no-submission settle inside 5 minutes is an infra suspect (quota wall,
+  // model outage), not a capability miss — the agent never got a real look.
+  // Burning miss caps on them capped five healthy challenges during the
+  // 20:15-20:24 quota wall; three in a row on one lane means back off.
+  if (Date.now() - startedAt < 5 * 60_000) {
+    fastFails += 1;
+    console.warn(`[tsec] fast no-submission settle (${fastFails}/3) — infra suspect, miss NOT counted`);
+    if (fastFails >= 3) throw Object.assign(new Error("suspected infra wall (quota/model)"), { infraWall: true });
+    return false;
+  }
   ledgerMark(code, "miss");
   return false;
 }
@@ -559,6 +586,7 @@ async function cmdLoop() {
   if (!SERVER_TOKEN) die("XUANSHU_SERVER_TOKEN missing in .env");
   let consecutiveMisses = 0;
   let lastIterationAt = Date.now();
+  try {
   while (true) {
     const iterationStart = Date.now();
     // Freeze guard: a multi-minute wall-time jump means the host (or VM) was
@@ -620,6 +648,21 @@ async function cmdLoop() {
         if (error.vpnDown) {
           console.warn("[tsec] waiting 5 minutes for the SSLVPN to come up");
           await sleep(300_000);
+        } else if (error.infraWall) {
+          // Three fast no-submission settles in a row = quota/model wall
+          // (2026-10-09 20:15-20:24 burned six short runs against one).
+          // Back off long enough to clear a refresh boundary, then resume.
+          console.warn("[tsec] suspected infra wall — pausing lane 15 minutes");
+          fastFails = 0;
+          consecutiveMisses = 0;
+          await sleep(15 * 60_000);
+        } else if (error.claimed) {
+          // Another lane re-claimed between our pickNext and claimCode (the
+          // holder releases its claim during slot-holds, reopening the race
+          // window every 60s). A short pause — a full minute per lost race
+          // starved lane-c through the 20:15-20:24 window.
+          console.warn("[tsec] solveOne crashed: already_claimed; re-picking in 15s");
+          await sleep(15_000);
         } else {
           console.warn(`[tsec] solveOne crashed: ${error?.message ?? error}; pausing 60s`);
           await sleep(60_000);
@@ -629,6 +672,11 @@ async function cmdLoop() {
     } finally {
       lastIterationAt = Date.now();
     }
+  }
+  } finally {
+    // Any exit path (task ended, all completed) must not strand claims this
+    // lane still holds — the 55-min staleness window is a long lockout.
+    releaseOwnClaims();
   }
 }
 
