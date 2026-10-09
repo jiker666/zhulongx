@@ -477,6 +477,11 @@ async function solveOneInner(challenge) {
     } catch (error) {
       if (isDuplicate(error)) {
         // Idempotent protection: the value is already banked. Not a rejection.
+        // Bank it in the accepted list too: the platform may 409-duplicate a
+        // value we never recorded (b-01: flag1.txt's value was duplicate yet
+        // correct_flag_count stayed 1) — whatever the cause, resubmitting it
+        // earns nothing, so the next task build must exclude it.
+        recordAccepted(code, submission);
         console.log(`[tsec] duplicate (already correct): ${submission}`);
         await record({ challenge: code, runId, outcome: "duplicate", submission });
         const fresh = (await listChallenges()).find((item) => item.unique_code === code) ?? challenge;
