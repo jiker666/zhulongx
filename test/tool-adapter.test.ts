@@ -578,3 +578,43 @@ describe("checkpoint force gate (tier-3 checkpoint_gap)", () => {
     expect(resumed?.reason ?? "").not.toContain("Checkpoint force gate");
   });
 });
+
+describe("checkpoint force gate (zero-persistence arm)", () => {
+  function callRecord(name: string, id = name) {
+    return { toolCallId: `tc-${id}`, toolName: name, args: {}, description: "" } as never;
+  }
+
+  function toolResult() {
+    return { content: [{ type: "text" as const, text: "ok" }], details: {} };
+  }
+
+  it("arms at 60 successful calls with no persisted checkpoint/finding, disarms on checkpoint", async () => {
+    const { run, pipeline } = harness();
+    run.observerAnomalies = []; // tier ladder never fires; depth is the only trigger
+    for (let i = 0; i < 60; i++) {
+      await pipeline.afterToolCall(callRecord("mcp.echo", `w${i}`), toolResult(), false);
+    }
+    const blocked = await pipeline.beforeToolCall(callRecord("mcp.echo", "next"));
+    expect(blocked?.block).toBe(true);
+    expect(blocked?.reason).toContain("Checkpoint force gate");
+
+    const finish = await pipeline.beforeToolCall(callRecord("finish_task", "end"));
+    expect(finish?.reason ?? "").not.toContain("Checkpoint force gate");
+
+    const checkpoint = await pipeline.beforeToolCall(callRecord("checkpoint", "ckpt"));
+    expect(checkpoint?.reason ?? "").not.toContain("Checkpoint force gate");
+    const resumed = await pipeline.beforeToolCall(callRecord("mcp.echo", "resume"));
+    expect(resumed?.reason ?? "").not.toContain("Checkpoint force gate");
+  });
+
+  it("does not arm for a warm continuation that inherited findings", async () => {
+    const { run, pipeline } = harness();
+    run.findings = [{ severity: "medium", title: "inherited", description: "from parent run" } as never];
+    run.observerAnomalies = [];
+    for (let i = 0; i < 60; i++) {
+      await pipeline.afterToolCall(callRecord("mcp.echo", `w${i}`), toolResult(), false);
+    }
+    const open = await pipeline.beforeToolCall(callRecord("mcp.echo", "next"));
+    expect(open?.block ?? false).toBe(false);
+  });
+});

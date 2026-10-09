@@ -284,6 +284,17 @@ export function createToolCallPipeline(deps: ToolCallPipelineDeps): ToolCallPipe
   let checkpointForceArmed = false;
   const CHECKPOINT_SATISFYING = new Set(["checkpoint", "record_finding"]);
   const FORCE_GATE_ALWAYS_ALLOWED = new Set(["finish_task", "submit_plan", "update_plan_steps", "record_lesson", "read_shared_evidence"]);
+  // Zero-persistence arm: the 1x/4x/16x escalation ladder needs ~192 actions
+  // to reach the tier-3 gate, and bounded 40-minute runs die long before that
+  // (10515: four checkpoint_gap advisories, tier-2 ceiling, empty handoff at
+  // budget death). A run deep enough to have made 60 successful tool calls
+  // without persisting a single checkpoint or finding is one budget stop away
+  // from a zero-value handoff, so arm the same gate on depth alone. Warm
+  // continuations that inherit findings or a checkpoint count as persisted.
+  let persistingActionSeen = false;
+  const persistenceSeen = () => persistingActionSeen || state.findings.length > 0 || state.lastCheckpoint !== undefined;
+  let successfulToolCalls = 0;
+  const ZERO_PERSISTENCE_FORCE_AT = 60;
   let settled = false;
 
   return {
@@ -302,7 +313,10 @@ export function createToolCallPipeline(deps: ToolCallPipelineDeps): ToolCallPipe
         await audit.append("observer.force_gate", { toolCallId: toolCall.toolCallId, toolName: toolCall.toolName }, { source: "orchestrator", actor: "run-observer", correlationId: toolCall.toolCallId });
         return { block: true, reason: "Checkpoint force gate: this session crossed the FINAL no-checkpoint escalation. Call checkpoint() or record_finding() NOW to persist confirmed facts, ruled-out hypotheses, and the single next concrete step. Every other tool stays blocked until something is persisted; finish_task also remains available if the right move is ending the run as blocked." };
       }
-      if (CHECKPOINT_SATISFYING.has(toolCall.toolName)) checkpointForceArmed = false;
+      if (CHECKPOINT_SATISFYING.has(toolCall.toolName)) {
+        checkpointForceArmed = false;
+        persistingActionSeen = true;
+      }
       if (toolCall.toolName === "finish_task" && deps.submissionPolicy === "strict") {
         const input = toolCall.args && typeof toolCall.args === "object" ? toolCall.args as Record<string, unknown> : {};
         const verification = Array.isArray(input.verification)
@@ -423,6 +437,15 @@ export function createToolCallPipeline(deps: ToolCallPipelineDeps): ToolCallPipe
           checkpointForceArmed = true;
           await audit.append("observer.force_gate.armed", { kind: escalation.kind, occurrences: anomalies.find((a) => a.kind === "checkpoint_gap")?.occurrences }, { source: "orchestrator", actor: "run-observer", correlationId: toolCall.toolCallId });
         }
+      }
+      if (!isError) successfulToolCalls += 1;
+      if (!checkpointForceArmed && !persistenceSeen() && successfulToolCalls >= ZERO_PERSISTENCE_FORCE_AT) {
+        checkpointForceArmed = true;
+        const text = `Observer escalation (zero-persistence): ${successfulToolCalls} tool calls into this run and nothing is persisted — no checkpoint, no finding. If the budget ends now, everything derived so far dies with it. The next tool call stays blocked until you persist: call checkpoint() or record_finding() NOW with confirmed facts, ruled-out hypotheses, and the single next concrete step; finish_task remains available if ending the run as blocked is the right move.`;
+        await audit.append("observer.escalated", { kind: "zero_persistence", injected: true, text }, { source: "orchestrator", actor: "run-observer", correlationId: toolCall.toolCallId });
+        await emit("observer.escalated", { kind: "zero_persistence", injected: true });
+        deps.escalate?.(text);
+        await audit.append("observer.force_gate.armed", { kind: "zero_persistence", occurrences: successfulToolCalls }, { source: "orchestrator", actor: "run-observer", correlationId: toolCall.toolCallId });
       }
       if (!isError && !OBSERVATION_EXCLUDED_TOOLS.has(toolCall.toolName)) {
         const observation = JSON.stringify({ content: persistedContent, details: persistedDetails });
