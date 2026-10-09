@@ -356,10 +356,17 @@ async function ensureContainer(challenge) {
       if (fresh && fresh.container_status === "stopped") break;
     }
   }
-  // Free a slot first if the platform is at its 3-instance limit.
+  // Free a slot first if the platform is at its 3-instance limit. NEVER pick
+  // a claimed (in-flight in another lane) challenge as the victim — the first
+  // version closed a-05's container out from under a live run. Completed
+  // first, then unclaimed leftovers; if every active slot is in-flight, hold
+  // and retry rather than kill someone's target.
   const active = (await listChallenges()).filter((item) => ["pending", "available", "stop_pending"].includes(item.container_status) && item.unique_code !== code);
   if (active.length >= 3) {
-    const victim = active.find((item) => item.is_completed) ?? active[0];
+    const victim = active.find((item) => item.is_completed) ?? active.find((item) => !claimFor(item.unique_code));
+    if (!victim) {
+      throw Object.assign(new Error("all 3 active slots are in-flight (claimed); holding for a free slot"), { slotsBusy: true });
+    }
     console.log(`[tsec] 3-instance limit: closing ${victim.unique_code} to free a slot`);
     await closeChallenge(victim.unique_code);
     await sleep(5_000);
