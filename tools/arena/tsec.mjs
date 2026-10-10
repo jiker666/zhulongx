@@ -818,7 +818,9 @@ async function harvestFlags(code, terminal) {
   const sources = [...(Array.isArray(terminal.findings) ? terminal.findings : []), String(terminal.summary ?? "")];
   for (const source of sources) {
     for (const match of String(source).matchAll(/VERIFIED_FLAG:\s*([^\s"']+)/g)) {
-      const value = match[1].trim();
+      // findingsTexts concatenates "title: description", so the concat colon
+      // rides along on the captured value (plain-string findings have none).
+      const value = match[1].trim().replace(/:$/, "");
       if (value && !acceptedSet.has(value) && !rejectedSet.has(value) && !values.includes(value)) values.push(value);
     }
   }

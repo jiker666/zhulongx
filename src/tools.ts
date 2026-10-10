@@ -100,6 +100,91 @@ function boundedCommandOutput(value: string): string {
   return `${clean.slice(0, head)}\n...[command output bounded; use offset-based reads or narrower disassembly]...\n${clean.slice(-Math.max(0, tail))}`;
 }
 
+// record_finding core, shared by the tool itself and the submission-verdict
+// safety net below (identical persistence, audit, and shared-evidence path).
+async function persistFinding(finding: Finding, state: RunState, audit: AuditChain, sharedEvidence?: SharedEvidenceBoard | undefined): Promise<void> {
+  state.findings.push(finding);
+  state.phase = "verification";
+  await audit.append("finding.recorded", finding);
+  if (sharedEvidence) {
+    const published = sharedEvidence.publish(state.id, {
+      kind: finding.confidence >= 0.8 ? "fact" : "candidate",
+      claim: `${finding.title}: ${finding.description}`,
+      evidence: finding.evidence,
+      confidence: finding.confidence,
+    });
+    await audit.append("collaboration.evidence_published", {
+      entry: published.entry,
+      deduplicated: published.deduplicated,
+      evicted: published.evicted,
+      source: "finding",
+    });
+  }
+}
+
+// Submission-verdict safety net (TSec round 2, 2026-10-10): agents verified
+// and submitted answers correctly but skipped record_finding, and finish_task
+// sometimes carried a leftover unconfirmed value — three solved flags had to
+// be recovered by hand from run states. The runtime sees both halves of every
+// self-submission: the exact value in the request (command args/stdin, HTTP
+// body) and the platform verdict in the response. When a submission is
+// accepted, bank a VERIFIED_FLAG finding immediately so the value survives a
+// wedged or budget-killed run and the next turn sees it confirmed.
+const SUBMIT_ACCEPTED_RE = /"(?:correct|is_correct|accepted|is_solved|is_success)"\s*:\s*true|"awarded"\s*:\s*[1-9]|\bduplicate\b|already\s+(?:correct|submitted|solved)/i;
+const SUBMIT_VALUE_KEY_RE = /"(?:flag|answer|submission)"\s*:\s*"([^"\n]{4,512})"/gi;
+const FLAG_TOKEN_RE = /[a-zA-Z0-9_]{2,}\{[^"\s{}]{6,512}\}/g;
+
+function candidateSubmittedValues(requestText: string): string[] {
+  const values = new Set<string>();
+  for (const match of requestText.matchAll(SUBMIT_VALUE_KEY_RE)) {
+    if (match[1] !== undefined) values.add(match[1]);
+  }
+  // Bare word{...} tokens are only trusted when the request itself is a
+  // submission (endpoint or form says so): otherwise shell snippets like
+  // awk{print$1} in unrelated commands would bank garbage.
+  if (/submit/i.test(requestText)) {
+    for (const match of requestText.matchAll(FLAG_TOKEN_RE)) values.add(match[0]);
+  }
+  return [...values].filter((value) => value.length >= 4);
+}
+
+async function maybeBankVerifiedSubmission(
+  channel: string,
+  requestText: string,
+  responseText: string,
+  context: { state: RunState; audit: AuditChain; sharedEvidence?: SharedEvidenceBoard | undefined },
+): Promise<{ value: string } | null> {
+  try {
+    if (!SUBMIT_ACCEPTED_RE.test(responseText)) return null;
+    const alreadyBanked = (value: string) => context.state.findings.some((finding) => {
+      const text = `${finding.title ?? ""}: ${finding.description ?? ""}`;
+      return /VERIFIED_FLAG/i.test(text) && text.includes(value);
+    });
+    const candidates = candidateSubmittedValues(requestText).filter((value) => !alreadyBanked(value));
+    // Exactly one fresh candidate is attributable to this verdict; with more,
+    // the acceptance cannot be pinned to a value, and with none the agent
+    // never embedded the value literally — leave both to the agent.
+    if (candidates.length !== 1) return null;
+    const value = candidates[0];
+    if (!value) return null;
+    const finding: Finding = {
+      id: randomUUID(),
+      title: `VERIFIED_FLAG: ${value}`,
+      severity: "info",
+      confidence: 1,
+      description: `Auto-captured by the runtime via ${channel}: the platform accepted this exact submission value. Use it verbatim in finish_task; do not re-derive or reformat it.`,
+      evidence: [
+        `request excerpt: ${requestText.slice(0, 300)}`,
+        `response excerpt: ${responseText.slice(0, 300)}`,
+      ],
+    };
+    await persistFinding(finding, context.state, context.audit, context.sharedEvidence);
+    return { value };
+  } catch {
+    return null; // the safety net must never fail the tool result it guards
+  }
+}
+
 interface HttpRequestInput {
   method: "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE" | "OPTIONS";
   url: string;
@@ -1364,11 +1449,21 @@ export function createToolSet(context: ToolContext): ToolSet {
           stderr: boundedCommandOutput(result.stderr),
           ...(result.truncated ? { truncated: true } : {}),
         };
+        // Submission-verdict safety net: an accepted flag value in this
+        // command's output must not depend on the model remembering to call
+        // record_finding (b-03/d-02/c-03 round-2 recovery).
+        const banked = await maybeBankVerifiedSubmission(
+          "run_command",
+          [input.program, ...input.args, input.stdin ?? ""].join("\n"),
+          `${publicResult.stdout}\n${publicResult.stderr}`,
+          { state, audit, sharedEvidence },
+        );
         return textResult(
           [
             `exitCode=${publicResult.exitCode}`,
             `signal=${publicResult.signal ?? "none"}`,
             `timedOut=${publicResult.timedOut}`,
+            ...(banked ? [`recorded_finding=VERIFIED_FLAG: ${banked.value} (platform accepted this exact value; reuse it verbatim in finish_task)`] : []),
             `stdout:\n${publicResult.stdout}`,
             `stderr:\n${publicResult.stderr}`,
           ].join("\n"),
@@ -1552,6 +1647,20 @@ export function createToolSet(context: ToolContext): ToolSet {
         const currentResponse: HttpResponseMemory = { status: response.status, headers, body: rendered.text, bodySha256: responseSha256, bytes: body.bytes.length };
         const comparison = input.compareTo ? (() => { const baseline = httpResponses.get(input.compareTo as string); if (!baseline) throw new Error("Unknown HTTP response comparison id"); return { statusChanged: baseline.status !== currentResponse.status, bodyLengthChanged: baseline.bytes !== currentResponse.bytes, bodyChanged: baseline.bodySha256 !== currentResponse.bodySha256, headerChanges: Object.keys({ ...baseline.headers, ...currentResponse.headers }).filter((key) => baseline.headers[key] !== currentResponse.headers[key]).slice(0, 40) }; })() : undefined;
         httpResponses.set(requestId, currentResponse);
+        // Same submission-verdict safety net as run_command: self-submits made
+        // through this tool bank their accepted values the moment the verdict
+        // lands, instead of relying on the model's next record_finding call.
+        const banked = await maybeBankVerifiedSubmission(
+          "http_request",
+          [
+            input.url,
+            input.bodyEncoding === "base64" && input.body ? Buffer.from(input.body, "base64").toString("utf8") : input.body ?? "",
+            JSON.stringify(input.form ?? {}),
+            JSON.stringify(input.multipart ?? {}),
+          ].join("\n"),
+          rendered.text,
+          { state, audit, sharedEvidence },
+        );
         return textResult(
           [
             `requestId=${requestId}`,
@@ -1564,6 +1673,7 @@ export function createToolSet(context: ToolContext): ToolSet {
             ...(redirects.length ? [`redirects=${JSON.stringify(redirects)}`] : []),
             ...(comparison ? [`comparison=${JSON.stringify(comparison)}`] : []),
             `durationMs=${durationMs}`,
+            ...(banked ? [`recorded_finding=VERIFIED_FLAG: ${banked.value} (platform accepted this exact value; reuse it verbatim in finish_task)`] : []),
             `body:\n${rendered.text}`,
           ].join("\n"),
           {
@@ -1749,23 +1859,7 @@ export function createToolSet(context: ToolContext): ToolSet {
       async execute(_id, params) {
         const input = params as FindingInput;
         const finding: Finding = { id: randomUUID(), ...input };
-        state.findings.push(finding);
-        state.phase = "verification";
-        await audit.append("finding.recorded", finding);
-        if (sharedEvidence) {
-          const published = sharedEvidence.publish(state.id, {
-            kind: finding.confidence >= 0.8 ? "fact" : "candidate",
-            claim: `${finding.title}: ${finding.description}`,
-            evidence: finding.evidence,
-            confidence: finding.confidence,
-          });
-          await audit.append("collaboration.evidence_published", {
-            entry: published.entry,
-            deduplicated: published.deduplicated,
-            evicted: published.evicted,
-            source: "finding",
-          });
-        }
+        await persistFinding(finding, state, audit, sharedEvidence);
         return textResult(`Finding recorded: ${finding.id}`, finding);
       },
     },
@@ -1816,6 +1910,18 @@ export function createToolSet(context: ToolContext): ToolSet {
         state.nextSteps = [...input.nextSteps].slice(0, 20);
         if (input.submission) {
           state.submission = input.submission.trim();
+        } else {
+          // Round-2 evidence (c-03): the agent banked the flag live but
+          // finish_task landed without a submission, so the driver relay had
+          // nothing authoritative to fall back on. Never override the agent's
+          // own choice — only fill an absent submission from the most recent
+          // VERIFIED_FLAG finding.
+          const verified = state.findings
+            .flatMap((finding) => [finding.title ?? "", finding.description ?? ""])
+            .map((text) => text.match(/VERIFIED_FLAG:\s*([^\s"']+)/i)?.[1])
+            .filter((value): value is string => Boolean(value))
+            .at(-1);
+          if (verified) state.submission = verified;
         }
         state.stopReason = input.status === "completed" ? "Agent declared task complete" : "Agent reported a blocker";
         state.terminalReason = input.status === "completed" ? "agent_completed" : "agent_blocked";
