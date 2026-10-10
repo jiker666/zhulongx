@@ -352,8 +352,20 @@ function claimFor(code) {
 }
 function claimCode(code, lane) {
   if (claimFor(code)) return false;
-  writeFileSync(claimPath(code), JSON.stringify({ lane, at: new Date().toISOString(), pid: process.pid }, null, 2));
-  return true;
+  // Atomic claim: exclusive-create (wx) decides the race — the round-2 start
+  // saw all three lanes pass check-then-write inside one ~100ms window and
+  // triple-team a fragile single-instance container. A stale corpse (55min+)
+  // must be removed first or wx would fail on it forever; only touch the file
+  // when one is actually present so a fresh claim is never stolen.
+  if (existsSync(claimPath(code))) {
+    try { rmSync(claimPath(code), { force: true }); } catch { /* racing removal */ }
+  }
+  try {
+    writeFileSync(claimPath(code), JSON.stringify({ lane, at: new Date().toISOString(), pid: process.pid }, null, 2), { flag: "wx" });
+    return true;
+  } catch {
+    return false; // lost the race — another lane claimed between our check and write
+  }
 }
 function releaseClaim(code) {
   try { rmSync(claimPath(code), { force: true }); } catch { /* best effort */ }
