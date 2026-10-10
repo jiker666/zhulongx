@@ -309,8 +309,12 @@ function buildTask(challenge, budgetMinutes) {
   }
   const accepted = readLedger().accepted[code] ?? [];
   if (challenge.flag_count > 1 || accepted.length > 0) {
-    lines.push(`重要:本题共 ${challenge.flag_count} 个 flag,平台已确认 ${challenge.correct_flag_count} 个正确。本轮目标:提交第 ${challenge.correct_flag_count + 1} 个 flag——必须是新值,已确认的旧值重复提交只会得到 duplicate 错误。`);
-    if (accepted.length > 0) lines.push(`已正确提交(严禁作为本轮答案重复提交):${accepted.map((v) => `"${v}"`).join("、")}。`);
+    // Harvest mode (2026-10-10): one-run-one-flag serialization was the
+    // round-1 bottleneck — b-01 burned 4 runs x ~45min for 300/1200. Instruct
+    // the agent to enumerate and verify EVERY flag this run, bank each as a
+    // VERIFIED_FLAG finding; the driver submits them all after the primary.
+    lines.push(`重要:本题共 ${challenge.flag_count} 个 flag,平台已确认 ${challenge.correct_flag_count} 个正确。本轮目标是收割模式:不要只追一个 flag——在权限/立足点允许的范围内枚举所有 flag 来源,每一个都实际从远程读出并立即复读验证,验证通过的写成独立 finding,格式必须为 "VERIFIED_FLAG: <flag值>"(一行一个,只写复读确认过的值)。finish_task 提交尚未确认的最新值;已验证的其余值由平台侧代交。`);
+    lines.push(`已确认/已判错值严禁重复出现:已正确提交${accepted.length > 0 ? `:${accepted.map((v) => `"${v}"`).join("、")}` : ":(无)" }。`);
     lines.push("");
   }
   const rejectedList = rejectedValues(code);
@@ -536,6 +540,11 @@ async function solveOneInner(challenge) {
     }
     await record({ challenge: code, runId, outcome: solved ? "submitted" : "rejected", submission, verdict });
     console.log(`[tsec] submit verdict (${code}): ${JSON.stringify(verdict)}`);
+
+    // Harvest mode: after a correct primary the run has proven quality —
+    // submit the agent's other re-read-verified flags (VERIFIED_FLAG findings).
+    // A rejected primary disqualifies the run's verification discipline.
+    if (solved) await harvestFlags(code, terminal);
     return solved;
   }
 
@@ -555,15 +564,67 @@ async function solveOneInner(challenge) {
   return false;
 }
 
-// Order: finish partial multi-flag challenges first (analysis is sunk, the
-// container is live, the next flag is often one technique away), then easy
-// wins, then fewer remaining flags, then higher total score.
+// Order (round-2, value-density): multi-flag chains FIRST regardless of
+// current progress — they serialize over several runs, so starting them late
+// is how round 1 never opened b-02 (1800pts, highest value in the pool) before
+// the task ended. Within chains: more remaining flags then higher score.
+// Singles keep the old shape: easier first, higher score first.
+const chainOf = (c) => (c.flag_count ?? 1) > 1 && remainingOf(c) > 0;
 const byPriority = (a, b) =>
-  (((b.correct_flag_count > 0 && remainingOf(b) > 0) ? 1 : 0) - ((a.correct_flag_count > 0 && remainingOf(a) > 0) ? 1 : 0))
+  ((chainOf(b) ? 1 : 0) - (chainOf(a) ? 1 : 0))
+  || (chainOf(a) && chainOf(b)
+    ? ((remainingOf(b) - remainingOf(a)) || ((b.total_score ?? 0) - (a.total_score ?? 0)))
+    : 0)
   || ((DIFFICULTY_RANK[String(a.difficulty ?? "").toLowerCase()] ?? 3) - (DIFFICULTY_RANK[String(b.difficulty ?? "").toLowerCase()] ?? 3))
   || (remainingOf(a) - remainingOf(b))
   || ((b.total_score ?? 0) - (a.total_score ?? 0))
   || ((a.level ?? 0) - (b.level ?? 0));
+
+// Harvest-mode extra submissions: values the agent re-read from the remote
+// and explicitly banked as VERIFIED_FLAG findings. They are agent-derived and
+// double-read, which is what the zero-wrong mandate requires — but a rejected
+// harvest stops the run's remaining values (verification discipline suspect).
+async function harvestFlags(code, terminal) {
+  const acceptedSet = new Set(readLedger().accepted[code] ?? []);
+  const rejectedSet = new Set(rejectedValues(code));
+  const values = [];
+  const sources = [...(Array.isArray(terminal.findings) ? terminal.findings : []), String(terminal.summary ?? "")];
+  for (const source of sources) {
+    for (const match of String(source).matchAll(/VERIFIED_FLAG:\s*([^\s"']+)/g)) {
+      const value = match[1].trim();
+      if (value && !acceptedSet.has(value) && !rejectedSet.has(value) && !values.includes(value)) values.push(value);
+    }
+  }
+  if (values.length === 0) return;
+  console.log(`[tsec] harvest: ${values.length} verified flag value(s) from run findings`);
+  for (const value of values) {
+    let verdict;
+    try {
+      verdict = await submitFlag(code, value);
+    } catch (error) {
+      if (isDuplicate(error)) { recordAccepted(code, value); console.log(`[tsec] harvest duplicate (already correct): ${value}`); continue; }
+      if (isTaskEnded(error)) throw Object.assign(error, { taskEnded: true });
+      throw error;
+    }
+    await record({ challenge: code, outcome: "harvest", submission: value, verdict });
+    console.log(`[tsec] harvest verdict: ${JSON.stringify(verdict)}`);
+    if (verdict?.correct === true) {
+      recordAccepted(code, value);
+      const fullyDone = verdict.correct_flag_count >= verdict.total_flag_count;
+      ledgerMark(code, fullyDone ? "solved" : "partial", { progress: verdict.correct_flag_count });
+      ledgerNoteProgress(code, verdict.correct_flag_count);
+      if (fullyDone) {
+        try { rmSync(handoffPath(code), { force: true }); } catch { /* best effort */ }
+        await closeChallenge(code);
+        return; // challenge complete
+      }
+    } else {
+      recordRejected(code, value);
+      console.warn(`[tsec] harvest rejected — run's remaining values disqualified: ${value}`);
+      return;
+    }
+  }
+}
 
 function pickNext(items) {
   const ledger = readLedger();
