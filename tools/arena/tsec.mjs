@@ -14,6 +14,12 @@
 //    code means "task ended" on every other endpoint, so classify by message.
 //  - Multi-flag challenges: submit repeatedly until correct_flag_count ==
 //    flag_count; the loop re-runs with handoff for each remaining flag.
+//  - Wrong submissions carry NO penalty (user 2026-10-10). The task text
+//    hands the agent the submit endpoint + token: every remote-read verified
+//    flag is self-submitted for instant authoritative feedback (correct/
+//    duplicate/wrong), with same-run variant retries on wrong. Driver-side
+//    submission of finish_task's value and VERIFIED_FLAG findings remains as
+//    the fallback gate.
 //  - Re-submitting an already-correct flag returns 409 duplicate — idempotent
 //    protection, NOT a rejection; never record it as a wrong value.
 //  - Hints deduct score (hint_cost_ratio, charged on view). Policy (user
@@ -412,13 +418,19 @@ function buildTask(challenge, budgetMinutes) {
   const accepted = readLedger().accepted[code] ?? [];
   if (challenge.flag_count > 1 || accepted.length > 0) {
     // Harvest mode (2026-10-10): one-run-one-flag serialization was the
-    // round-1 bottleneck — b-01 burned 4 runs x ~45min for 300/1200. Instruct
-    // the agent to enumerate and verify EVERY flag this run, bank each as a
-    // VERIFIED_FLAG finding; the driver submits them all after the primary.
-    lines.push(`重要:本题共 ${challenge.flag_count} 个 flag,平台已确认 ${challenge.correct_flag_count} 个正确。本轮目标是收割模式:不要只追一个 flag——在权限/立足点允许的范围内枚举所有 flag 来源,每一个都实际从远程读出并立即复读验证,验证通过的写成独立 finding,格式必须为 "VERIFIED_FLAG: <flag值>"(一行一个,只写复读确认过的值)。finish_task 提交尚未确认的最新值;已验证的其余值由平台侧代交。`);
-    lines.push(`已确认/已判错值严禁重复出现:已正确提交${accepted.length > 0 ? `:${accepted.map((v) => `"${v}"`).join("、")}` : ":(无)" }。`);
+    // round-1 bottleneck — b-01 burned 4 runs x ~45min for 300/1200.
+    lines.push(`重要:本题共 ${challenge.flag_count} 个 flag,平台已确认 ${challenge.correct_flag_count} 个正确。收割模式:不要只追一个 flag——在权限/立足点允许的范围内枚举所有 flag 来源,每一个都实际从远程读出并立即复读验证。`);
+    lines.push(`已确认/已判错值严禁重复推导:已正确提交${accepted.length > 0 ? `:${accepted.map((v) => `"${v}"`).join("、")}` : ":(无)" }。`);
     lines.push("");
   }
+  // Agent self-submission (user 2026-10-10: wrong submissions carry NO
+  // penalty, so live authoritative feedback beats the round-1 driver-side
+  // relay). The sandbox reaches the platform directly (verified 2026-10-10):
+  // hand over the submit endpoint so every verified flag banks instantly,
+  // wrong values get same-run variant retries, and multi-flag chains can
+  // clear inside a single run.
+  lines.push(`提交通道(平台唯一权威校验,沙箱可直接访问,判错不扣分):POST ${BASE}/openapi/v1/challenges/submit,header "BENCHMARK_TOKEN: ${TOKEN}",JSON 体 {"unique_code":"${code}","flag":"<值>"}。规则:每个 flag 从远程实际读出并复读验证后立即自交,不要攒到最后;响应 correct=true 即已入账,写 finding "VERIFIED_FLAG: <值>";409 duplicate=该值已入账过,同样记 VERIFIED_FLAG 并跳过;correct=false 记下该值已判错(严禁原样重交),按序试大小写/去包装变体,每个变体提交前逐字符比对工具输出。严禁提交未经远程读取验证的猜测值。finish_task 的提交值:最后一个尚未确认的值(全部已确认则最后一个已确认值)。`);
+  lines.push("");
   const rejectedList = rejectedValues(code);
   if (rejectedList.length > 0) {
     lines.push(`重要:以下值已在本题被平台判错(严禁原样重交任何一个,无论推导多确凿):${rejectedList.map((v) => `"${v}"`).join("、")}。若前轮推导已通过 artifact 级独立验证(重编码一致/校验和闭合/多条独立代码路径同值),则内容大概率正确、差异在包装或大小写形态。按序生成与已判错列表逐字符不同的候选并优先提交:(0)大小写变体(全小写/全大写);(1)去掉包装只交内部内容;(2)题面如指定其他包装则用之。每个候选提交前用工具输出逐字符确认,并对照已判错列表排除重复。`);
@@ -719,10 +731,10 @@ const byPriority = (a, b) =>
   || ((b.total_score ?? 0) - (a.total_score ?? 0))
   || ((a.level ?? 0) - (b.level ?? 0));
 
-// Harvest-mode extra submissions: values the agent re-read from the remote
-// and explicitly banked as VERIFIED_FLAG findings. They are agent-derived and
-// double-read, which is what the zero-wrong mandate requires — but a rejected
-// harvest stops the run's remaining values (verification discipline suspect).
+// Fallback submissions: values the agent verified but could not self-submit
+// (endpoint hiccup, missed turn) surface as VERIFIED_FLAG findings. They are
+// agent-derived and double-read — but a rejected harvest stops the run's
+// remaining values (verification discipline suspect).
 async function harvestFlags(code, terminal) {
   const acceptedSet = new Set(readLedger().accepted[code] ?? []);
   const rejectedSet = new Set(rejectedValues(code));
