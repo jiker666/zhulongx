@@ -16,8 +16,11 @@
 //    flag_count; the loop re-runs with handoff for each remaining flag.
 //  - Re-submitting an already-correct flag returns 409 duplicate — idempotent
 //    protection, NOT a rejection; never record it as a wrong value.
-//  - Hints deduct score (hint_cost_ratio). The loop NEVER calls /hint; it is
-//    exposed only as an explicit operator subcommand.
+//  - Hints deduct score (hint_cost_ratio, charged on view). Policy (user
+//    2026-10-10: 难题有必要拿 hint): the loop auto-pulls a hint at the deep
+//    tier — 2 misses cold, or 1 miss on a warm challenge (round-1 stragglers
+//    already proved hard) — caches it, and injects it into every later task
+//    build. Fresh/easy challenges stay hint-free and full-score.
 //  - Past the task time limit every endpoint returns invalid_state; the loop
 //    then exits instead of spinning.
 
@@ -242,6 +245,12 @@ function handoffFor(code) {
   try { return JSON.parse(readFileSync(handoffPath(code), "utf8")); } catch { return null; }
 }
 function wrongPath(code) { return resolve(WORK_DIR, `wrong-${code}.json`); }
+// Pulled platform hint (charged once, cached forever — a second view may
+// re-charge and buys nothing new). Empty string = challenge has no hint.
+function hintPath(code) { return resolve(WORK_DIR, `hint-${code}.json`); }
+function hintFor(code) {
+  try { return JSON.parse(readFileSync(hintPath(code), "utf8")); } catch { return null; }
+}
 function rejectedValues(code) {
   try {
     const raw = JSON.parse(readFileSync(wrongPath(code), "utf8"));
@@ -415,6 +424,11 @@ function buildTask(challenge, budgetMinutes) {
     lines.push(`重要:以下值已在本题被平台判错(严禁原样重交任何一个,无论推导多确凿):${rejectedList.map((v) => `"${v}"`).join("、")}。若前轮推导已通过 artifact 级独立验证(重编码一致/校验和闭合/多条独立代码路径同值),则内容大概率正确、差异在包装或大小写形态。按序生成与已判错列表逐字符不同的候选并优先提交:(0)大小写变体(全小写/全大写);(1)去掉包装只交内部内容;(2)题面如指定其他包装则用之。每个候选提交前用工具输出逐字符确认,并对照已判错列表排除重复。`);
     lines.push("");
   }
+  const pulledHint = hintFor(code)?.hint;
+  if (pulledHint) {
+    lines.push(`题目提示(已按比例扣分获取,必须充分利用):${pulledHint}`);
+    lines.push("");
+  }
   // Angle rotation (Cruiser's independent-session diversity, single-lane
   // form): after two burned attempts the board's intents have likely been
   // tried — force a genuinely different entry point instead of a re-run.
@@ -560,7 +574,9 @@ async function solveOneInner(challenge) {
   // rounds die, and a hard chain needs room, not another identical 40 minutes.
   const carryBoard = boardFor(code);
   const warm = handoffFor(code) || carryBoard.facts.length > 0 || carryBoard.intents.length > 0;
-  const budgetMs = ((ledgerEntry(code).misses ?? 0) >= 2 ? 60 : warm ? 46 : 40) * 60_000;
+  const misses = ledgerEntry(code).misses ?? 0;
+  await maybePullHint(code, misses, warm); // deep tier: pay for a hint before building the task that uses it
+  const budgetMs = (misses >= 2 ? 60 : warm ? 46 : 40) * 60_000;
   const task = buildTask(ready, Math.round(budgetMs / 60_000));
   await writeFile(resolve(dir, "task.txt"), task);
   const created = await xuanshu("/v1/runs", {
@@ -765,6 +781,28 @@ function pickNext(items) {
       return (done?.misses ?? 0) < cap;
     })
     .sort(byPriority)[0] ?? null;
+}
+
+// Tiered hint gate (user 2026-10-10): pay the hint_cost_ratio deduction only
+// when pure black-box capability has demonstrably failed — 2 misses cold, or
+// a single miss on a warm challenge (its board/handoff already proves a
+// prior round burned attempts). Fresh challenges stay full-score.
+function hintDue(misses, warm) { return misses >= 2 || (warm && misses >= 1); }
+
+async function maybePullHint(code, misses, warm) {
+  if (hintFor(code) || !hintDue(misses, warm)) return;
+  try {
+    const result = await api("/openapi/v1/challenges/hint", { query: { unique_code: code } });
+    const text = typeof result?.hint === "string" ? result.hint.trim() : "";
+    // Cache even the empty answer: "no hint exists" must not be re-queried
+    // (every view of a real hint re-charges; assume the view already cost).
+    writeFileSync(hintPath(code), JSON.stringify({ code, hint: text, pulledAt: new Date().toISOString() }, null, 2));
+    await record({ challenge: code, outcome: "hint-pulled", hasHint: text !== "", misses });
+    console.log(`[tsec] hint pulled for ${code} (misses=${misses}${warm ? ", warm" : ""}): ${text ? text.slice(0, 120) : "(challenge has no hint)"}`);
+  } catch (error) {
+    if (isTaskEnded(error)) throw error;
+    console.warn(`[tsec] hint pull failed for ${code}: ${error.message}`);
+  }
 }
 
 // Cruiser tier-3 semantics: an unsolved challenge is never parked forever.
