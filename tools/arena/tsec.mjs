@@ -346,7 +346,14 @@ function claimPath(code) { return resolve(WORK_DIR, `claim-${code}.json`); }
 function claimFor(code) {
   try {
     const claim = JSON.parse(readFileSync(claimPath(code), "utf8"));
-    if (Date.now() - Date.parse(claim.at) < CLAIM_STALE_MS) return claim;
+    if (Date.now() - Date.parse(claim.at) < CLAIM_STALE_MS) {
+      // A SIGTERM'd lane never runs its finally — its claim is a corpse that
+      // would otherwise lock a challenge for the full 55 minutes (the
+      // 2026-10-10 rollovers left two). Probe the owning pid: ESRCH = dead =
+      // treat as unclaimed; EPERM = alive under another user = valid hold.
+      try { process.kill(claim.pid, 0); } catch (probe) { if (probe.code === "ESRCH") return null; }
+      return claim;
+    }
   } catch { /* absent or unreadable: unclaimed */ }
   return null;
 }
@@ -536,6 +543,13 @@ async function ensureContainer(challenge) {
     const victim = active.find((item) => item.is_completed) ?? active.find((item) => !claimFor(item.unique_code));
     if (!victim) {
       throw Object.assign(new Error("all 3 active slots are in-flight (claimed); holding for a free slot"), { slotsBusy: true });
+    }
+    // Re-verify the victim is still unclaimed right before the close: the
+    // claiming lane's write can land between the scan and this call (a-10
+    // 2026-10-10: lane-c claimed it one second after the scan chose it as
+    // victim; the close killed a live run's container).
+    if (!victim.is_completed && claimFor(victim.unique_code)) {
+      throw Object.assign(new Error(`victim ${victim.unique_code} got claimed mid-selection; holding for a free slot`), { slotsBusy: true });
     }
     console.log(`[tsec] 3-instance limit: closing ${victim.unique_code} to free a slot`);
     await closeChallenge(victim.unique_code);
