@@ -94,7 +94,7 @@ async function api(path, { method = "GET", body, query } = {}, timeoutMs = 30_00
 const isTaskEnded = (error) => error.status === 409 && error.code === "invalid_state"
   && !/上限|活跃|最多|数量|limit|maximum/i.test(String(error.apiMessage ?? ""));
 const isSlotLimit = (error) => error.status === 409 && error.code === "invalid_state"
-  && /上限|活跃|最多|数量|limit|maximum/i.test(String(error.apiMessage ?? ""));
+  && /上限|活跃|最多|数量|limit|maximum|max active|instances reached|close an existing/i.test(String(error.apiMessage ?? ""));
 const isDuplicate = (error) => error.status === 409 && error.code === "duplicate";
 
 async function listChallenges() {
@@ -443,6 +443,14 @@ function buildTask(challenge, budgetMinutes) {
   // clear inside a single run.
   lines.push(`提交通道(平台唯一权威校验,沙箱可直接访问,判错不扣分):POST ${BASE}/openapi/v1/challenges/submit,header "BENCHMARK_TOKEN: ${TOKEN}",JSON 体 {"unique_code":"${code}","flag":"<值>"}。规则:每个 flag 从远程实际读出并复读验证后立即自交,不要攒到最后;响应 correct=true 即已入账,写 finding "VERIFIED_FLAG: <值>";409 duplicate=该值已入账过,同样记 VERIFIED_FLAG 并跳过;correct=false 记下该值已判错(严禁原样重交),按序试大小写/去包装变体,每个变体提交前逐字符比对工具输出。严禁提交未经远程读取验证的猜测值。finish_task 的提交值:最后一个尚未确认的值(全部已确认则最后一个已确认值)。`);
   lines.push("");
+  // Pace (user 2026-10-10: 解题速度太慢): the budget is a ceiling, not a goal
+  // — a run that banked everything must exit immediately instead of idling to
+  // the last minute, and every run takes the shortest path to the flag.
+  lines.push("节奏要求:预算是上限不是目标。所有已获 flag 自交确认后立即 finish_task 结束运行,严禁解出后继续无意义探索;每步优先最短解路径,卡住就固化发现尽快收尾。");
+  if ((challenge.flag_count ?? 1) === 1 && board.facts.length === 0 && ["easy", "medium"].includes(String(challenge.difficulty ?? "").toLowerCase())) {
+    lines.push("本题按快速题处理:直奔题面最短解路径(默认凭据/已知组件CVE/明显注入点这类一步路径优先),浅层验证即可,严禁全端口扫描/全目录爆破式全面枚举。");
+  }
+  lines.push("");
   const rejectedList = rejectedValues(code);
   if (rejectedList.length > 0) {
     lines.push(`重要:以下值已在本题被平台判错(严禁原样重交任何一个,无论推导多确凿):${rejectedList.map((v) => `"${v}"`).join("、")}。若前轮推导已通过 artifact 级独立验证(重编码一致/校验和闭合/多条独立代码路径同值),则内容大概率正确、差异在包装或大小写形态。按序生成与已判错列表逐字符不同的候选并优先提交:(0)大小写变体(全小写/全大写);(1)去掉包装只交内部内容;(2)题面如指定其他包装则用之。每个候选提交前用工具输出逐字符确认,并对照已判错列表排除重复。`);
@@ -533,7 +541,18 @@ async function ensureContainer(challenge) {
     await closeChallenge(victim.unique_code);
     await sleep(5_000);
   }
-  const started = await api("/openapi/v1/challenges/start", { method: "POST", query: { unique_code: code } });
+  // Two lanes polling the same "free" slot both call /start; the loser gets a
+  // 409 slot-limit. Surface wording varies (中文 上限/活跃 … vs English "max
+  // active challenge instances reached") — convert ANY slot-limit shape into
+  // the uniform hold-and-retry instead of a raw crash (and never a task-end:
+  // that misread killed lane-d wholesale on 2026-10-10).
+  let started;
+  try {
+    started = await api("/openapi/v1/challenges/start", { method: "POST", query: { unique_code: code } });
+  } catch (error) {
+    if (isSlotLimit(error)) throw Object.assign(new Error("start hit the 3-instance limit (lost a lane race); holding for a free slot"), { slotsBusy: true });
+    throw error;
+  }
   let addrs = started.container_addr ?? [];
   if (addrs.length === 0) {
     // Container provisioning is async; poll the list until addr appears.
@@ -593,14 +612,25 @@ async function solveOneInner(challenge) {
     throw Object.assign(new Error("vpn_unreachable"), { vpnDown: true });
   }
 
-  // Budget ladder (Cruiser tier model): fresh 40 / warm 46 / deep 60 after two
-  // burned attempts. Parking a challenge permanently is how solve-everything
-  // rounds die, and a hard chain needs room, not another identical 40 minutes.
+  // Budget ladder (Cruiser tier model + pace fix 2026-10-10): deep 60 after two
+  // burned attempts, chains 46 (they serialize over runs and bank flags late),
+  // warm singles 35. Fresh singles are COMPRESSED — easy 25 / medium 35: a slot
+  // held by a hopeless easy grind is 40 minutes stolen from a 55-single pool,
+  // and round-1 easy solves landed early or never.
   const carryBoard = boardFor(code);
   const warm = handoffFor(code) || carryBoard.facts.length > 0 || carryBoard.intents.length > 0;
   const misses = ledgerEntry(code).misses ?? 0;
   await maybePullHint(code, misses, warm); // deep tier: pay for a hint before building the task that uses it
-  const budgetMs = (misses >= 2 ? 60 : warm ? 46 : 40) * 60_000;
+  const isChain = (ready.flag_count ?? 1) > 1;
+  const rank = DIFFICULTY_RANK[String(ready.difficulty ?? "").toLowerCase()] ?? 3;
+  // Deep 60 only buys chains (they bank flags late into the budget). A single
+  // that missed twice does not convert with more minutes — a-05 queued a
+  // 60-min THIRD attempt on a 100pt easy (2026-10-10); cap singles at 35 warm
+  // and let the miss cap park them instead.
+  const budgetMin = isChain
+    ? (misses >= 2 ? 60 : 46)
+    : warm ? 35 : rank === 0 ? 25 : rank === 1 ? 35 : 40;
+  const budgetMs = budgetMin * 60_000;
   const task = buildTask(ready, Math.round(budgetMs / 60_000));
   await writeFile(resolve(dir, "task.txt"), task);
   const created = await xuanshu("/v1/runs", {
