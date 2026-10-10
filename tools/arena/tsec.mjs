@@ -651,6 +651,26 @@ async function solveOneInner(challenge) {
   boardUpdate(code, { facts: findings, intents: nextSteps.map((text) => ({ text, needs: "" })) });
 
   if (terminal.status === "completed" && submission) {
+    // Self-submit world: the agent may have banked every flag already, with
+    // finish_task carrying a leftover unconfirmed value. Relaying that would
+    // pollute the wrong-file and ledger on a challenge the platform already
+    // counts as solved (d-01 round 2: correct:false on a 1/1-complete
+    // challenge). Check completion before relaying.
+    try {
+      const freshSelf = (await listChallenges()).find((item) => item.unique_code === code) ?? challenge;
+      if (freshSelf.is_completed) {
+        console.log(`[tsec] ${code} already completed by self-submission; skipping finish_task relay`);
+        ledgerMark(code, "solved", { progress: freshSelf.correct_flag_count });
+        ledgerNoteProgress(code, freshSelf.correct_flag_count);
+        boardClear(code);
+        await closeChallenge(code);
+        await record({ challenge: code, runId, outcome: "self-submitted-complete", submission });
+        return true;
+      }
+    } catch (error) {
+      if (isTaskEnded(error)) throw error;
+      // list hiccup: fall through to the normal relay path
+    }
     let verdict;
     try {
       verdict = await submitFlag(code, submission);
