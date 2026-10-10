@@ -811,9 +811,9 @@ async function harvestFlags(code, terminal) {
   }
 }
 
-function pickNext(items) {
+function pickNext(items, role = "mixed") {
   const ledger = readLedger();
-  return items
+  const eligible = items
     .filter((item) => {
       if (item.is_completed || claimFor(item.unique_code)) return false;
       const done = ledger.done[item.unique_code];
@@ -827,8 +827,16 @@ function pickNext(items) {
       const hinted = existsSync(hintPath(item.unique_code));
       const cap = hinted ? 4 : (handoffFor(item.unique_code) || existsSync(boardPath(item.unique_code)) || done?.status === "partial" ? 2 : 1);
       return (done?.misses ?? 0) < cap;
-    })
-    .sort(byPriority)[0] ?? null;
+    });
+  // Lane roles (2026-10-10, pace complaint): value-density alone let ALL
+  // three lanes grind the same three hard chains for two hours while 59
+  // winnable singles idled. sweep = singles only (quick wins, high hit
+  // rate), chain = chains while any remain (else falls back to anything).
+  const chains = eligible.filter((c) => (c.flag_count ?? 1) > 1);
+  const pool = role === "sweep" ? eligible.filter((c) => (c.flag_count ?? 1) === 1)
+    : role === "chain" && chains.length > 0 ? chains
+    : eligible;
+  return pool.sort(byPriority)[0] ?? null;
 }
 
 // Tiered hint gate (user 2026-10-10): pay the hint_cost_ratio deduction only
@@ -879,6 +887,8 @@ function reviveParked(items) {
 
 async function cmdLoop() {
   if (!SERVER_TOKEN) die("XUANSHU_SERVER_TOKEN missing in .env");
+  const role = process.env.TSEC_ROLE ?? "mixed";
+  if (role !== "mixed") console.log(`[tsec] lane role: ${role}`);
   let consecutiveMisses = 0;
   let lastIterationAt = Date.now();
   try {
@@ -924,7 +934,7 @@ async function cmdLoop() {
       for (const item of items) {
         if ((item.correct_flag_count ?? 0) > 0) ledgerNoteProgress(item.unique_code, item.correct_flag_count);
       }
-      const candidate = pickNext(items);
+      const candidate = pickNext(items, role);
       if (!candidate) {
         const remaining = items.filter((item) => !item.is_completed);
         if (remaining.length === 0) { console.log("[tsec] all challenges completed — loop exiting"); return 0; }
