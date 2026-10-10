@@ -800,8 +800,12 @@ function pickNext(items) {
       if (done?.status === "solved") return false;
       // Partial chains, warm handoffs and boards with carried facts all get
       // the 2-miss retry window: each banked flag is sunk analysis the next
-      // flag builds on. existsSync avoids lazy-migration writes in a read path.
-      const cap = handoffFor(item.unique_code) || existsSync(boardPath(item.unique_code)) || done?.status === "partial" ? 2 : 1;
+      // flag builds on. A pulled hint extends it to 4 — the deduction is
+      // sunk cost, and parking a hint-carrying challenge wastes it (b-02
+      // round 2: parked at 2/6 with the 泛微OA lead still unexploited).
+      // existsSync avoids lazy-migration writes in a read path.
+      const hinted = existsSync(hintPath(item.unique_code));
+      const cap = hinted ? 4 : (handoffFor(item.unique_code) || existsSync(boardPath(item.unique_code)) || done?.status === "partial" ? 2 : 1);
       return (done?.misses ?? 0) < cap;
     })
     .sort(byPriority)[0] ?? null;
