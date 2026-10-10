@@ -158,8 +158,16 @@ async function stopRun(runId) {
   if (result.status >= 300) console.warn(`[tsec] stop run ${runId} -> ${result.status}`);
 }
 
-async function watchRun(runId, deadlineMs) {
+// Findings arrive as objects (Finding) or plain strings; normalize once.
+function findingsTexts(findings) {
+  return (Array.isArray(findings) ? findings : [])
+    .map((f) => (typeof f === "string" ? f : `${f.title ?? ""}: ${f.description ?? ""}`.trim()).slice(0, 600))
+    .filter(Boolean);
+}
+
+async function watchRun(runId, deadlineMs, code) {
   const deadline = Date.now() + deadlineMs;
+  const banked = new Set(); // finding texts already mirrored to the board
   while (Date.now() < deadline) {
     await sleep(20_000);
     let snapshot;
@@ -172,6 +180,19 @@ async function watchRun(runId, deadlineMs) {
     const status = snapshot.json?.status ?? snapshot.json?.state?.status;
     if (snapshot.status !== 200 || !status) continue;
     console.log(`[xuanshu] ${runId.slice(0, 8)} status=${status}`);
+    // Watcher-lite (Cruiser lesson 2026-10-10): record_finding persists into
+    // the run state IMMEDIATELY, so mirror new findings onto the board as
+    // they land instead of waiting for settle — a wedged or budget-killed
+    // run no longer takes its discoveries with it.
+    if (code) {
+      for (const text of findingsTexts(snapshot.json?.state?.findings)) {
+        if (!banked.has(text)) {
+          banked.add(text);
+          boardUpdate(code, { facts: [text] });
+          console.log(`[tsec] live finding banked: ${text.slice(0, 90)}`);
+        }
+      }
+    }
     if (["completed", "blocked", "failed", "aborted"].includes(status)) {
       return snapshot.json.state ?? snapshot.json ?? {};
     }
@@ -394,6 +415,19 @@ function buildTask(challenge, budgetMinutes) {
     lines.push(`重要:以下值已在本题被平台判错(严禁原样重交任何一个,无论推导多确凿):${rejectedList.map((v) => `"${v}"`).join("、")}。若前轮推导已通过 artifact 级独立验证(重编码一致/校验和闭合/多条独立代码路径同值),则内容大概率正确、差异在包装或大小写形态。按序生成与已判错列表逐字符不同的候选并优先提交:(0)大小写变体(全小写/全大写);(1)去掉包装只交内部内容;(2)题面如指定其他包装则用之。每个候选提交前用工具输出逐字符确认,并对照已判错列表排除重复。`);
     lines.push("");
   }
+  // Angle rotation (Cruiser's independent-session diversity, single-lane
+  // form): after two burned attempts the board's intents have likely been
+  // tried — force a genuinely different entry point instead of a re-run.
+  const priorMisses = readLedger().done[code]?.misses ?? 0;
+  if (priorMisses >= 2) {
+    const angles = [
+      "换非预期入口:枚举题面与接口中完全未被触及的次要功能面、边缘参数与隐藏路由,严禁重走已失败主线。",
+      "换静态视角:重读题面原文、附件与历史响应差异(响应头/错误页/注释/默认凭据),寻找动态探测漏掉的逻辑线索。",
+      "换横向视角:若已有立足点,转向同网段关联服务、信任链与配置泄露,而非正面强攻主入口。",
+    ];
+    lines.push(`重要:本题已连续 ${priorMisses} 轮未解出,黑板上待办意图大概率已试过——本轮必须换全新切入点。${angles[priorMisses % angles.length]}`);
+    lines.push("");
+  }
   lines.push(String(challenge.description ?? "").trim() || "(题面无更多文字,以远程环境为准)");
   lines.push("");
   const addrs = (challenge.container_addr ?? []).filter(Boolean);
@@ -521,9 +555,12 @@ async function solveOneInner(challenge) {
     throw Object.assign(new Error("vpn_unreachable"), { vpnDown: true });
   }
 
-  // Warm budget for ANY carried knowledge: a handoff or a board with facts.
+  // Budget ladder (Cruiser tier model): fresh 40 / warm 46 / deep 60 after two
+  // burned attempts. Parking a challenge permanently is how solve-everything
+  // rounds die, and a hard chain needs room, not another identical 40 minutes.
   const carryBoard = boardFor(code);
-  const budgetMs = (handoffFor(code) || carryBoard.facts.length > 0 || carryBoard.intents.length > 0 ? 46 : 40) * 60_000;
+  const warm = handoffFor(code) || carryBoard.facts.length > 0 || carryBoard.intents.length > 0;
+  const budgetMs = ((ledgerEntry(code).misses ?? 0) >= 2 ? 60 : warm ? 46 : 40) * 60_000;
   const task = buildTask(ready, Math.round(budgetMs / 60_000));
   await writeFile(resolve(dir, "task.txt"), task);
   const created = await xuanshu("/v1/runs", {
@@ -537,10 +574,17 @@ async function solveOneInner(challenge) {
   const runId = created.json.id;
   console.log(`[tsec] xuanshu run ${runId} queued`);
 
-  const terminal = await watchRun(runId, budgetMs);
+  const terminal = await watchRun(runId, budgetMs, code);
   if (!terminal) {
     console.warn(`[tsec] driver budget exhausted; stopping run ${runId}`);
     await stopRun(runId);
+    // Final sweep: findings recorded in the run's last 20 seconds (the poll
+    // gap before the stop) are still persisted in the run state — recover
+    // them before the state goes cold alongside the handoff fetch below.
+    try {
+      const finalState = (await xuanshu(`/v1/runs/${runId}`)).json?.state ?? {};
+      for (const text of findingsTexts(finalState.findings)) boardUpdate(code, { facts: [text] });
+    } catch { /* state cold; the live mirror already covered it */ }
     for (let attempt = 0; attempt < 4; attempt++) {
       try {
         const handoff = (await xuanshu(`/v1/runs/${runId}/handoff`)).json;
@@ -558,7 +602,7 @@ async function solveOneInner(challenge) {
   }
 
   const submission = terminal.submission ?? null;
-  const findings = (Array.isArray(terminal.findings) ? terminal.findings : []).map((f) => (typeof f === "string" ? f : `${f.title ?? ""}: ${f.description ?? ""}`.trim()).slice(0, 600)).filter(Boolean).slice(0, 8);
+  const findings = findingsTexts(terminal.findings).slice(0, 8);
   const nextSteps = (Array.isArray(terminal.nextSteps) ? terminal.nextSteps : []).filter((s) => typeof s === "string").map((s) => s.slice(0, 400)).slice(0, 6);
   writeHandoff(code, { from: runId, at: new Date().toISOString(), summary: String(terminal.summary ?? "").slice(0, 1200), findings, nextSteps });
   // Blackboard: every terminal settle (any status) banks the run's verified
@@ -723,6 +767,28 @@ function pickNext(items) {
     .sort(byPriority)[0] ?? null;
 }
 
+// Cruiser tier-3 semantics: an unsolved challenge is never parked forever.
+// When nothing is eligible, re-open the parked set with fresh miss budgets —
+// a 30-minute per-code cooldown keeps genuinely broken environments to at
+// most two probes an hour instead of burning every idle poll.
+const REVIVE_COOLDOWN_MS = 30 * 60_000;
+function reviveParked(items) {
+  const ledger = readLedger();
+  const now = Date.now();
+  const revived = [];
+  for (const item of items) {
+    const done = ledger.done[item.unique_code];
+    if (!done || done.status === "solved" || (done.misses ?? 0) < 1) continue;
+    if (now - Date.parse(done.revivedAt ?? 0) < REVIVE_COOLDOWN_MS) continue; // NaN (never revived) passes
+    ledger.done[item.unique_code] = { ...done, misses: 0, revivedAt: new Date().toISOString() };
+    revived.push(item.unique_code);
+  }
+  if (revived.length === 0) return false;
+  writeLedger(ledger);
+  console.warn(`[tsec] tier cycle: re-opening parked challenges ${revived.join(", ")} with fresh miss budgets`);
+  return true;
+}
+
 // ---------------------------------------------------------------- commands
 
 async function cmdLoop() {
@@ -774,9 +840,10 @@ async function cmdLoop() {
       }
       const candidate = pickNext(items);
       if (!candidate) {
-        const remaining = items.filter((item) => !item.is_completed).length;
-        console.log(`[tsec] no eligible challenge (total=${items.length} remaining=${remaining}); ${remaining === 0 ? "all completed" : "all at miss-cap"} — waiting 5 minutes`);
-        if (remaining === 0) return 0;
+        const remaining = items.filter((item) => !item.is_completed);
+        if (remaining.length === 0) { console.log("[tsec] all challenges completed — loop exiting"); return 0; }
+        if (reviveParked(remaining)) continue;
+        console.log(`[tsec] all ${remaining.length} remaining challenges parked within revive cooldown — waiting 5 minutes`);
         await sleep(300_000);
         continue;
       }
