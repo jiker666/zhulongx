@@ -51,6 +51,27 @@ while (Date.now() < deadline) {
   } catch (e) { log(`board bank failed: ${e.message}`); }
 
   if (status === "completed" && state.submission) {
+    // Self-submit world (tsec.mjs 1652305 lesson, ported 2026-10-10): the
+    // agent may have banked the flag live and finish_task may carry a leftover
+    // unconfirmed value. Relaying that marks a COMPLETED challenge as
+    // rejected (c-03: agent self-submitted correct +100, adopt relay judged
+    // the leftover wrong and polluted the ledger/wrong-file). Check the
+    // platform first: is_completed means the challenge is done — record the
+    // solve, skip the relay entirely.
+    try {
+      const list = await (await fetch(`${process.env.TSEC_BASE_URL}/openapi/v1/challenges`, { headers: { BENCHMARK_TOKEN: process.env.TSEC_TOKEN } })).json();
+      const item = (Array.isArray(list) ? list : (list?.items ?? [])).find((c) => c.unique_code === CODE);
+      if (item?.is_completed) {
+        log(`already completed by self-submission (${item.correct_flag_count}/${item.flag_count}); skipping finish_task relay`);
+        const ledger = ledgerRead();
+        const prior = ledger.done[CODE] ?? { misses: 0 };
+        ledger.done[CODE] = { ...prior, status: "solved", progress: item.correct_flag_count, misses: 0, at: new Date().toISOString() };
+        ledgerWrite(ledger);
+        appendFileSync(LOG, `${JSON.stringify({ ts: new Date().toISOString(), challenge: CODE, runId: RUN, adopted: true, outcome: "self-submitted-complete" })}\n`);
+        try { rmSync(`${ROOT}/workspace/tsec/claim-${CODE}.json`, { force: true }); } catch { /* best effort */ }
+        process.exit(0);
+      }
+    } catch (e) { log(`completion pre-check failed (${e.message}); falling through to relay`); }
     const r = await fetch(`${process.env.TSEC_BASE_URL}/openapi/v1/challenges/submit`, {
       method: "POST",
       headers: { BENCHMARK_TOKEN: process.env.TSEC_TOKEN, "content-type": "application/json" },
