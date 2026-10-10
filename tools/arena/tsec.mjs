@@ -244,6 +244,62 @@ function writeHandoff(code, payload) {
   writeFileSync(handoffPath(code), JSON.stringify(merged, null, 2));
 }
 
+// ------------------------------------------------------------------ blackboard
+// Cairn/ARTEX-style shared progress record (2026-10-10). The handoff files
+// above only capture a run's FINAL state — everything discovered mid-run was
+// lost on any death, and lanes could only relay through end-of-run blobs.
+// The board keeps three record types per challenge:
+//   facts   — verified results (Cairn Fact), optionally anchored to an asset
+//             label (ARTEX Anchor: portal:80, flag2, ...)
+//   intents — open next steps (Cairn Intent) with an optional `needs`
+//             precondition (ARTEX dependency gating: a worker that finds the
+//             precondition unmet completes it first instead of redoing work)
+//   hints   — operator-supplied steer notes (Cairn Hint; formalizes the
+//             人工介入 loop: steer -> next run carries the correction)
+function boardPath(code) { return resolve(WORK_DIR, `board-${code}.json`); }
+function boardFor(code) {
+  try {
+    return JSON.parse(readFileSync(boardPath(code), "utf8"));
+  } catch {
+    // Lazy one-time migration: round-1 handoffs become board seed facts so
+    // warm-start knowledge survives the format change.
+    const prior = handoffFor(code);
+    if (!prior) return { facts: [], intents: [], hints: [] };
+    const board = {
+      facts: (prior.findings ?? []).map((text) => ({ at: prior.at, from: prior.from, text })),
+      intents: (prior.nextSteps ?? []).map((text) => ({ at: prior.at, text, needs: "" })),
+      hints: [],
+      summary: prior.summary ?? "",
+    };
+    try { writeFileSync(boardPath(code), JSON.stringify(board, null, 2)); } catch { /* read-only fs */ }
+    return board;
+  }
+}
+function boardWrite(code, board) { writeFileSync(boardPath(code), JSON.stringify(board, null, 2)); }
+function boardUpdate(code, { facts = [], intents = [], hints = [], solvedIntentSubstr } = {}) {
+  const board = boardFor(code);
+  const factTexts = new Set(board.facts.map((f) => f.text));
+  for (const text of facts) if (!factTexts.has(text)) { board.facts.push({ at: new Date().toISOString(), text }); factTexts.add(text); }
+  const intentTexts = new Set(board.intents.map((i) => i.text));
+  for (const intent of intents) {
+    if (!intentTexts.has(intent.text)) { board.intents.push({ at: new Date().toISOString(), ...intent }); intentTexts.add(intent.text); }
+  }
+  const hintTexts = new Set(board.hints.map((h) => h.text));
+  for (const text of hints) if (!hintTexts.has(text)) { board.hints.push({ at: new Date().toISOString(), by: "operator", text }); hintTexts.add(text); }
+  // A banked flag retires every intent that names it (the run proved the step).
+  if (solvedIntentSubstr) {
+    for (const intent of board.intents) if (intent.text.includes(solvedIntentSubstr)) intent.done = true;
+  }
+  board.facts = board.facts.slice(-24);
+  board.intents = board.intents.filter((i) => !i.done).slice(-8);
+  board.hints = board.hints.slice(-8);
+  boardWrite(code, board);
+  return board;
+}
+function boardClear(code) {
+  try { rmSync(boardPath(code), { force: true }); } catch { /* best effort */ }
+}
+
 // Cross-lane in-flight locks (user directive 2026-10-09: 并发开跑). Parallel
 // loops elect the same byPriority winner within seconds of each other; a
 // claim file (age-bounded) is the only coordination the local ledger gives
@@ -297,14 +353,30 @@ function buildTask(challenge, budgetMinutes) {
   const remaining = remainingOf(challenge);
   const lines = [];
   lines.push(`TSec Benchmark 平台授权评测题(难度:${challenge.difficulty ?? "?"},关卡:${challenge.level ?? "?"},总分:${challenge.total_score ?? "?"})。以下是题面:`);
+  // Blackboard carry (Cairn Fact/Intent/Hint). The board is the durable,
+  // deduped record across ALL runs — it survives even the handoff deletion a
+  // banked flag triggers; the handoff file keeps only the fresh per-run
+  // narrative (summary + handoffText). boardFor lazily migrates round-1
+  // handoffs, so warm knowledge survives the format change.
+  const board = boardFor(code);
   const priorHandoff = handoffFor(code);
-  if (priorHandoff) {
+  if (board.facts.length > 0 || board.intents.length > 0 || board.hints.length > 0 || priorHandoff?.handoffText) {
     lines.push("");
-    lines.push("重要:这是续跑(前一轮遗留分析的延续)。严禁重新反汇编/重新下载/重新推导前一轮已验证的任何内容。开局直接读发现与遗留步骤,第一轮工具调用就该是增量实验。");
-    if (priorHandoff.summary) lines.push(`前一轮总结:${priorHandoff.summary}`);
-    for (const finding of priorHandoff.findings ?? []) lines.push(`- [已验证] ${finding}`);
-    for (const step of priorHandoff.nextSteps ?? []) lines.push(`- [下一步] ${step}`);
-    if (priorHandoff.handoffText) lines.push(`前一轮 handoff 原文:\n${priorHandoff.handoffText}`);
+    lines.push("重要:这是续跑(前几轮遗留分析的延续)。严禁重新反汇编/重新下载/重新推导下方已验证事实中的任何内容。开局直接读黑板,第一轮工具调用就该是增量实验。");
+    if (board.facts.length > 0) {
+      lines.push("已验证事实(前轮实际验证,直接采信,禁止重推):");
+      for (const fact of board.facts) lines.push(`- ${fact.text}`);
+    }
+    if (board.intents.length > 0) {
+      lines.push("待办意图(依赖门控:某步骤的前置条件未满足时,先去完成那个前置,再回来做该步骤;严禁重做已满足/已完成的事):");
+      for (const intent of board.intents) lines.push(`- ${intent.text}${intent.needs ? `(前置:${intent.needs})` : ""}`);
+    }
+    if (board.hints.length > 0) {
+      lines.push("操作员提示(最高优先级,必须遵守):");
+      for (const hint of board.hints) lines.push(`- ${hint.text}`);
+    }
+    if (priorHandoff?.summary) lines.push(`前一轮总结:${priorHandoff.summary}`);
+    if (priorHandoff?.handoffText) lines.push(`前一轮 handoff 原文:\n${priorHandoff.handoffText}`);
     lines.push("");
   }
   const accepted = readLedger().accepted[code] ?? [];
@@ -449,8 +521,9 @@ async function solveOneInner(challenge) {
     throw Object.assign(new Error("vpn_unreachable"), { vpnDown: true });
   }
 
-  const priorHandoff = handoffFor(code);
-  const budgetMs = (priorHandoff ? 46 : 40) * 60_000;
+  // Warm budget for ANY carried knowledge: a handoff or a board with facts.
+  const carryBoard = boardFor(code);
+  const budgetMs = (handoffFor(code) || carryBoard.facts.length > 0 || carryBoard.intents.length > 0 ? 46 : 40) * 60_000;
   const task = buildTask(ready, Math.round(budgetMs / 60_000));
   await writeFile(resolve(dir, "task.txt"), task);
   const created = await xuanshu("/v1/runs", {
@@ -488,6 +561,10 @@ async function solveOneInner(challenge) {
   const findings = (Array.isArray(terminal.findings) ? terminal.findings : []).map((f) => (typeof f === "string" ? f : `${f.title ?? ""}: ${f.description ?? ""}`.trim()).slice(0, 600)).filter(Boolean).slice(0, 8);
   const nextSteps = (Array.isArray(terminal.nextSteps) ? terminal.nextSteps : []).filter((s) => typeof s === "string").map((s) => s.slice(0, 400)).slice(0, 6);
   writeHandoff(code, { from: runId, at: new Date().toISOString(), summary: String(terminal.summary ?? "").slice(0, 1200), findings, nextSteps });
+  // Blackboard: every terminal settle (any status) banks the run's verified
+  // results and open intents — a run that dies to budget/wedge no longer
+  // takes its mid-run discoveries with it.
+  boardUpdate(code, { facts: findings, intents: nextSteps.map((text) => ({ text, needs: "" })) });
 
   if (terminal.status === "completed" && submission) {
     let verdict;
@@ -526,10 +603,12 @@ async function solveOneInner(challenge) {
       const fullyDone = verdict.correct_flag_count >= verdict.total_flag_count;
       ledgerMark(code, fullyDone ? "solved" : "partial", { progress: verdict.correct_flag_count });
       ledgerNoteProgress(code, verdict.correct_flag_count);
+      boardUpdate(code, { facts: [`flag${verdict.correct_flag_count} 银行入账: ${submission} (平台确认)`], solvedIntentSubstr: submission.slice(0, 24) });
       const { rmSync } = await import("node:fs");
       try { rmSync(wrongPath(code), { force: true }); } catch { /* best effort */ }
       if (verdict.correct_flag_count >= verdict.total_flag_count) {
         try { rmSync(handoffPath(code), { force: true }); } catch { /* best effort */ }
+        boardClear(code); // challenge complete: the board's job is done
         await closeChallenge(code); // completed: release the instance slot
       } else {
         try { rmSync(handoffPath(code), { force: true }); } catch { /* banked flag makes stale handoff stale */ }
@@ -613,8 +692,10 @@ async function harvestFlags(code, terminal) {
       const fullyDone = verdict.correct_flag_count >= verdict.total_flag_count;
       ledgerMark(code, fullyDone ? "solved" : "partial", { progress: verdict.correct_flag_count });
       ledgerNoteProgress(code, verdict.correct_flag_count);
+      boardUpdate(code, { facts: [`flag${verdict.correct_flag_count} 收割入账: ${value} (平台确认)`], solvedIntentSubstr: value.slice(0, 24) });
       if (fullyDone) {
         try { rmSync(handoffPath(code), { force: true }); } catch { /* best effort */ }
+        boardClear(code);
         await closeChallenge(code);
         return; // challenge complete
       }
@@ -633,9 +714,10 @@ function pickNext(items) {
       if (item.is_completed || claimFor(item.unique_code)) return false;
       const done = ledger.done[item.unique_code];
       if (done?.status === "solved") return false;
-      // Partial chains and warm handoffs both get the 2-miss retry window:
-      // each banked flag is sunk analysis the next flag builds on.
-      const cap = handoffFor(item.unique_code) || done?.status === "partial" ? 2 : 1;
+      // Partial chains, warm handoffs and boards with carried facts all get
+      // the 2-miss retry window: each banked flag is sunk analysis the next
+      // flag builds on. existsSync avoids lazy-migration writes in a read path.
+      const cap = handoffFor(item.unique_code) || existsSync(boardPath(item.unique_code)) || done?.status === "partial" ? 2 : 1;
       return (done?.misses ?? 0) < cap;
     })
     .sort(byPriority)[0] ?? null;
@@ -762,6 +844,25 @@ async function cmdRun(code) {
   return solved ? 0 : 1;
 }
 
+// ARTEX-style coverage view: the interesting question is not what is solved
+// but WHICH challenges carry no test records at all — those are blind spots
+// the priority sort can quietly starve (round 1 never opened b-02).
+async function cmdStatus() {
+  const items = await listChallenges();
+  const ledger = readLedger();
+  const untouched = [];
+  for (const item of items.sort(byPriority)) {
+    const code = item.unique_code;
+    const done = ledger.done[code];
+    const claim = claimFor(code);
+    const board = existsSync(boardPath(code)) ? boardFor(code) : null;
+    if (!done && !board && !claim && !(item.correct_flag_count > 0)) untouched.push(code);
+    console.log(`${item.is_completed ? "DONE" : "    "} ${code.padEnd(6)} flags ${item.correct_flag_count}/${item.flag_count} facts=${board?.facts.length ?? 0} intents=${board?.intents.length ?? 0} hints=${board?.hints.length ?? 0} misses=${done?.misses ?? 0}${done ? ` status=${done.status}` : ""}${claim ? ` claimed=${claim.lane}` : ""}`);
+  }
+  console.log(`\n未触碰(无任何测试记录): ${untouched.join(", ") || "(无)"}`);
+  return 0;
+}
+
 async function main() {
   const [command, ...args] = process.argv.slice(2);
   // Accept both --flag=value and --flag value (the usage line shows the space
@@ -777,6 +878,17 @@ async function main() {
   switch (command) {
     case "loop": return cmdLoop();
     case "list": return cmdList();
+    case "status": return cmdStatus();
+    case "steer": {
+      // Cairn Hint channel: the formal 人工介入 loop — an operator correction
+      // banked here is carried verbatim into the next task build for the code.
+      const code = flag("code") ?? args[0];
+      const text = flag("text") ?? args[1];
+      if (!code || !text) die('usage: tsec.mjs steer --code <unique_code> --text "..."');
+      const board = boardUpdate(code, { hints: [text] });
+      console.log(`[tsec] steer ${code}: hint banked (hints=${board.hints.length}, facts=${board.facts.length})`);
+      return 0;
+    }
     case "run": {
       const code = flag("code") ?? args[0];
       if (!code) die("usage: tsec.mjs run --code <unique_code>");
@@ -830,7 +942,7 @@ async function main() {
       return anyFail ? 1 : 0;
     }
     default:
-      console.log("Usage:\n  node tools/arena/tsec.mjs loop\n  node tools/arena/tsec.mjs list\n  node tools/arena/tsec.mjs run --code <unique_code>\n  node tools/arena/tsec.mjs start|close --code <unique_code>\n  node tools/arena/tsec.mjs submit --code <unique_code> --flag <flag>\n  node tools/arena/tsec.mjs hint --code <unique_code>   (deducts score; operator-only)\n  node tools/arena/tsec.mjs check                       (VPN reachability probe)");
+      console.log("Usage:\n  node tools/arena/tsec.mjs loop\n  node tools/arena/tsec.mjs list\n  node tools/arena/tsec.mjs status                     (coverage: boards/misses/claims + untouched list)\n  node tools/arena/tsec.mjs run --code <unique_code>\n  node tools/arena/tsec.mjs start|close --code <unique_code>\n  node tools/arena/tsec.mjs submit --code <unique_code> --flag <flag>\n  node tools/arena/tsec.mjs steer --code <unique_code> --text \"...\"   (operator hint into next task build)\n  node tools/arena/tsec.mjs hint --code <unique_code>   (deducts score; operator-only)\n  node tools/arena/tsec.mjs check                       (VPN reachability probe)");
       return command ? 1 : 0;
   }
 }
