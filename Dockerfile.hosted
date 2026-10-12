@@ -48,7 +48,7 @@ RUN npm run build
 FROM ${SANDBOX_BASE}
 USER root
 WORKDIR /app
-COPY tools/arena/tsec.mjs tools/arena/hosted-entrypoint.sh ./tools/arena/
+COPY tools/arena/tsec.mjs tools/arena/hosted-entrypoint.sh tools/arena/rogue-ldaps.py ./tools/arena/
 RUN rm -rf /app/dist
 COPY --from=build /app/dist ./dist
 RUN chmod +x /app/tools/arena/hosted-entrypoint.sh \

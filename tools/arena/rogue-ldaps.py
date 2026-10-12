@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Rogue LDAPS server for authorized CTF JNDI challenges (TSec round 3,
-bctf2026-22 "Federation Vault"). Serves a configurable JNDI Reference over
-implicit-TLS LDAP so the target's InitialContext.lookup() deserializes a
-BeanFactory/ELProcessor gadget chain.
+"""Rogue LDAPS server for authorized CTF JNDI / directory-integration
+challenges. Serves a configurable JNDI Reference over implicit-TLS LDAP so the
+target's InitialContext.lookup() deserializes a BeanFactory/ELProcessor gadget
+chain.
 
 Payload is re-read from a JSON file on EVERY search request, so the agent can
 iterate gadget payloads through the sandbox's /workspace bind mount without

@@ -45,7 +45,12 @@ export CLAUDE_CODE_MAX_OUTPUT_TOKENS=64000
 # budget (platform gateway soft limit) split across lanes.
 export ARENA_PARALLEL="${ARENA_PARALLEL:-4}"
 
-mkdir -p /workspace/input /workspace/work /data/runs /run/xuanshu /app/workspace/tsec
+mkdir -p /workspace/input /workspace/work /data/runs /run/xuanshu /app/workspace/tsec /workspace/tools
+# Generic capability seeded into the sandbox-shared workspace (R5): a rogue
+# LDAP(S) test server for directory-integration/JNDI challenges. Without it the
+# agent hand-rolls BER encoding byte-by-byte against the target's error oracle
+# and burns its whole budget on encoding bugs (live-run 28506).
+cp /app/tools/arena/rogue-ldaps.py /workspace/tools/rogue-ldaps.py
 
 echo "[hosted] starting ctf-sandbox executor"
 node dist/cli.js sandbox --config config/container.yaml &

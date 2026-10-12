@@ -484,6 +484,14 @@ function buildTask(challenge, budgetMinutes) {
   // — a run that banked everything must exit immediately instead of idling to
   // the last minute, and every run takes the shortest path to the flag.
   lines.push("节奏要求:预算是上限不是目标。所有已获 flag 自交确认后立即 finish_task 结束运行,严禁解出后继续无意义探索;每步优先最短解路径,卡住就固化发现尽快收尾。");
+  // Live-run 28506 (08): the agent extracted a candidate, then fought the
+  // LOCAL finish_task gate 6 times over 12 minutes — and never once used the
+  // platform's free authoritative submit channel. 25 self-submitted 5 values
+  // on the same task text: instruction strength, not capability, decides.
+  lines.push("自交优先:每个从远程实际读出的候选值(哪怕只有中等把握)立即自交拿权威判定,不要攒到最后、不要只走 finish_task。finish_task 被提交门拒绝时,严禁用同一值原样重试——先把候选自交,correct=false 则记入已判错再决定重推或换路。");
+  lines.push("高成本探测纪律(每点≥1分钟:WAF限速注入oracle/CI构建周期/串行盲读):先写候选目标位置清单并按可能性排序,再按序取点;完成一个进行中的原语验证优先于切换思路;包装/大小写变体零信息量,放最后统一批量尝试,严禁中途弃测转猜变体。");
+  lines.push("远端代码卫生:在远端执行的任何代码(CI payload/注入脚本)必须自带硬超时(AbortSignal.timeout/socket超时),严禁主动解析未验证的主机名(DNS挂起会杀死整条执行通道),网络探测一律带超时、并发≤4。");
+  lines.push("诱饵判定:远程读出的值被判错且带陈旧标记(轮换/生成日期早于环境开通时间)时按诱饵处理——最多再试2个变体,随即转向寻找环境开通时刻生成的新值,严禁围绕旧值无限变体。");
   const isFastTrack = (challenge.flag_count ?? 1) === 1 && board.facts.length === 0 && ["easy", "medium"].includes(String(challenge.difficulty ?? "").toLowerCase());
   if (isFastTrack) {
     lines.push("本题按快速题处理:直奔题面最短解路径(默认凭据/已知组件CVE/明显注入点这类一步路径优先),浅层验证即可,严禁全端口扫描/全目录爆破式全面枚举。");
@@ -523,6 +531,13 @@ function buildTask(challenge, budgetMinutes) {
     const cat = categoryOf(code);
     if (!cat || cat === "web") {
       lines.push("Web 攻击优先级(按顺序尝试,找到明显漏洞立即深入):(1)SSTI/模板注入 — 参数值 {{7*7}}/#{7*7}/${7*7}/<%=7*7%> 看响应是否为49;(2)SSRF — url/host/redirect/callback/img/src 参数值设为内网地址 127.0.0.1/169.254.169.254;(3)文件包含 — path/file/page/include 参数 ../../../etc/flag 或 php://filter/read=convert.base64-encode/resource=../flag;(4)SQL注入 — 单引号/and 1=1/sleep(3) 基本探针;(5)命令注入 — ;id /$(id) |id 等探针;(6)反序列化 — 对 Cookie/POST 体的 base64 或二进制载体测试 gadget 链。");
+    }
+    // Directory-integration challenges (live-run 28506, lane on 22): the agent
+    // hand-rolled BER encoding byte-by-byte against the target's error oracle
+    // for its whole budget — while a generic rogue LDAPS server exists in the
+    // repo. Pointer only; the tool is capability, not an answer.
+    if (/ldap|jndi|目录服务|directory/i.test(String(challenge.description ?? ""))) {
+      lines.push("目录服务集成题:沙箱已内置通用 rogue LDAP(S) 测试服务器 /workspace/tools/rogue-ldaps.py(LDAP bind/search 应答与 JNDI Reference 的 BER 编码已内置,payload 从 /workspace/tools/rogue-ldaps-payload.json 每请求热加载迭代,--port 可用高位端口监听,自签证书 openssl req -x509 一行生成)——严禁从零手写 BER 编码或逐字节试错编码结构。");
     }
   }
   lines.push("平台提供付费提示(查看即按比例扣分),本运行严禁依赖提示,请自行分析。");
@@ -675,7 +690,7 @@ async function solveOneInner(challenge) {
   const warm = handoffFor(code) || carryBoard.facts.length > 0 || carryBoard.intents.length > 0;
   const misses = ledgerEntry(code).misses ?? 0;
   const rank = DIFFICULTY_RANK[String(ready.difficulty ?? "").toLowerCase()] ?? 3;
-  await maybePullHint(code, misses, warm, rank); // deep tier: pay for a hint before building the task that uses it
+  await maybePullHint(code, misses, warm, rank, carryBoard); // deep tier: pay for a hint before building the task that uses it
   const isChain = (ready.flag_count ?? 1) > 1;
   // Deep 60 only buys chains (they bank flags late into the budget). A single
   // that missed twice does not convert with more minutes — one lane queued a
@@ -978,12 +993,30 @@ function pickNext(items, role = "mixed", forceFresh = false) {
         || ((DIFFICULTY_RANK[String(b.difficulty ?? "").toLowerCase()] ?? 3) - (DIFFICULTY_RANK[String(a.difficulty ?? "").toLowerCase()] ?? 3))
         || ((b.total_score ?? 0) - (a.total_score ?? 0)))
     : null;
-  const pool = prospectorPool
+  // Early-run harvest sweep (R5, live-run 28506 lesson): while ≥4 fresh
+  // easy/medium singles sit unopened, EVERY lane takes them first — fast-track
+  // conversions run 3-5 min at 200-500pts (04/07/20: 950pts in 9 lane-minutes)
+  // while two lanes pinned on two hard singles produced zero for 100+ minutes
+  // with 29 challenges never opened. Once the shallow pool is drained below
+  // the threshold, normal role logic (deep grind / prospector) resumes.
+  const sweepPool = fresh
+    .filter((c) => (c.flag_count ?? 1) === 1 && (DIFFICULTY_RANK[String(c.difficulty ?? "").toLowerCase()] ?? 3) <= 1)
+    .sort((a, b) => (b.total_score ?? 0) - (a.total_score ?? 0));
+  const pool = sweepPool.length >= 4
+    ? sweepPool
+    : prospectorPool
     ?? (role === "deep" && deepPool.length > 0 ? deepPool
     : role === "deep" ? eligible // fallback: don't idle deep lanes
     : role === "sweep" ? eligible.filter((c) => (c.flag_count ?? 1) === 1)
     : role === "chain" && chains.length > 0 ? chains
     : eligible);
+  // Do NOT re-sort the sweep/prospector pools through byPriority: it orders
+  // easy-before-hard, silently dead-lettering both role-specific orderings
+  // (R4's prospector "hard fresh first" never actually fired — found in the
+  // R5 live-run review). Those pools keep their own order; everything else
+  // falls through to the shared value-density sort.
+  if (sweepPool.length >= 4) return sweepPool[0];
+  if (prospectorPool) return prospectorPool[0];
   return pool.sort(byPriority)[0] ?? null;
 }
 
@@ -994,13 +1027,17 @@ function pickNext(items, role = "mixed", forceFresh = false) {
 //    hard challenges where the board already has partial analysis)
 //  - cold challenges: after 2 misses (fresh starts deserve a full attempt first)
 //  - warm HARD challenges: after 1 miss (hard singles with boards benefit most)
-function hintDue(misses, warm, rank) {
-  if (rank === 2 && warm) return misses >= 1; // hard warm: pay after 1 miss
-  return misses >= 2 || (warm && misses >= 1); // others: original rule
+//    R5 guard: the after-1-miss shortcuts require a NON-thin board (<3 records
+//    = prior runs died without banking usable leads — timeouts/infra), where a
+//    paid hint buys less than on a challenge with mapped-but-unexploited facts.
+function hintDue(misses, warm, rank, board) {
+  const thin = ((board?.facts?.length ?? 0) + (board?.intents?.length ?? 0)) < 3;
+  if (rank === 2 && warm && !thin) return misses >= 1; // hard warm with real progress: pay after 1 miss
+  return misses >= 2 || (warm && !thin && misses >= 1); // others: original rule (thin boards wait for 2)
 }
 
-async function maybePullHint(code, misses, warm, rank) {
-  if (hintFor(code) || !hintDue(misses, warm, rank)) return;
+async function maybePullHint(code, misses, warm, rank, board) {
+  if (hintFor(code) || !hintDue(misses, warm, rank, board)) return;
   try {
     const result = await api("/openapi/v1/challenges/hint", { query: { unique_code: code } });
     const text = typeof result?.hint === "string" ? result.hint.trim() : "";
