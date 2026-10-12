@@ -275,6 +275,21 @@ npm run check
 
 仅在你拥有或明确获准测试的系统和材料上使用本项目。策略执行已关闭，目标边界完全由使用者自律维护；请遵守适用法律与目标系统规则。安全问题请按 [SECURITY.md](SECURITY.md) 私下报告，不要在公开 Issue 中提交凭据或可直接利用的细节。
 
+## 交接速查（Windows 接管 / 新机器起步）
+
+跨机器交接时 git 不携带的内容与重建步骤：
+
+1. **环境**：Node `>=22.19.0`（`engines` 已声明）+ Docker Desktop 或 Podman。仓库已带 `.gitattributes` 强制 LF，Windows 检出不会破坏 shell 脚本与 Docker 构建。
+2. **`.env`（gitignored，需手工重建）**：
+   - 本地跑 arena：`TSEC_BASE_URL` + `TSEC_TOKEN`（TSecBench 建任务时下发）、`XUANSHU_SERVER_TOKEN`（自选值）、`BIGMODEL_API_KEY`。
+   - 托管部署不需要 `.env`：平台自动注入 `BENCHMARK_BASE_URL`/`BENCHMARK_TOKEN`，模型 Key 在平台环境变量面板填（`BIGMODEL_API_KEY`，或 `DEEPSEEK_API_KEY` 走 DeepSeek 网关，entrypoint 自动路由）。
+3. **依赖安装**：`npm ci`。**如果机器 npm 默认源是私有镜像，必须带 `--registry=https://registry.npmjs.org`**，否则 package-lock.json 的 resolved 会被改写回私有源，CI/托管构建全灭（10-12 事故根因）。
+4. **状态目录**（gitignored，自动重建，但历史进度会丢）：`workspace/`（arena 台账/黑板/claim，tsec.mjs 启动自建）、`.xuan-shu/`（运行产物）。交接前要保留进度就拷这两个目录。
+5. **镜像构建**：不本地构建。push 到 main（改动命中 `Dockerfile.*`/`src/**`/`tools/**`/`config/**`/`package*.json`）自动触发 `.github/workflows/build-hosted-oci.yml`，在 ubuntu-latest 出原生 amd64 OCI 归档 artifact（托管平台是 amd64，Apple Silicon 本地构建会 exec format error）。
+6. **Artifact 下载**：GitHub Actions 页面下载，或 API + 断点并行下载（国内网络对 artifact CDN 单流限速 ~5KB/s 且按连接计费，多连接 Range 并行可到 ~1MB/s）。产物为 zip，内含 `agent-oci.tar`（纯 tar 上传，不要 gzip，≤3GB）。
+7. **平台部署**：上传 tar + 环境变量面板填模型 Key 即可，容器自启三/四车道解题（见 `tools/arena/hosted-entrypoint.sh`）。
+8. **验证门禁**：`npm run check`（typecheck + lint + 492 测试 + build），提交前跑一遍。
+
 ## License
 
 代码采用 [MIT License](LICENSE)。第三方依赖、工具和参考资料的归属与许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

@@ -20,7 +20,7 @@ restarting the server:
   }
 
 Usage (privileged ports 389/636/1099/3268/3269 need root):
-  sudo python3 tools/arena/rogue-ldaps.py --bind 10.254.0.87 --port 636 \
+  sudo python3 tools/arena/rogue-ldaps.py --bind <operator-vpn-ip> --port 636 \
       --cert /tmp/rogue-ldaps-cert.pem --key /tmp/rogue-ldaps-key.pem
 
 Self-signed cert (Java clients must trust-all for the handshake to complete;

@@ -484,8 +484,10 @@ function buildTask(challenge, budgetMinutes) {
   // — a run that banked everything must exit immediately instead of idling to
   // the last minute, and every run takes the shortest path to the flag.
   lines.push("节奏要求:预算是上限不是目标。所有已获 flag 自交确认后立即 finish_task 结束运行,严禁解出后继续无意义探索;每步优先最短解路径,卡住就固化发现尽快收尾。");
-  if ((challenge.flag_count ?? 1) === 1 && board.facts.length === 0 && ["easy", "medium"].includes(String(challenge.difficulty ?? "").toLowerCase())) {
+  const isFastTrack = (challenge.flag_count ?? 1) === 1 && board.facts.length === 0 && ["easy", "medium"].includes(String(challenge.difficulty ?? "").toLowerCase());
+  if (isFastTrack) {
     lines.push("本题按快速题处理:直奔题面最短解路径(默认凭据/已知组件CVE/明显注入点这类一步路径优先),浅层验证即可,严禁全端口扫描/全目录爆破式全面枚举。");
+    lines.push("快速题 web 检查清单(首轮按序执行,找到立即提交):(1)默认/弱凭据 admin/admin admin/password admin/123456 guest/guest;(2)路径遍历读 /flag /flag.txt /etc/flag;(3)GET/POST 参数注入 ?id=1' ?cmd=id;(4)robots.txt/.git/ /.env /backup 信息泄露;(5)报错回显直接泄露 flag;(6)JS 源码/响应注释内嵌 flag 或密钥。");
   }
   lines.push("");
   const rejectedList = rejectedValues(code);
@@ -517,6 +519,11 @@ function buildTask(challenge, budgetMinutes) {
   if (addrs.length > 0) {
     lines.push(`远程环境(本题唯一授权测试目标,内网 VPN 直连):${addrs.map((addr) => `http://${addr}`).join(", ")}。远程是脆弱的单实例:串行探测、最多 2 个连接、严禁并发扫描。续跑开局先发一个轻量请求确认存活,死亡则立即以 blocked 结束。`);
     lines.push("平台约定:flag 必须实际从远程环境读取;网络 writeup 里的历史 flag 属于原比赛环境,不得采信或作为提交值。");
+    // Agent-specific attack patterns for web challenges
+    const cat = categoryOf(code);
+    if (!cat || cat === "web") {
+      lines.push("Web 攻击优先级(按顺序尝试,找到明显漏洞立即深入):(1)SSTI/模板注入 — 参数值 {{7*7}}/#{7*7}/${7*7}/<%=7*7%> 看响应是否为49;(2)SSRF — url/host/redirect/callback/img/src 参数值设为内网地址 127.0.0.1/169.254.169.254;(3)文件包含 — path/file/page/include 参数 ../../../etc/flag 或 php://filter/read=convert.base64-encode/resource=../flag;(4)SQL注入 — 单引号/and 1=1/sleep(3) 基本探针;(5)命令注入 — ;id /$(id) |id 等探针;(6)反序列化 — 对 Cookie/POST 体的 base64 或二进制载体测试 gadget 链。");
+    }
   }
   lines.push("平台提供付费提示(查看即按比例扣分),本运行严禁依赖提示,请自行分析。");
   lines.push("");
@@ -655,17 +662,21 @@ async function solveOneInner(challenge) {
     throw Object.assign(new Error("vpn_unreachable"), { vpnDown: true });
   }
 
-  // Budget ladder (Cruiser tier model + pace fix 2026-10-10): deep 60 after two
-  // burned attempts, chains 46 (they serialize over runs and bank flags late),
-  // warm singles 35. Fresh singles are COMPRESSED — easy 25 / medium 35: a slot
-  // held by a hopeless easy grind is 40 minutes stolen from a 55-single pool,
-  // and round-1 easy solves landed early or never.
+  // Budget ladder (R4 tuning + Cruiser tier model + pace fix 2026-10-10):
+  // - deep 60 after two burned attempts
+  // - chains 46 (they serialize over runs and bank flags late)
+  // - warm singles 35
+  // - fresh easy 20 / fresh medium 30 / fresh hard 40 for compression
+  //   (a slot held by a hopeless easy grind is 40 min stolen from a 55-single pool)
+  // - prospector mode: 20 easy / 30 medium / 30 hard (surface mapping, not grind)
+  //   R4: hard fresh singles use 40 because they frequently yield in one
+  //   well-structured run; old 35 was cutting off critical decision points.
   const carryBoard = boardFor(code);
   const warm = handoffFor(code) || carryBoard.facts.length > 0 || carryBoard.intents.length > 0;
   const misses = ledgerEntry(code).misses ?? 0;
-  await maybePullHint(code, misses, warm); // deep tier: pay for a hint before building the task that uses it
-  const isChain = (ready.flag_count ?? 1) > 1;
   const rank = DIFFICULTY_RANK[String(ready.difficulty ?? "").toLowerCase()] ?? 3;
+  await maybePullHint(code, misses, warm, rank); // deep tier: pay for a hint before building the task that uses it
+  const isChain = (ready.flag_count ?? 1) > 1;
   // Deep 60 only buys chains (they bank flags late into the budget). A single
   // that missed twice does not convert with more minutes — one lane queued a
   // 60-min THIRD attempt on a 100pt easy; cap singles at 35 warm
@@ -677,11 +688,11 @@ async function solveOneInner(challenge) {
   // prospector probes fresh hards at a compressed 30 — a miss still maps the
   // surface into the board for a deep lane to inherit.
   const deepTier = isChain || rank === 2 || laneRole === "deep";
-  const budgetMin = laneRole === "prospector" && rank === 2
-    ? 30
+  const budgetMin = laneRole === "prospector"
+    ? (rank === 2 ? 30 : rank === 0 ? 20 : 30) // prospector: surface map budgets
     : deepTier
       ? (misses >= 2 ? 60 : 46)
-      : warm ? 35 : rank === 0 ? 25 : rank === 1 ? 35 : 40;
+      : warm ? 35 : rank === 0 ? 20 : rank === 1 ? 30 : 40;
   const budgetMs = budgetMin * 60_000;
   const task = buildTask(ready, Math.round(budgetMs / 60_000));
   await writeFile(resolve(dir, "task.txt"), task);
@@ -942,39 +953,54 @@ function pickNext(items, role = "mixed", forceFresh = false) {
         : (handoffFor(item.unique_code) || existsSync(boardPath(item.unique_code)) ? singleCap : 1);
       return (done?.misses ?? 0) < cap;
     });
-  // Lane roles (2026-10-10, pace complaint): value-density alone let ALL
-  // three lanes grind the same three hard chains for two hours while 59
-  // winnable singles idled. Round-3 default is 2 deep + 1 prospector:
+  // Lane roles (R4: 3 deep + 1 prospector):
   //  - deep: hard singles + chains (the long-budget grinders; scratch
-  //    inheritance makes their retries cumulative)
-  //  - prospector: fresh (never-attempted) opens only — 30min probes on
-  //    hard either bank a quick win (round 3 left such
-  //    wins untouched for hours) or map the surface into the board for deep to
-  //    inherit. forceFresh is the same override applied reactively after
-  //    two retry misses on one lane.
+  //    inheritance makes their retries cumulative). Falls back to ALL eligible
+  //    when the deep pool is empty (prevents idle lanes).
+  //  - prospector: fresh (never-attempted) opens only — compressed probes on
+  //    ALL difficulties (not just hard): easy 20min / medium 30min / hard 30min.
+  //    R4: also covers easy/medium fresh which R3's prospector skipped,
+  //    leaving low-hanging fruit untouched. forceFresh is the same override
+  //    applied reactively after two retry misses on one lane.
   //  - sweep: singles only (legacy); chain: chains while any remain.
   const chains = eligible.filter((c) => (c.flag_count ?? 1) > 1);
   const fresh = eligible.filter((c) => !ledger.done[c.unique_code]);
   const wantFresh = (role === "prospector" || forceFresh) && fresh.length > 0;
   const deepPool = eligible.filter((c) => (c.flag_count ?? 1) > 1
     || (DIFFICULTY_RANK[String(c.difficulty ?? "").toLowerCase()] ?? 3) >= 2);
-  const pool = wantFresh
-    ? fresh
-    : role === "deep" && deepPool.length > 0 ? deepPool
+  // Prospector priority: hard fresh first (high value quick wins), then medium,
+  // then easy. This ensures the prospector doesn't waste time on easy re-probes
+  // while hard fresh challenges sit untouched.
+  const prospectorPool = wantFresh
+    ? fresh.sort((a, b) =>
+        // Hard chains first, then hard singles, then medium, then easy
+        ((chainOf(b) ? 1 : 0) - (chainOf(a) ? 1 : 0))
+        || ((DIFFICULTY_RANK[String(b.difficulty ?? "").toLowerCase()] ?? 3) - (DIFFICULTY_RANK[String(a.difficulty ?? "").toLowerCase()] ?? 3))
+        || ((b.total_score ?? 0) - (a.total_score ?? 0)))
+    : null;
+  const pool = prospectorPool
+    ?? (role === "deep" && deepPool.length > 0 ? deepPool
+    : role === "deep" ? eligible // fallback: don't idle deep lanes
     : role === "sweep" ? eligible.filter((c) => (c.flag_count ?? 1) === 1)
     : role === "chain" && chains.length > 0 ? chains
-    : eligible;
+    : eligible);
   return pool.sort(byPriority)[0] ?? null;
 }
 
-// Tiered hint gate (user 2026-10-10): pay the hint_cost_ratio deduction only
-// when pure black-box capability has demonstrably failed — 2 misses cold, or
-// a single miss on a warm challenge (its board/handoff already proves a
-// prior round burned attempts). Fresh challenges stay full-score.
-function hintDue(misses, warm) { return misses >= 2 || (warm && misses >= 1); }
+// Tiered hint gate (R4 update): pay the hint_cost_ratio deduction only
+// when pure black-box capability has demonstrably failed:
+//  - warm challenges: after 1 miss (prior round burned attempts — paying
+//    for a hint on attempt #2 is almost always worth it, especially for
+//    hard challenges where the board already has partial analysis)
+//  - cold challenges: after 2 misses (fresh starts deserve a full attempt first)
+//  - warm HARD challenges: after 1 miss (hard singles with boards benefit most)
+function hintDue(misses, warm, rank) {
+  if (rank === 2 && warm) return misses >= 1; // hard warm: pay after 1 miss
+  return misses >= 2 || (warm && misses >= 1); // others: original rule
+}
 
-async function maybePullHint(code, misses, warm) {
-  if (hintFor(code) || !hintDue(misses, warm)) return;
+async function maybePullHint(code, misses, warm, rank) {
+  if (hintFor(code) || !hintDue(misses, warm, rank)) return;
   try {
     const result = await api("/openapi/v1/challenges/hint", { query: { unique_code: code } });
     const text = typeof result?.hint === "string" ? result.hint.trim() : "";

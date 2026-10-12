@@ -1,0 +1,4 @@
+# Windows 接管防护：所有文本文件强制 LF。
+# .sh 带 CRLF 会让 Docker 构建的 entrypoint 以 "/bin/sh^M" 崩溃；
+# .mjs/.ts 的 CRLF 也会造成无意义 diff。检出与提交双向统一 LF。
+* text=auto eol=lf
