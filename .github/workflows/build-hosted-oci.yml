@@ -3,9 +3,11 @@
 # binaries that die with "exec format error" at ENTRYPOINT. This workflow
 # builds the whole stack natively on ubuntu-latest and exports the OCI
 # archive the platform's pipeline validates (oci-layout + index.json).
-# dist is compiled inside the Docker build stage (the runner's host npm
-# crashed with "Exit handler never called"; the official node image's npm
-# is a separate, reliable environment).
+# dist is compiled inside the Docker build stage — the runner's host npm
+# is not involved at all. npm's "Exit handler never called" race (hits
+# fast-CPU/fast-network environments) is handled inside the Dockerfiles:
+# clean-retry plus an explicit tsc assertion so a half-installed tree
+# fails loudly instead of surfacing as "tsc: not found" later.
 name: build-hosted-oci
 on:
   workflow_dispatch:
