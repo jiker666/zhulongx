@@ -31,4 +31,5 @@ volatility3==2.26.2
 safetensors==0.6.2
 scikit-learn==1.7.2
 angr==9.2.185
+bitstring==3.1.10  # pyvex (angr transitive) uses ConstBitStream, removed in bitstring 4.x
 pycparser==2.22
