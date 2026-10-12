@@ -3,6 +3,9 @@
 # binaries that die with "exec format error" at ENTRYPOINT. This workflow
 # builds the whole stack natively on ubuntu-latest and exports the OCI
 # archive the platform's pipeline validates (oci-layout + index.json).
+# dist is compiled inside the Docker build stage (the runner's host npm
+# crashed with "Exit handler never called"; the official node image's npm
+# is a separate, reliable environment).
 name: build-hosted-oci
 on:
   workflow_dispatch:
@@ -25,19 +28,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-
-      # dist/ is gitignored; Dockerfile.hosted COPYs it from the context, so
-      # compile it on the runner first (same command the local dev flow uses).
-      - name: Build dist
-        run: |
-          npm ci --legacy-peer-deps --ignore-scripts
-          npm run build
-          test -f dist/cli.js
 
       - name: Build slim ctf-sandbox base (amd64, no ghidra)
         run: |

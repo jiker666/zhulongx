@@ -4,27 +4,37 @@
 # driver enters the image: no challenge state, no per-challenge tooling, no
 # credentials (platform injects BENCHMARK_* and BIGMODEL_API_KEY).
 #
-# The base carries dist/ + config/ + the CTF toolchain already, so this is a
-# single FROM + COPY — no npm ci here. NOTE: the nogh tag below is a
-# flattened export/import of ctf-sandbox:latest minus ghidra (docker export
-# gives the merged fs, so removed files are really gone) — imported images
-# carry no ENV/config, so everything the runtime needs is re-applied here:
-# venv PATH, NODE_ENV, network mode. Build it with:
+# Build on amd64 (the eval platform is amd64; arm64 builds die at ENTRYPOINT
+# with exec format error) — see .github/workflows/build-hosted-oci.yml. The
+# nogh base below drops ghidra (~2GB, absent from the agent's allowedPrograms
+# allowlist so nothing can invoke it) and can be produced either by building
+# Dockerfile.ctf-sandbox with INSTALL_GHIDRA=false, or — much faster, no
+# toolchain reinstall — by flattening the existing fat image:
 #   docker run --user 0 --name flat --entrypoint /bin/sh \
 #     localhost/zhulong-xuanshu-ctf-sandbox:latest \
 #     -c 'rm -rf /opt/ghidra_*_PUBLIC /opt/ghidra-scripts \
 #            /usr/local/bin/analyzeHeadless /usr/local/bin/ghidra-decompile'
 #   docker export flat | docker import - zhulong-xuanshu-ctf-sandbox:nogh
+# (imported images carry no ENV — everything the runtime needs is re-applied
+# below: venv PATH, NODE_ENV, network mode.) A dedicated build stage compiles
+# dist from src (the baked dist lags — day-to-day deploys docker-cp into
+# containers), and maps/d.ts are stripped to keep source out of the artifact.
+FROM node:22-bookworm-slim AS build
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --legacy-peer-deps --ignore-scripts
+COPY tsconfig.json tsconfig.build.json ./
+COPY src ./src
+RUN npm run build
+
 ARG SANDBOX_BASE=zhulong-xuanshu-ctf-sandbox:nogh
 FROM ${SANDBOX_BASE}
 USER root
 WORKDIR /app
 COPY tools/arena/tsec.mjs tools/arena/hosted-entrypoint.sh ./tools/arena/
-# Fresh dist from the build context replaces the base's possibly-stale one
-# (day-to-day deploys docker-cp into containers, so the baked dist lags).
 RUN rm -rf /app/dist
-COPY dist ./dist
-RUN chmod +x tools/arena/hosted-entrypoint.sh \
+COPY --from=build /app/dist ./dist
+RUN chmod +x /app/tools/arena/hosted-entrypoint.sh \
     && find dist -name '*.map' -delete \
     && find dist -name '*.d.ts' -delete \
     && mkdir -p /workspace/input /workspace/work /data/runs /run/xuanshu /app/workspace
