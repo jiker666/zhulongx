@@ -19,7 +19,7 @@ export XUANSHU_SERVER_TOKEN="${XUANSHU_SERVER_TOKEN:-$(node -e 'console.log(requ
 export XUANSHU_SANDBOX_NETWORK=external
 export CLAUDE_CODE_MAX_OUTPUT_TOKENS=64000
 
-mkdir -p /workspace/input /workspace/work /data/runs /run/xuanshu /app/workspace
+mkdir -p /workspace/input /workspace/work /data/runs /run/xuanshu /app/workspace/tsec
 
 echo "[hosted] starting ctf-sandbox executor"
 node dist/cli.js sandbox --config config/container.yaml &

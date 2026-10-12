@@ -47,7 +47,7 @@
 //    driver now threads the last run id of the same challenge into retries.
 
 import { mkdir, writeFile } from "node:fs/promises";
-import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -55,6 +55,11 @@ import { fileURLToPath } from "node:url";
 const ROOT = resolve(fileURLToPath(import.meta.url), "../../..");
 const WORK_DIR = resolve(ROOT, "workspace/tsec");
 const LOG_PATH = resolve(ROOT, ".xuan-shu/arena/tsec-results.jsonl");
+// Fresh containers boot without workspace/tsec (the hosted entrypoint only
+// mkdirs /app/workspace): claimCode's exclusive write would ENOENT, surface
+// as "lost the race", and every lane crash-loops already_claimed without a
+// single claim file ever existing (bctf-2026 hosted, 17:39 boot).
+mkdirSync(WORK_DIR, { recursive: true });
 const XUANSHU_BASE = process.env.XUANSHU_BASE ?? "http://127.0.0.1:7318";
 
 function loadEnvFile() {
