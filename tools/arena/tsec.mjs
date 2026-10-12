@@ -29,6 +29,22 @@
 //    build. Fresh/easy challenges stay hint-free and full-score.
 //  - Past the task time limit every endpoint returns invalid_state; the loop
 //    then exits instead of spinning.
+//
+// Round-3 post-mortem (2026-10-11, 15/37, 5850/22210):
+//  - Attempt>=3 on single-flag challenges went 0/14 — pure waste. The
+//    hint-cap-4 came from R2 PARTIAL CHAINS (banked flags = sunk cost); for
+//    singles the cap is 2, or 3 with a pulled hint. Chains keep 4.
+//  - Hard singles were starved at 35-40min while every board showed
+//    "one step from flag" timeouts (R2 hard chains converted at 46/60).
+//    Hard singles now use the deep ladder: 46, then 60 after 2 misses.
+//  - The warm-before-fresh priority left fresh hards untouched for hours
+//    (an 800pt CVE sat 6.5h; fresh opens went 2/2 in the final hour while
+//    retries went 0/14). Two counter-forces now: role "prospector" (fresh
+//    opens only) and forced fresh after 2 consecutive retry misses.
+//  - Per-run scratch wipes taxed every retry ("OCR 工件已随 scratch 清空丢失,
+//    需重建" — three failed challenges rebuilt toolchains each attempt). The
+//    runtime already supports lineage.parentRunId scratch inheritance; the
+//    driver now threads the last run id of the same challenge into retries.
 
 import { mkdir, writeFile } from "node:fs/promises";
 import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -262,6 +278,15 @@ function rejectedValues(code) {
     const raw = JSON.parse(readFileSync(wrongPath(code), "utf8"));
     return Array.isArray(raw.values) ? raw.values.filter((v) => typeof v === "string") : [];
   } catch { return []; }
+}
+// Last run id per challenge — survives the handoff deletion a banked flag
+// triggers, so retries always have a lineage parent for scratch inheritance.
+function lastrunPath(code) { return resolve(WORK_DIR, `lastrun-${code}.json`); }
+function writeLastrun(code, runId) {
+  try { writeFileSync(lastrunPath(code), JSON.stringify({ code, runId, at: new Date().toISOString() })); } catch { /* best effort */ }
+}
+function lastrunFor(code) {
+  try { return JSON.parse(readFileSync(lastrunPath(code), "utf8")).runId; } catch { return undefined; }
 }
 function recordRejected(code, value) {
   const values = [...rejectedValues(code), value].slice(-8);
@@ -640,23 +665,32 @@ async function solveOneInner(challenge) {
   // Deep 60 only buys chains (they bank flags late into the budget). A single
   // that missed twice does not convert with more minutes — a-05 queued a
   // 60-min THIRD attempt on a 100pt easy (2026-10-10); cap singles at 35 warm
-  // and let the miss cap park them instead.
-  const budgetMin = isChain
+  // and let the miss cap park them instead. EXCEPT hard singles (round 3:
+  // every hard-single board ended "one step from flag" at timeout — 24's read
+  // oracle, 25's armed poison, 32's cracked PoW mechanics): they take the
+  // chain-tier ladder, 46 then 60.
+  const budgetMin = isChain || rank === 2
     ? (misses >= 2 ? 60 : 46)
     : warm ? 35 : rank === 0 ? 25 : rank === 1 ? 35 : 40;
   const budgetMs = budgetMin * 60_000;
   const task = buildTask(ready, Math.round(budgetMs / 60_000));
   await writeFile(resolve(dir, "task.txt"), task);
+  // Scratch inheritance (round-3 lesson): retries rebuilt whole toolchains
+  // because each run's scratch namespace is wiped. lineage.parentRunId makes
+  // the runtime copy the parent's scratch in and tell the agent to reuse it.
+  const parentRunId = lastrunFor(code);
   const created = await xuanshu("/v1/runs", {
     method: "POST",
     body: JSON.stringify({
       task,
       metadata: { source: "question-bank", questionId: `tsec-${code}`, ...(categoryOf(code) ? { category: categoryOf(code) } : {}) },
+      ...(parentRunId ? { lineage: { parentRunId } } : {}),
     }),
   });
   if (created.status !== 202) die(`xuanshu run creation failed: ${created.status} ${JSON.stringify(created.json).slice(0, 300)}`);
   const runId = created.json.id;
-  console.log(`[tsec] xuanshu run ${runId} queued`);
+  writeLastrun(code, runId);
+  console.log(`[tsec] xuanshu run ${runId} queued${parentRunId ? ` (scratch inherited from ${parentRunId.slice(0, 8)})` : ""}`);
 
   const terminal = await watchRun(runId, budgetMs, code);
   if (!terminal) {
@@ -679,6 +713,24 @@ async function solveOneInner(challenge) {
         }
       } catch { /* not written yet */ }
       await sleep(3_000);
+    }
+    // Completion pre-check (round-3, bctf2026-02): the agent may have
+    // self-submitted everything in the poll gap before the stop — a timeout
+    // is not a miss if the platform already counts the challenge done.
+    try {
+      const freshTimeout = (await listChallenges()).find((item) => item.unique_code === code);
+      if (freshTimeout?.is_completed) {
+        console.log(`[tsec] ${code} completed by self-submission during the budget window; settling as solved`);
+        ledgerMark(code, "solved", { progress: freshTimeout.correct_flag_count });
+        ledgerNoteProgress(code, freshTimeout.correct_flag_count);
+        boardClear(code);
+        await closeChallenge(code);
+        await record({ challenge: code, runId, outcome: "self-submitted-complete", submission: "timeout-settled" });
+        return true;
+      }
+    } catch (error) {
+      if (isTaskEnded(error)) throw error;
+      // list hiccup: fall through to the miss mark
     }
     await record({ challenge: code, runId, outcome: "driver-timeout" });
     ledgerMark(code, "miss");
@@ -857,7 +909,7 @@ async function harvestFlags(code, terminal) {
   }
 }
 
-function pickNext(items, role = "mixed") {
+function pickNext(items, role = "mixed", forceFresh = false) {
   const ledger = readLedger();
   const eligible = items
     .filter((item) => {
@@ -870,16 +922,30 @@ function pickNext(items, role = "mixed") {
       // sunk cost, and parking a hint-carrying challenge wastes it (b-02
       // round 2: parked at 2/6 with the 泛微OA lead still unexploited).
       // existsSync avoids lazy-migration writes in a read path.
+      // Round 3 corrected the cap for SINGLE-flag challenges: attempts 3-4
+      // went 0/14 — the sunk-cost argument only holds for chains with banked
+      // flags, so singles cap at 2, or 3 with a paid hint.
       const hinted = existsSync(hintPath(item.unique_code));
-      const cap = hinted ? 4 : (handoffFor(item.unique_code) || existsSync(boardPath(item.unique_code)) || done?.status === "partial" ? 2 : 1);
+      const singleCap = hinted ? 3 : 2;
+      const cap = (item.flag_count ?? 1) > 1
+        ? (hinted ? 4 : (handoffFor(item.unique_code) || existsSync(boardPath(item.unique_code)) || done?.status === "partial" ? 2 : 1))
+        : (handoffFor(item.unique_code) || existsSync(boardPath(item.unique_code)) ? singleCap : 1);
       return (done?.misses ?? 0) < cap;
     });
   // Lane roles (2026-10-10, pace complaint): value-density alone let ALL
   // three lanes grind the same three hard chains for two hours while 59
   // winnable singles idled. sweep = singles only (quick wins, high hit
   // rate), chain = chains while any remain (else falls back to anything).
+  // Round 3 added prospector: fresh (never-attempted) opens only — warm
+  // retries crowded out fresh coverage for hours while going 0/14 (an
+  // 800pt five-minute CVE sat untouched 6.5h). forceFresh is the same
+  // override applied reactively after two retry misses on one lane.
   const chains = eligible.filter((c) => (c.flag_count ?? 1) > 1);
-  const pool = role === "sweep" ? eligible.filter((c) => (c.flag_count ?? 1) === 1)
+  const fresh = eligible.filter((c) => !ledger.done[c.unique_code]);
+  const wantFresh = (role === "prospector" || forceFresh) && fresh.length > 0;
+  const pool = wantFresh
+    ? fresh
+    : role === "sweep" ? eligible.filter((c) => (c.flag_count ?? 1) === 1)
     : role === "chain" && chains.length > 0 ? chains
     : eligible;
   return pool.sort(byPriority)[0] ?? null;
@@ -936,6 +1002,11 @@ async function cmdLoop() {
   const role = process.env.TSEC_ROLE ?? "mixed";
   if (role !== "mixed") console.log(`[tsec] lane role: ${role}`);
   let consecutiveMisses = 0;
+  // Retry fatigue (round 3): two warm-retry misses in a row on this lane
+  // force the next pick to a fresh (never-attempted) open — the drought's
+  // 0/14 conversion came from lanes cycling warm retries while fresh hards
+  // sat untouched.
+  let retryMisses = 0;
   let lastIterationAt = Date.now();
   try {
   while (true) {
@@ -980,7 +1051,7 @@ async function cmdLoop() {
       for (const item of items) {
         if ((item.correct_flag_count ?? 0) > 0) ledgerNoteProgress(item.unique_code, item.correct_flag_count);
       }
-      const candidate = pickNext(items, role);
+      const candidate = pickNext(items, role, retryMisses >= 2);
       if (!candidate) {
         const remaining = items.filter((item) => !item.is_completed);
         if (remaining.length === 0) { console.log("[tsec] all challenges completed — loop exiting"); return 0; }
@@ -989,9 +1060,12 @@ async function cmdLoop() {
         await sleep(300_000);
         continue;
       }
+      const wasFresh = !readLedger().done[candidate.unique_code];
       try {
         const solved = await solveOne(candidate);
         consecutiveMisses = solved ? 0 : consecutiveMisses + 1;
+        retryMisses = solved || wasFresh ? 0 : retryMisses + 1;
+        if (!solved && !wasFresh && retryMisses >= 2) console.warn(`[tsec] ${retryMisses} warm-retry misses in a row — next pick forced fresh`);
       } catch (error) {
         if (error.taskEnded || isTaskEnded(error)) {
           console.warn("[tsec] benchmark task ended — loop exiting");
