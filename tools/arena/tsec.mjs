@@ -623,6 +623,7 @@ async function solveOne(challenge) {
 
 async function solveOneInner(challenge) {
   const code = challenge.unique_code;
+  const laneRole = process.env.TSEC_ROLE ?? "mixed";
   const startedAt = Date.now();
   console.log(`[tsec] challenge ${code} (${challenge.difficulty}, L${challenge.level}, ${challenge.total_score}pts, flags ${challenge.correct_flag_count}/${challenge.flag_count})`);
 
@@ -668,10 +669,16 @@ async function solveOneInner(challenge) {
   // and let the miss cap park them instead. EXCEPT hard singles (round 3:
   // every hard-single board ended "one step from flag" at timeout — 24's read
   // oracle, 25's armed poison, 32's cracked PoW mechanics): they take the
-  // chain-tier ladder, 46 then 60.
-  const budgetMin = isChain || rank === 2
-    ? (misses >= 2 ? 60 : 46)
-    : warm ? 35 : rank === 0 ? 25 : rank === 1 ? 35 : 40;
+  // chain-tier ladder, 46 then 60. Role overrides: deep lanes get the deep
+  // ladder on everything they pick (their pool is hard/chains anyway), the
+  // prospector probes fresh hards at a compressed 30 — a miss still maps the
+  // surface into the board for a deep lane to inherit.
+  const deepTier = isChain || rank === 2 || laneRole === "deep";
+  const budgetMin = laneRole === "prospector" && rank === 2
+    ? 30
+    : deepTier
+      ? (misses >= 2 ? 60 : 46)
+      : warm ? 35 : rank === 0 ? 25 : rank === 1 ? 35 : 40;
   const budgetMs = budgetMin * 60_000;
   const task = buildTask(ready, Math.round(budgetMs / 60_000));
   await writeFile(resolve(dir, "task.txt"), task);
@@ -934,17 +941,23 @@ function pickNext(items, role = "mixed", forceFresh = false) {
     });
   // Lane roles (2026-10-10, pace complaint): value-density alone let ALL
   // three lanes grind the same three hard chains for two hours while 59
-  // winnable singles idled. sweep = singles only (quick wins, high hit
-  // rate), chain = chains while any remain (else falls back to anything).
-  // Round 3 added prospector: fresh (never-attempted) opens only — warm
-  // retries crowded out fresh coverage for hours while going 0/14 (an
-  // 800pt five-minute CVE sat untouched 6.5h). forceFresh is the same
-  // override applied reactively after two retry misses on one lane.
+  // winnable singles idled. Round-3 default is 2 deep + 1 prospector:
+  //  - deep: hard singles + chains (the long-budget grinders; scratch
+  //    inheritance makes their retries cumulative)
+  //  - prospector: fresh (never-attempted) opens only — 30min probes on
+  //    hard either bank a quick win (an 800pt five-minute CVE sat untouched
+  //    6.5h in round 3) or map the surface into the board for deep to
+  //    inherit. forceFresh is the same override applied reactively after
+  //    two retry misses on one lane.
+  //  - sweep: singles only (legacy); chain: chains while any remain.
   const chains = eligible.filter((c) => (c.flag_count ?? 1) > 1);
   const fresh = eligible.filter((c) => !ledger.done[c.unique_code]);
   const wantFresh = (role === "prospector" || forceFresh) && fresh.length > 0;
+  const deepPool = eligible.filter((c) => (c.flag_count ?? 1) > 1
+    || (DIFFICULTY_RANK[String(c.difficulty ?? "").toLowerCase()] ?? 3) >= 2);
   const pool = wantFresh
     ? fresh
+    : role === "deep" && deepPool.length > 0 ? deepPool
     : role === "sweep" ? eligible.filter((c) => (c.flag_count ?? 1) === 1)
     : role === "chain" && chains.length > 0 ? chains
     : eligible;
