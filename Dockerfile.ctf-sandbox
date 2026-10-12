@@ -2,10 +2,15 @@ FROM node:22-bookworm-slim AS build
 
 WORKDIR /app
 COPY package.json package-lock.json ./
-# "Exit handler never called!" is npm's unhandled-rejection crash under
-# registry socket resets; cutting concurrency (maxsockets) and the audit/fund
-# endpoints removes the triggers, and the loop + tsc assertion turns a rare
-# residual hit into a loud retry instead of a half-installed tree.
+# npm 10.9.x (bundled with node:22) hits 'Exit handler never called!'
+# on GitHub runner networks near-deterministically — runs 6-7 crashed
+# 5/5 attempts even throttled to maxsockets=3. npm 11+ rewrote the
+# reify/exit-handler path; upgrade before any dependency install.
+RUN (npm install -g npm@12.2.0 --no-audit --no-fund \
+     || npm install -g npm@12.2.0 --no-audit --no-fund) \
+    && npm --version
+# Residual-race belt: throttle concurrency, drop audit/fund, retry with a
+# wiped tree, and assert tsc so a half-installed tree fails loudly.
 RUN for i in 1 2 3; do \
       npm ci --legacy-peer-deps --ignore-scripts --no-audit --no-fund \
              --fetch-retries=5 --maxsockets=3 && break; \
@@ -43,6 +48,9 @@ RUN if [ "$INSTALL_HEAVY" = "true" ]; then \
     fi
 
 COPY package.json package-lock.json ./
+RUN (npm install -g npm@12.2.0 --no-audit --no-fund \
+     || npm install -g npm@12.2.0 --no-audit --no-fund) \
+    && npm --version
 RUN for i in 1 2 3; do \
       npm ci --omit=dev --legacy-peer-deps --ignore-scripts --no-audit --no-fund \
              --fetch-retries=5 --maxsockets=3 && break; \
