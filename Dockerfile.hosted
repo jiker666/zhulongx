@@ -22,7 +22,14 @@
 FROM node:22-bookworm-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN (npm ci --legacy-peer-deps --ignore-scripts || (rm -rf node_modules && npm ci --legacy-peer-deps --ignore-scripts)) \
+# Same npm-race hardening as Dockerfile.ctf-sandbox (maxsockets/fetch-retries,
+# no audit/fund, 3 attempts + tsc assertion).
+RUN for i in 1 2 3; do \
+      npm ci --legacy-peer-deps --ignore-scripts --no-audit --no-fund \
+             --fetch-retries=5 --maxsockets=3 && break; \
+      echo "npm ci attempt $i failed; wiping tree and retrying"; \
+      rm -rf node_modules; \
+    done \
     && test -x node_modules/.bin/tsc
 COPY tsconfig.json tsconfig.build.json ./
 COPY src ./src
