@@ -31,4 +31,4 @@ RUN chmod +x tools/arena/hosted-entrypoint.sh \
 ENV NODE_ENV=production
 ENV PATH="/opt/ctf-venv/bin:${PATH}"
 ENV XUANSHU_SANDBOX_NETWORK=external
-ENTRYPOINT ["tools/arena/hosted-entrypoint.sh"]
+ENTRYPOINT ["/app/tools/arena/hosted-entrypoint.sh"]

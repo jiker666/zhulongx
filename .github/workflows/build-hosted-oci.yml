@@ -1,0 +1,72 @@
+# BCTF-2026 hosted-mode image build (amd64 native).
+# The eval platform is amd64; local builds on Apple Silicon produce arm64
+# binaries that die with "exec format error" at ENTRYPOINT. This workflow
+# builds the whole stack natively on ubuntu-latest and exports the OCI
+# archive the platform's pipeline validates (oci-layout + index.json).
+name: build-hosted-oci
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile.ctf-sandbox
+      - Dockerfile.hosted
+      - src/**
+      - tools/arena/**
+      - tools/ctf/**
+      - config/**
+      - package.json
+      - package-lock.json
+      - tsconfig*.json
+      - .github/workflows/build-hosted-oci.yml
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # dist/ is gitignored; Dockerfile.hosted COPYs it from the context, so
+      # compile it on the runner first (same command the local dev flow uses).
+      - name: Build dist
+        run: |
+          npm ci --legacy-peer-deps --ignore-scripts
+          npm run build
+          test -f dist/cli.js
+
+      - name: Build slim ctf-sandbox base (amd64, no ghidra)
+        run: |
+          docker build --platform linux/amd64 -f Dockerfile.ctf-sandbox \
+            --build-arg INSTALL_GHIDRA=false \
+            -t zhulong-xuanshu-ctf-sandbox:nogh .
+
+      - name: Build hosted image
+        run: |
+          docker builder prune -f || true
+          docker build --platform linux/amd64 -f Dockerfile.hosted \
+            -t zhulongx-hosted:latest .
+
+      - name: Arch + boot sanity
+        run: |
+          arch=$(docker run --rm --entrypoint /bin/uname zhulongx-hosted:latest -m)
+          echo "image arch: $arch"
+          [ "$arch" = "x86_64" ]
+
+      - name: Export OCI archive
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq skopeo
+          skopeo copy docker-daemon:zhulongx-hosted:latest oci-archive:agent-oci.tar
+          tar -tf agent-oci.tar | grep -E '^(oci-layout|index.json)$'
+          ls -lh agent-oci.tar
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-oci
+          path: agent-oci.tar
+          retention-days: 7
+          if-no-files-found: error
