@@ -38,8 +38,8 @@
 //    "one step from flag" timeouts (R2 hard chains converted at 46/60).
 //    Hard singles now use the deep ladder: 46, then 60 after 2 misses.
 //  - The warm-before-fresh priority left fresh hards untouched for hours
-//    (an 800pt CVE sat 6.5h; fresh opens went 2/2 in the final hour while
-//    retries went 0/14). Two counter-forces now: role "prospector" (fresh
+//    (a high-value quick win sat untouched for
+//    hours while retries went 0/14). Two counter-forces now: role "prospector" (fresh
 //    opens only) and forced fresh after 2 consecutive retry misses.
 //  - Per-run scratch wipes taxed every retry ("OCR 工件已随 scratch 清空丢失,
 //    需重建" — three failed challenges rebuilt toolchains each attempt). The
@@ -462,7 +462,7 @@ function buildTask(challenge, budgetMinutes) {
   const accepted = readLedger().accepted[code] ?? [];
   if (challenge.flag_count > 1 || accepted.length > 0) {
     // Harvest mode (2026-10-10): one-run-one-flag serialization was the
-    // round-1 bottleneck — b-01 burned 4 runs x ~45min for 300/1200.
+    // round-1 bottleneck — one chain burned 4 runs x ~45min for a quarter of its value.
     lines.push(`重要:本题共 ${challenge.flag_count} 个 flag,平台已确认 ${challenge.correct_flag_count} 个正确。收割模式:不要只追一个 flag——在权限/立足点允许的范围内枚举所有 flag 来源,每一个都实际从远程读出并立即复读验证。`);
     lines.push(`已确认/已判错值严禁重复推导:已正确提交${accepted.length > 0 ? `:${accepted.map((v) => `"${v}"`).join("、")}` : ":(无)" }。`);
     lines.push("");
@@ -560,7 +560,7 @@ async function ensureContainer(challenge) {
   }
   // Free a slot first if the platform is at its 3-instance limit. NEVER pick
   // a claimed (in-flight in another lane) challenge as the victim — the first
-  // version closed a-05's container out from under a live run. Completed
+  // version closed a parked challenge's container out from under a live run. Completed
   // first, then unclaimed leftovers; if every active slot is in-flight, hold
   // and retry rather than kill someone's target.
   const active = (await listChallenges()).filter((item) => ["pending", "available", "stop_pending"].includes(item.container_status) && item.unique_code !== code);
@@ -570,9 +570,7 @@ async function ensureContainer(challenge) {
       throw Object.assign(new Error("all 3 active slots are in-flight (claimed); holding for a free slot"), { slotsBusy: true });
     }
     // Re-verify the victim is still unclaimed right before the close: the
-    // claiming lane's write can land between the scan and this call (a-10
-    // 2026-10-10: lane-c claimed it one second after the scan chose it as
-    // victim; the close killed a live run's container).
+    // claiming lane's write can land between the scan and this call (observed once: the close killed a live run's container).
     if (!victim.is_completed && claimFor(victim.unique_code)) {
       throw Object.assign(new Error(`victim ${victim.unique_code} got claimed mid-selection; holding for a free slot`), { slotsBusy: true });
     }
@@ -640,8 +638,8 @@ async function solveOneInner(challenge) {
   }
   let reachable = await probeVpn(addrs);
   if (!reachable) {
-    // A just-started container often needs seconds before it listens (d-02
-    // cost a 5-minute hold for one early probe); retry once before declaring
+    // A just-started container often needs seconds before it listens (observed once:
+    // a 5-minute hold for one early probe); retry once before declaring
     // the VPN down.
     await sleep(10_000);
     reachable = await probeVpn(addrs);
@@ -664,11 +662,11 @@ async function solveOneInner(challenge) {
   const isChain = (ready.flag_count ?? 1) > 1;
   const rank = DIFFICULTY_RANK[String(ready.difficulty ?? "").toLowerCase()] ?? 3;
   // Deep 60 only buys chains (they bank flags late into the budget). A single
-  // that missed twice does not convert with more minutes — a-05 queued a
-  // 60-min THIRD attempt on a 100pt easy (2026-10-10); cap singles at 35 warm
+  // that missed twice does not convert with more minutes — one lane queued a
+  // 60-min THIRD attempt on a 100pt easy; cap singles at 35 warm
   // and let the miss cap park them instead. EXCEPT hard singles (round 3:
-  // every hard-single board ended "one step from flag" at timeout — 24's read
-  // oracle, 25's armed poison, 32's cracked PoW mechanics): they take the
+  // every hard-single board ended "one step from flag" at timeout — a working read
+  // oracle, an armed poisoning, fully cracked mechanics): they take the
   // chain-tier ladder, 46 then 60. Role overrides: deep lanes get the deep
   // ladder on everything they pick (their pool is hard/chains anyway), the
   // prospector probes fresh hards at a compressed 30 — a miss still maps the
@@ -721,7 +719,7 @@ async function solveOneInner(challenge) {
       } catch { /* not written yet */ }
       await sleep(3_000);
     }
-    // Completion pre-check (round-3, bctf2026-02): the agent may have
+    // Completion pre-check (observed in round 3): the agent may have
     // self-submitted everything in the poll gap before the stop — a timeout
     // is not a miss if the platform already counts the challenge done.
     try {
@@ -757,7 +755,7 @@ async function solveOneInner(challenge) {
     // Self-submit world: the agent may have banked every flag already, with
     // finish_task carrying a leftover unconfirmed value. Relaying that would
     // pollute the wrong-file and ledger on a challenge the platform already
-    // counts as solved (d-01 round 2: correct:false on a 1/1-complete
+    // counts as solved (observed: correct:false on a 1/1-complete
     // challenge). Check completion before relaying.
     try {
       const freshSelf = (await listChallenges()).find((item) => item.unique_code === code) ?? challenge;
@@ -781,8 +779,8 @@ async function solveOneInner(challenge) {
       if (isDuplicate(error)) {
         // Idempotent protection: the value is already banked. Not a rejection.
         // Bank it in the accepted list too: the platform may 409-duplicate a
-        // value we never recorded (b-01: flag1.txt's value was duplicate yet
-        // correct_flag_count stayed 1) — whatever the cause, resubmitting it
+        // value we never recorded (observed once: a value 409-duplicated yet
+        // correct_flag_count stayed put) — whatever the cause, resubmitting it
         // earns nothing, so the next task build must exclude it.
         fastFails = 0;
         recordAccepted(code, submission);
@@ -805,7 +803,7 @@ async function solveOneInner(challenge) {
       recordAccepted(code, submission);
       // A banked flag on a multi-flag challenge is NOT done: pickNext filters
       // status "solved" out entirely, and marking partial chains solved the
-      // moment flag 1 lands stranded b-01's remaining 3 flags (no lane would
+      // moment flag 1 lands stranded that chain's remaining 3 flags (no lane would
       // ever re-pick it, and its live container got reaped as a free slot).
       const fullyDone = verdict.correct_flag_count >= verdict.total_flag_count;
       ledgerMark(code, fullyDone ? "solved" : "partial", { progress: verdict.correct_flag_count });
@@ -852,8 +850,8 @@ async function solveOneInner(challenge) {
 
 // Order (round-2, value-density): multi-flag chains FIRST regardless of
 // current progress — they serialize over several runs, so starting them late
-// is how round 1 never opened b-02 (1800pts, highest value in the pool) before
-// the task ended. Within chains: more remaining flags then higher score.
+// is how round 1 never opened the pool's highest-value
+// challenge before the task ended. Within chains: more remaining flags then higher score.
 // Singles keep the old shape: easier first, higher score first.
 const chainOf = (c) => (c.flag_count ?? 1) > 1 && remainingOf(c) > 0;
 const byPriority = (a, b) =>
@@ -926,8 +924,8 @@ function pickNext(items, role = "mixed", forceFresh = false) {
       // Partial chains, warm handoffs and boards with carried facts all get
       // the 2-miss retry window: each banked flag is sunk analysis the next
       // flag builds on. A pulled hint extends it to 4 — the deduction is
-      // sunk cost, and parking a hint-carrying challenge wastes it (b-02
-      // round 2: parked at 2/6 with the 泛微OA lead still unexploited).
+      // sunk cost, and parking a hint-carrying challenge wastes it (observed:
+      // parked at 2/6 flags with a live exploit lead still unexploited).
       // existsSync avoids lazy-migration writes in a read path.
       // Round 3 corrected the cap for SINGLE-flag challenges: attempts 3-4
       // went 0/14 — the sunk-cost argument only holds for chains with banked
@@ -945,8 +943,8 @@ function pickNext(items, role = "mixed", forceFresh = false) {
   //  - deep: hard singles + chains (the long-budget grinders; scratch
   //    inheritance makes their retries cumulative)
   //  - prospector: fresh (never-attempted) opens only — 30min probes on
-  //    hard either bank a quick win (an 800pt five-minute CVE sat untouched
-  //    6.5h in round 3) or map the surface into the board for deep to
+  //    hard either bank a quick win (round 3 left such
+  //    wins untouched for hours) or map the surface into the board for deep to
   //    inherit. forceFresh is the same override applied reactively after
   //    two retry misses on one lane.
   //  - sweep: singles only (legacy); chain: chains while any remain.
@@ -1142,7 +1140,7 @@ async function cmdRun(code) {
 
 // ARTEX-style coverage view: the interesting question is not what is solved
 // but WHICH challenges carry no test records at all — those are blind spots
-// the priority sort can quietly starve (round 1 never opened b-02).
+// the priority sort can quietly starve (round 1 never opened the pool's highest-value challenge).
 async function cmdStatus() {
   const items = await listChallenges();
   const ledger = readLedger();

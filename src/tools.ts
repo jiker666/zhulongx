@@ -1451,7 +1451,7 @@ export function createToolSet(context: ToolContext): ToolSet {
         };
         // Submission-verdict safety net: an accepted flag value in this
         // command's output must not depend on the model remembering to call
-        // record_finding (b-03/d-02/c-03 round-2 recovery).
+        // record_finding (round-2 flag-recovery incidents).
         const banked = await maybeBankVerifiedSubmission(
           "run_command",
           [input.program, ...input.args, input.stdin ?? ""].join("\n"),
@@ -1911,7 +1911,7 @@ export function createToolSet(context: ToolContext): ToolSet {
         if (input.submission) {
           state.submission = input.submission.trim();
         } else {
-          // Round-2 evidence (c-03): the agent banked the flag live but
+          // Round-2 evidence: the agent banked the flag live but
           // finish_task landed without a submission, so the driver relay had
           // nothing authoritative to fall back on. Never override the agent's
           // own choice — only fill an absent submission from the most recent

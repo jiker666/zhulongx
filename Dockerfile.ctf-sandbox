@@ -17,7 +17,11 @@ RUN bash /app/tools/ctf/install-radare2.sh \
     && bash /app/tools/ctf/install-jadx.sh
 COPY tools/ctf/install-ghidra.sh tools/ctf/ghidra/DumpDecompiled.java ./tools/ctf/
 COPY tools/ctf/deps/ ./tools/ctf/deps/
-RUN bash /app/tools/ctf/install-ghidra.sh
+# Ghidra is ~2GB and never appears in the agent's allowedPrograms allowlist
+# (jadx/r2 cover the RE surface the agent can actually invoke); the hosted
+# image ships without it to stay under the platform's 3GB upload cap.
+ARG INSTALL_GHIDRA=true
+RUN if [ "$INSTALL_GHIDRA" = "true" ]; then bash /app/tools/ctf/install-ghidra.sh; fi
 COPY tools/ctf/install-python-core.sh tools/ctf/requirements-core.txt tools/ctf/verify-core-tools.sh ./tools/ctf/
 RUN bash /app/tools/ctf/install-python-core.sh \
     && bash /app/tools/ctf/verify-core-tools.sh

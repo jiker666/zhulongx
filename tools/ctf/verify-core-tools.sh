@@ -47,8 +47,6 @@ required_commands=(
   rafind2
   ragg2
   rax2
-  analyzeHeadless
-  ghidra-decompile
   java
 )
 
@@ -78,13 +76,20 @@ r2 -v >/dev/null
 jadx --version >/dev/null
 # Ghidra headless must actually decompile, not merely exist: this catches
 # missing aarch64/x86 natives, JDK mismatches, and script compile errors.
-ghidra_probe=$(mktemp -d)
-printf 'int main(void){return 42;}\n' > "$ghidra_probe/probe.c"
-gcc -o "$ghidra_probe/probe" "$ghidra_probe/probe.c"
-ghidra-decompile "$ghidra_probe/probe" "$ghidra_probe/probe.c.out"
-grep -q '^// ===== ' "$ghidra_probe/probe.c.out"
-grep -q 'main' "$ghidra_probe/probe.c.out"
-rm -rf "$ghidra_probe"
+# The hosted image builds without ghidra (INSTALL_GHIDRA=false, ~2GB saved;
+# it never appears in the agent's allowedPrograms allowlist) — probe only
+# when the wrapper is installed.
+if command -v ghidra-decompile >/dev/null; then
+  ghidra_probe=$(mktemp -d)
+  printf 'int main(void){return 42;}\n' > "$ghidra_probe/probe.c"
+  gcc -o "$ghidra_probe/probe" "$ghidra_probe/probe.c"
+  ghidra-decompile "$ghidra_probe/probe" "$ghidra_probe/probe.c.out"
+  grep -q '^// ===== ' "$ghidra_probe/probe.c.out"
+  grep -q 'main' "$ghidra_probe/probe.c.out"
+  rm -rf "$ghidra_probe"
+else
+  echo "ghidra not installed (INSTALL_GHIDRA=false): skipping ghidra probes"
+fi
 
 /opt/ctf-venv/bin/python - <<'PY'
 import angr
