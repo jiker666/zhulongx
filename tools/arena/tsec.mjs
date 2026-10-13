@@ -632,6 +632,25 @@ async function ensureContainer(challenge) {
 
 // ---------------------------------------------------------------- main flow
 
+// -------------------------------------------------- lane-minute accounting (R6)
+// Live-run 28506 post-mortem: five hard singles consumed 438 lane-minutes for
+// zero flags (08:96, 25:75, 28:114, 24:70, 35:83) while the tail challenges
+// each got ONE attempt truncated mid-attack by the 6h clock (27 was still
+// planning its next probe 90 seconds before the end). The budget ladder only
+// counts ATTEMPTS, not minutes — revive cycles reset miss counts and hards
+// came back forever. spentMin is the cumulative wall time this host's lanes
+// have burned on a challenge; hard singles cap at HARD_SPENT_CAP minutes.
+const HARD_SPENT_CAP = 90;
+function ledgerAddSpent(code, minutes) {
+  if (minutes <= 0) return;
+  try {
+    const ledger = readLedger();
+    const prior = ledger.done[code] ?? { misses: 0 };
+    ledger.done[code] = { ...prior, spentMin: (prior.spentMin ?? 0) + minutes };
+    writeLedger(ledger);
+  } catch { /* ledger races are tolerated elsewhere; same here */ }
+}
+
 async function solveOne(challenge) {
   const code = challenge.unique_code;
   const lane = process.env.TSEC_LANE ?? "main";
@@ -639,10 +658,12 @@ async function solveOne(challenge) {
     console.warn(`[tsec] ${code} is claimed by lane ${claimFor(code)?.lane ?? "?"}; skipping`);
     throw Object.assign(new Error("already_claimed"), { claimed: true });
   }
+  const claimedAt = Date.now();
   try {
     return await solveOneInner(challenge);
   } finally {
     releaseClaim(code);
+    ledgerAddSpent(code, Math.round((Date.now() - claimedAt) / 60_000));
   }
 }
 
@@ -703,10 +724,15 @@ async function solveOneInner(challenge) {
   // prospector probes fresh hards at a compressed 30 — a miss still maps the
   // surface into the board for a deep lane to inherit.
   const deepTier = isChain || rank === 2 || laneRole === "deep";
+  // R6: the 60-min deep grant respects the spent cap — a hard single already
+  // past 90 cumulative lane-minutes must not queue ANOTHER hour (28's third
+  // life alone was 54). It is normally ineligible by then; this is the
+  // last-line guard for hint-extended caps that outlive the miss check.
+  const spentMin = ledgerEntry(code).spentMin ?? 0;
   const budgetMin = laneRole === "prospector"
     ? (rank === 2 ? 30 : rank === 0 ? 20 : 30) // prospector: surface map budgets
     : deepTier
-      ? (misses >= 2 ? 60 : 46)
+      ? (misses >= 2 && (isChain || spentMin + 60 <= HARD_SPENT_CAP) ? 60 : 46)
       : warm ? 35 : rank === 0 ? 20 : rank === 1 ? 30 : 40;
   const budgetMs = budgetMin * 60_000;
   const task = buildTask(ready, Math.round(budgetMs / 60_000));
@@ -966,7 +992,15 @@ function pickNext(items, role = "mixed", forceFresh = false) {
       const cap = (item.flag_count ?? 1) > 1
         ? (hinted ? 4 : (handoffFor(item.unique_code) || existsSync(boardPath(item.unique_code)) || done?.status === "partial" ? 2 : 1))
         : (handoffFor(item.unique_code) || existsSync(boardPath(item.unique_code)) ? singleCap : 1);
-      return (done?.misses ?? 0) < cap;
+      if ((done?.misses ?? 0) >= cap) return false;
+      // Hard-single lane-minute cap (R6): attempts alone never stopped the
+      // 2026-10-12 hards — revive/hint cycles kept resetting the miss budget
+      // while 438 lane-minutes went to zero flags. A hard single that already
+      // consumed HARD_SPENT_CAP minutes of this host's lanes is done for good.
+      const hardSingle = (item.flag_count ?? 1) === 1
+        && (DIFFICULTY_RANK[String(item.difficulty ?? "").toLowerCase()] ?? 3) >= 2;
+      if (hardSingle && (done?.spentMin ?? 0) >= HARD_SPENT_CAP) return false;
+      return true;
     });
   // Lane roles (R4: 3 deep + 1 prospector):
   //  - deep: hard singles + chains (the long-budget grinders; scratch
@@ -996,14 +1030,28 @@ function pickNext(items, role = "mixed", forceFresh = false) {
   // Early-run harvest sweep (R5, live-run 28506 lesson): while ≥4 fresh
   // easy/medium singles sit unopened, EVERY lane takes them first — fast-track
   // conversions run 3-5 min at 200-500pts (04/07/20: 950pts in 9 lane-minutes)
-  // while two lanes pinned on two hard singles produced zero for 100+ minutes
-  // with 29 challenges never opened. Once the shallow pool is drained below
-  // the threshold, normal role logic (deep grind / prospector) resumes.
+  // while two lanes pinned on two hard singles produced zero for 100+ minutes.
+  // Once the shallow pool is drained below the threshold, normal role logic
+  // (deep grind / prospector) resumes.
   const sweepPool = fresh
     .filter((c) => (c.flag_count ?? 1) === 1 && (DIFFICULTY_RANK[String(c.difficulty ?? "").toLowerCase()] ?? 3) <= 1)
     .sort((a, b) => (b.total_score ?? 0) - (a.total_score ?? 0));
+  // Truncated-attempt rescue (R6): the 28506 tail was a conveyor of half-
+  // attempts — single-flag challenges whose ONLY run banked a rich board
+  // (>=3 facts) and then hit the clock mid-attack (27 was still planning its
+  // next probe 90s before the end; 21 died testing mass assignment). One miss
+  // + a rich board is the strongest conversion signal in the pool; re-queue
+  // those ahead of role pools (but behind the sweep — fresh e/m are surer).
+  const richRetryPool = eligible.filter((c) => {
+    const done = ledger.done[c.unique_code];
+    if (!done || (done.misses ?? 0) !== 1 || (c.flag_count ?? 1) !== 1) return false;
+    if (!existsSync(boardPath(c.unique_code))) return false;
+    const board = boardFor(c.unique_code);
+    return (board.facts?.length ?? 0) >= 3;
+  }).sort((a, b) => (b.total_score ?? 0) - (a.total_score ?? 0));
   const pool = sweepPool.length >= 4
     ? sweepPool
+    : richRetryPool.length > 0 ? richRetryPool
     : prospectorPool
     ?? (role === "deep" && deepPool.length > 0 ? deepPool
     : role === "deep" ? eligible // fallback: don't idle deep lanes
@@ -1016,6 +1064,7 @@ function pickNext(items, role = "mixed", forceFresh = false) {
   // R5 live-run review). Those pools keep their own order; everything else
   // falls through to the shared value-density sort.
   if (sweepPool.length >= 4) return sweepPool[0];
+  if (richRetryPool.length > 0) return richRetryPool[0];
   if (prospectorPool) return prospectorPool[0];
   return pool.sort(byPriority)[0] ?? null;
 }
@@ -1065,6 +1114,12 @@ function reviveParked(items) {
     const done = ledger.done[item.unique_code];
     if (!done || done.status === "solved" || (done.misses ?? 0) < 1) continue;
     if (now - Date.parse(done.revivedAt ?? 0) < REVIVE_COOLDOWN_MS) continue; // NaN (never revived) passes
+    // R6: the spent cap must survive revives — resetting the miss budget used
+    // to resurrect hard singles for another 46-60 min grind (28 burned 114
+    // lane-minutes across three lives). A capped-out hard single stays dead.
+    const hardSingle = (item.flag_count ?? 1) === 1
+      && (DIFFICULTY_RANK[String(item.difficulty ?? "").toLowerCase()] ?? 3) >= 2;
+    if (hardSingle && (done.spentMin ?? 0) >= HARD_SPENT_CAP) continue;
     ledger.done[item.unique_code] = { ...done, misses: 0, revivedAt: new Date().toISOString() };
     revived.push(item.unique_code);
   }
