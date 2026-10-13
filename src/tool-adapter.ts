@@ -294,6 +294,7 @@ export function createToolCallPipeline(deps: ToolCallPipelineDeps): ToolCallPipe
   let persistingActionSeen = false;
   const persistenceSeen = () => persistingActionSeen || state.findings.length > 0 || state.lastCheckpoint !== undefined;
   let successfulToolCalls = 0;
+  let finishGateRejections = 0;
   const ZERO_PERSISTENCE_FORCE_AT = 60;
   let settled = false;
 
@@ -345,7 +346,16 @@ export function createToolCallPipeline(deps: ToolCallPipelineDeps): ToolCallPipe
         state.submissionValidation = validation;
         await audit.append("submission.validation", validation, { source: "system", actor: "submission-gate", correlationId: toolCall.toolCallId, parentSequence: requested.sequence });
         await emit("submission.validation", { status: validation.status, reason: validation.reason });
-        if (validation.status !== "accepted") return { block: true, reason: `Submission gate: ${validation.reason}` };
+        if (validation.status !== "accepted") {
+          // Repeated rejections mean the model is fighting the gate (29070:
+          // 3-6 consecutive attempts polishing marker strings) — after the
+          // second rejection spell out the clean exit alongside the remedy.
+          finishGateRejections += 1;
+          const escalation = finishGateRejections >= 2
+            ? ` This is rejection #${finishGateRejections}. If you have no real flag candidate, finish NOW with status "blocked" and NO submission field — that path is accepted immediately; further rejections only burn budget.`
+            : "";
+          return { block: true, reason: `Submission gate: ${validation.reason}${escalation}` };
+        }
       }
       const guard = webReasoning.guardToolCall(toolCall.toolName, toolCall.args, deps.allowedToolNames);
       if (!guard.allowed) {

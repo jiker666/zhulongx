@@ -30,6 +30,12 @@ export interface SubmissionValidationInput {
 const IDENTIFIER_ONLY = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const DECOY_PREFIX = /^(?:session|request|trace|run|job|task)[-_ ]?(?:id)?\s*[:=]/i;
 const SECRET_PREFIX = /^(?:bearer|authorization|cookie|set-cookie)\b/i;
+// Blocker/status markers an agent reaches for when it has NO real flag: the
+// 29070 run saw "BLOCKED_NO_FLAG_<hex>" and "401 UNAUTHORIZED" submitted as
+// candidates, then 3-6 consecutive finish_task rejections burning the tail of
+// the budget on echo tricks. The flag-shaped remedies below only coach more
+// fighting for these — they need the blocked-exit instruction instead.
+const BLOCKER_MARKER = /^(?:blocked(?:[_ -]?no[_ -]?flag)?|no[_ -]?flag|unauthorized|forbidden|access[_ -]?denied|not[_ -]?found|nothing|none|n\/?a|null|undefined|unknown|pending|timeout|timed[_ -]?out|error|exception|40[1345]|\d{3}\s+[a-z\s]{3,20})(?:[\s:_-].{0,80})?$/i;
 // Long runs of flag-body characters, as printed by decoders and exploit output.
 const FLAG_BODY_TOKEN = /[A-Za-z0-9_@!#$%^&*+=.:?~-]{15,160}/g;
 
@@ -117,6 +123,9 @@ export function validateSubmission(input: SubmissionValidationInput): Submission
   if (!candidate) return result(input, "accepted", "No submission candidate was declared for a blocked task.", false, false);
   if (IDENTIFIER_ONLY.test(candidate) || DECOY_PREFIX.test(candidate) || SECRET_PREFIX.test(candidate)) {
     return result(input, "rejected", "The candidate has the shape of an identifier or credential, not a task result.", false, false);
+  }
+  if (BLOCKER_MARKER.test(candidate)) {
+    return result(input, "rejected", "The candidate is a blocker/status marker (BLOCKED/UNAUTHORIZED/timeout/…), not a task result — no amount of echoing or verification-array formatting turns it into one. If you have no real flag candidate, call finish_task with status \"blocked\" and OMIT the submission field entirely; that ends the run cleanly and is accepted. Only submit again if a genuinely different, real candidate emerges.", false, false);
   }
   const grounded = input.observedOutputs.some((output) => output.includes(candidate));
   if (!grounded) return result(input, "pending", "The exact candidate was not observed in a successful tool result.", false, false);

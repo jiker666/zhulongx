@@ -607,7 +607,7 @@ function buildTask(challenge, budgetMinutes, direction) {
   if (budgetMinutes > 0) {
     lines.push(`时间预算:本次运行约 ${budgetMinutes} 分钟(超时会被强制中止,中止前未固化的推理即丢失)。按此预算规划路径深度:优先单条最高价值主线;临近预算时把已验证的关键值/中间结果用 record_finding 或 scratch 文件固化,便于续跑接手。`);
   }
-  lines.push(`目标:解出本题第 ${challenge.correct_flag_count + 1} 个 flag,以题面或环境回显的实际格式逐字符提交,严禁大小写/拼写改写。要求:只测试本题给出的目标;finish_task 的提交值必须来自成功工具输出且经独立验证,与验证输出逐字符一致;确实无法解出时以 blocked 结束,严禁伪造 flag。`);
+  lines.push(`目标:解出本题第 ${challenge.correct_flag_count + 1} 个 flag,以题面或环境回显的实际格式逐字符提交,严禁大小写/拼写改写。要求:只测试本题给出的目标;finish_task 的提交值必须来自成功工具输出且经独立验证,与验证输出逐字符一致;确实无法解出时以 blocked 结束(status:"blocked" 且完全省略 submission 字段,这样直接放行),严禁伪造 flag,严禁把 BLOCKED/401/timeout 之类标记串当 submission 反复试——那只会被提交门连拒并烧光剩余预算。`);
   return lines.join("\n");
 }
 
