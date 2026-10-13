@@ -14,10 +14,13 @@ runtime:
   maxTurns: 30
   maxToolCalls: 80
   maxRuntimeMs: 900000
-  # Effective budget leaves 20% headroom under a 60 RPM / 600K TPM provider quota.
-  modelMinIntervalMs: 7500
-  modelRequestsPerMinute: 48
-  modelTokensPerMinute: 480000
+  # R7 (bctf top-6 post-mortem): token throughput tracks rank — the #1 agent
+  # burned ~1.4B tokens; our 4-lane single-stream runs could not even reach
+  # the old 48 RPM / 480K TPM gate. Raised to ~10% headroom under the stated
+  # 60 RPM / 600K TPM provider quota to feed 6 lanes + directed fan-out.
+  modelMinIntervalMs: 5000
+  modelRequestsPerMinute: 54
+  modelTokensPerMinute: 540000
   maxActionsWithoutCheckpoint: 4
   maxRepeatedAction: 2
   maxOutputBytes: 65536
