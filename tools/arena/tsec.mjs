@@ -726,7 +726,7 @@ async function solveOneInner(challenge) {
   const warm = handoffFor(code) || carryBoard.facts.length > 0 || carryBoard.intents.length > 0;
   const misses = ledgerEntry(code).misses ?? 0;
   const rank = DIFFICULTY_RANK[String(ready.difficulty ?? "").toLowerCase()] ?? 3;
-  await maybePullHint(code, misses, warm, rank, carryBoard); // deep tier: pay for a hint before building the task that uses it
+  await maybePullHint(code, misses); // R9: pull before the task build; misses>=1 means the unaided shot already failed
   const isChain = (ready.flag_count ?? 1) > 1;
   // Deep 60 only buys chains (they bank flags late into the budget). A single
   // that missed twice does not convert with more minutes — one lane queued a
@@ -811,6 +811,7 @@ async function solveOneInner(challenge) {
     }
     await record({ challenge: code, runId, outcome: "driver-timeout" });
     ledgerMark(code, "miss");
+    await settleMiss(code, challenge); // R9: pay the hint now; release or keep-warm the slot
     return false;
   }
 
@@ -893,6 +894,7 @@ async function solveOneInner(challenge) {
     } else {
       recordRejected(code, submission);
       ledgerMark(code, "miss");
+      await settleMiss(code, challenge); // R9: pay the hint now; release or keep-warm the slot
     }
     await record({ challenge: code, runId, outcome: solved ? "submitted" : "rejected", submission, verdict });
     console.log(`[tsec] submit verdict (${code}): ${JSON.stringify(verdict)}`);
@@ -917,6 +919,7 @@ async function solveOneInner(challenge) {
     return false;
   }
   ledgerMark(code, "miss");
+  await settleMiss(code, challenge); // R9: pay the hint now; release or keep-warm the slot
   return false;
 }
 
@@ -1080,6 +1083,7 @@ async function solveFanOut(challenge) {
     if (solvedFlag) return true;
     ledgerMark(code, "miss");
     await record({ challenge: code, outcome: "fanout-miss" });
+    await settleMiss(code, challenge); // R9: pay the hint now; release or keep-warm the slot
     return false;
   } finally {
     releaseClaim(code);
@@ -1153,6 +1157,24 @@ async function harvestFlags(code, terminal) {
   }
 }
 
+// R9: one shared attempt-cap so pickNext eligibility and settle-time slot
+// decisions can never disagree (a container that pickNext will never re-pick
+// is pure slot waste). A paid hint re-opens COLD singles too — the deduction
+// is already sunk, parking a hint-carrying challenge wastes it.
+function attemptCap(item, ledger) {
+  const done = ledger.done[item.unique_code];
+  const hinted = existsSync(hintPath(item.unique_code));
+  const singleCap = hinted ? 3 : 2;
+  return (item.flag_count ?? 1) > 1
+    ? (hinted ? 4 : (handoffFor(item.unique_code) || existsSync(boardPath(item.unique_code)) || done?.status === "partial" ? 2 : 1))
+    : (hinted || handoffFor(item.unique_code) || existsSync(boardPath(item.unique_code)) ? singleCap : 1);
+}
+function hardSpentCapped(item, ledger) {
+  const hardSingle = (item.flag_count ?? 1) === 1
+    && (DIFFICULTY_RANK[String(item.difficulty ?? "").toLowerCase()] ?? 3) >= 2;
+  return hardSingle && (ledger.done[item.unique_code]?.spentMin ?? 0) >= HARD_SPENT_CAP;
+}
+
 function pickNext(items, role = "mixed", forceFresh = false) {
   const ledger = readLedger();
   const eligible = items
@@ -1169,19 +1191,12 @@ function pickNext(items, role = "mixed", forceFresh = false) {
       // Round 3 corrected the cap for SINGLE-flag challenges: attempts 3-4
       // went 0/14 — the sunk-cost argument only holds for chains with banked
       // flags, so singles cap at 2, or 3 with a paid hint.
-      const hinted = existsSync(hintPath(item.unique_code));
-      const singleCap = hinted ? 3 : 2;
-      const cap = (item.flag_count ?? 1) > 1
-        ? (hinted ? 4 : (handoffFor(item.unique_code) || existsSync(boardPath(item.unique_code)) || done?.status === "partial" ? 2 : 1))
-        : (handoffFor(item.unique_code) || existsSync(boardPath(item.unique_code)) ? singleCap : 1);
-      if ((done?.misses ?? 0) >= cap) return false;
+      if ((done?.misses ?? 0) >= attemptCap(item, ledger)) return false;
       // Hard-single lane-minute cap (R6): attempts alone never stopped the
       // 2026-10-12 hards — revive/hint cycles kept resetting the miss budget
       // while 438 lane-minutes went to zero flags. A hard single that already
       // consumed HARD_SPENT_CAP minutes of this host's lanes is done for good.
-      const hardSingle = (item.flag_count ?? 1) === 1
-        && (DIFFICULTY_RANK[String(item.difficulty ?? "").toLowerCase()] ?? 3) >= 2;
-      if (hardSingle && (done?.spentMin ?? 0) >= HARD_SPENT_CAP) return false;
+      if (hardSpentCapped(item, ledger)) return false;
       return true;
     });
   // Lane roles (R4: 3 deep + 1 prospector):
@@ -1231,8 +1246,19 @@ function pickNext(items, role = "mixed", forceFresh = false) {
     const board = boardFor(c.unique_code);
     return (board.facts?.length ?? 0) >= 3;
   }).sort((a, b) => (b.total_score ?? 0) - (a.total_score ?? 0));
+  // Hint-armed revives (R9): the deduction is already paid — further attempts
+  // must carry the hint, and must not queue behind fresh picks until the
+  // endgame (the 29070 deadlock: hint due at 2 misses, container evicted 13s
+  // later, pull never happened). Sits ABOVE rich-retry/prospector but BELOW
+  // the fresh shallow sweep — fresh easy/medium conversions are still surer.
+  const hintRetryPool = eligible.filter((c) => {
+    if (!hintFor(c.unique_code)?.hint) return false;
+    const done = ledger.done[c.unique_code];
+    return done && (done.misses ?? 0) >= 1;
+  }).sort((a, b) => (b.total_score ?? 0) - (a.total_score ?? 0));
   const pool = sweepPool.length >= 4
     ? sweepPool
+    : hintRetryPool.length > 0 ? hintRetryPool
     : richRetryPool.length > 0 ? richRetryPool
     : prospectorPool
     ?? (role === "deep" && deepPool.length > 0 ? deepPool
@@ -1246,29 +1272,26 @@ function pickNext(items, role = "mixed", forceFresh = false) {
   // R5 live-run review). Those pools keep their own order; everything else
   // falls through to the shared value-density sort.
   if (sweepPool.length >= 4) return sweepPool[0];
+  if (hintRetryPool.length > 0) return { ...hintRetryPool[0], fanout: true };
   if (richRetryPool.length > 0) return { ...richRetryPool[0], fanout: true };
   if (prospectorPool) return prospectorPool[0];
   return pool.sort(byPriority)[0] ?? null;
 }
 
-// Tiered hint gate (R4 update): pay the hint_cost_ratio deduction only
-// when pure black-box capability has demonstrably failed:
-//  - warm challenges: after 1 miss (prior round burned attempts — paying
-//    for a hint on attempt #2 is almost always worth it, especially for
-//    hard challenges where the board already has partial analysis)
-//  - cold challenges: after 2 misses (fresh starts deserve a full attempt first)
-//  - warm HARD challenges: after 1 miss (hard singles with boards benefit most)
-//    R5 guard: the after-1-miss shortcuts require a NON-thin board (<3 records
-//    = prior runs died without banking usable leads — timeouts/infra), where a
-//    paid hint buys less than on a challenge with mapped-but-unexploited facts.
-function hintDue(misses, warm, rank, board) {
-  const thin = ((board?.facts?.length ?? 0) + (board?.intents?.length ?? 0)) < 3;
-  if (rank === 2 && warm && !thin) return misses >= 1; // hard warm with real progress: pay after 1 miss
-  return misses >= 2 || (warm && !thin && misses >= 1); // others: original rule (thin boards wait for 2)
+// Hint gate (R9, run 29070 post-mortem): every challenge gets ONE unaided
+// attempt, then the hint is due — the per-view deduction is small against a
+// 300-1000pt flag and "扣小分换正确 flag" is the better trade. The old 2-miss
+// gate for cold challenges deadlocked in fresh-first pools: pulls only ever
+// happened at the NEXT task build, which for a 2-miss single never came
+// (parked until endgame while its container got evicted — the whole bctf
+// run pulled 0 hints). Infra suspects never reach here: fast no-submission
+// settles don't count a miss upstream.
+function hintDue(misses) {
+  return misses >= 1;
 }
 
-async function maybePullHint(code, misses, warm, rank, board) {
-  if (hintFor(code) || !hintDue(misses, warm, rank, board)) return;
+async function maybePullHint(code, misses) {
+  if (hintFor(code) || !hintDue(misses)) return;
   try {
     const result = await api("/openapi/v1/challenges/hint", { query: { unique_code: code } });
     const text = typeof result?.hint === "string" ? result.hint.trim() : "";
@@ -1276,11 +1299,30 @@ async function maybePullHint(code, misses, warm, rank, board) {
     // (every view of a real hint re-charges; assume the view already cost).
     writeFileSync(hintPath(code), JSON.stringify({ code, hint: text, pulledAt: new Date().toISOString() }, null, 2));
     await record({ challenge: code, outcome: "hint-pulled", hasHint: text !== "", misses });
-    console.log(`[tsec] hint pulled for ${code} (misses=${misses}${warm ? ", warm" : ""}): ${text ? text.slice(0, 120) : "(challenge has no hint)"}`);
+    console.log(`[tsec] hint pulled for ${code} (misses=${misses}): ${text ? text.slice(0, 120) : "(challenge has no hint)"}`);
   } catch (error) {
     if (isTaskEnded(error)) throw error;
     console.warn(`[tsec] hint pull failed for ${code}: ${error.message}`);
   }
+}
+
+// R9: pay the hint AND settle the container at miss time. The pull must not
+// wait for the next task build (fresh-first picking starves 2-miss codes
+// until the endgame), and the container must not squat an instance slot
+// with nobody working it: hint-armed revives keep it warm, everything else
+// releases immediately (run 29070: bctf2026-02 sat unclaimed on a slot
+// ~30min before eviction, burning a third of the lane capacity).
+async function settleMiss(code, challenge, { pullHint = true } = {}) {
+  const misses = readLedger().done[code]?.misses ?? 0;
+  if (pullHint) await maybePullHint(code, misses);
+  const hint = hintFor(code)?.hint;
+  const ledger = readLedger();
+  if (hint && misses < attemptCap(challenge, ledger) && !hardSpentCapped(challenge, ledger)) {
+    console.log(`[tsec] ${code} miss settled with hint armed (${misses} misses); keeping container warm for the revive`);
+    return;
+  }
+  console.log(`[tsec] ${code} miss settled${hint ? " (hint armed but attempt-capped)" : ""}; releasing container slot`);
+  try { await closeChallenge(code); } catch { /* best-effort slot release */ }
 }
 
 // Cruiser tier-3 semantics: an unsolved challenge is never parked forever.
