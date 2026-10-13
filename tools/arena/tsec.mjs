@@ -493,16 +493,20 @@ function buildTask(challenge, budgetMinutes, direction) {
   // platform's free authoritative submit channel. 25 self-submitted 5 values
   // on the same task text: instruction strength, not capability, decides.
   lines.push("自交优先:每个从远程实际读出的候选值(哪怕只有中等把握)立即自交拿权威判定,不要攒到最后、不要只走 finish_task。finish_task 被提交门拒绝时,严禁用同一值原样重试——先把候选自交,correct=false 则记入已判错再决定重推或换路。");
-  // R7 prompt pack (bctf top-6 post-mortem, 2026-10-13): the winning agents'
+  // R7/R8 prompt pack (bctf top-6 post-mortem, 2026-10-13): the winning agents'
   // task texts open with an unconditional "start now" directive, force batch
-  // concurrency for enumeration work, and carry a flag-hunting checklist.
+  // concurrency for enumeration work, and carry a flag-hunting checklist; the
+  // efficiency runner (#2) added known-product CVE-template discipline, a real
+  // browser for JS-rendered/login-gated pages, and single-line OCR.
   lines.push("执行协议:现在开始解题,不要等待确认。题面如有附件或文件下载 URL,先下载到当前工作目录再分析;拿到 flag 立即自交;全部 flag 确认后输出简要总结并立即收尾。");
   lines.push("批量并发纪律:爆破/枚举/字典/多候选验证类任务严禁逐请求串行——优先写 Python 多线程脚本或 xargs -P 并发批量执行,对输出聚合过滤后只报告关键差异;单个请求超时或失败不得阻塞整批。");
   lines.push("flag 狩猎清单(拿到命令执行或任意文件读取能力后按序排查):环境变量(env/printenv、/proc/self/environ、/proc/1/environ)、挂载与随机文件名(/proc/mounts、/proc/self/mountinfo)、常规路径(/flag*、/root、/home、/tmp、应用目录)、配置与密钥文件;固定路径扫不到再用 find/grep 全盘定位。");
   lines.push("高成本探测纪律(每点≥1分钟:WAF限速注入oracle/CI构建周期/串行盲读):先写候选目标位置清单并按可能性排序,再按序取点;完成一个进行中的原语验证优先于切换思路;包装/大小写变体零信息量,放最后统一批量尝试,严禁中途弃测转猜变体。");
   lines.push("远端代码卫生:在远端执行的任何代码(CI payload/注入脚本)必须自带硬超时(AbortSignal.timeout/socket超时),严禁主动解析未验证的主机名(DNS挂起会杀死整条执行通道),网络探测一律带超时、并发≤4。");
   lines.push("诱饵判定:远程读出的值被判错且带陈旧标记(轮换/生成日期早于环境开通时间)时按诱饵处理——最多再试2个变体,随即转向寻找环境开通时刻生成的新值,严禁围绕旧值无限变体。");
-  lines.push("已知组件优先:识别出目标为已知开源组件/框架/CVE 时,先用沙箱内已装工具链与本地检索复核版本与公开利用路径,再动手验证;严禁为找 PoC 长时间外联公网。");
+  lines.push("已知组件优先:识别出目标为已知开源组件/框架/CVE 时,先查沙箱内速查表 /opt/kb/cve-quickref.md(产品→攻击面速查),再用本地资源复核版本与公开利用路径:/opt/kb/nuclei-templates(CVE/tech 模板,`nuclei -u <url> -tags <tag> -severity critical,high`)、/opt/kb/seclists(目录/用户名/密码字典);严禁把已知产品当未知目标从头 fuzz,严禁为找 PoC 长时间外联公网。");
+  lines.push("浏览器纪律:页面需要 JS 渲染或登录交互时,用 `chromium --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=/tmp/cp --dump-dom <url>` 取渲染后 DOM,或 `--screenshot=/tmp/shot.png` 取截图;登录态先复现 cookie(默认凭据/表单提交)再转 http_request 带上复用,严禁无状态地一遍遍盲刷登录页。");
+  lines.push("OCR 纪律:flag 或关键文本在图片/验证码里时,用 `tesseract <img> stdout --psm 7`(单行模式,不要 psm 8+字符白名单);读出后剥离首尾空白与换行再验证;失败先做放大/灰度/二值化预处理(python3+PIL 或 convert)重试一次,仍失败转按字符形状人工推理,严禁无限调参。");
   const isFastTrack = (challenge.flag_count ?? 1) === 1 && board.facts.length === 0 && ["easy", "medium"].includes(String(challenge.difficulty ?? "").toLowerCase());
   if (isFastTrack) {
     lines.push("本题按快速题处理:直奔题面最短解路径(默认凭据/已知组件CVE/明显注入点这类一步路径优先),浅层验证即可,严禁全端口扫描/全目录爆破式全面枚举。");

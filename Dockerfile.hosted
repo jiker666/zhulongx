@@ -48,7 +48,45 @@ RUN npm run build
 FROM ${SANDBOX_BASE}
 USER root
 WORKDIR /app
-COPY tools/arena/tsec.mjs tools/arena/hosted-entrypoint.sh tools/arena/rogue-ldaps.py ./tools/arena/
+COPY tools/arena/tsec.mjs tools/arena/hosted-entrypoint.sh tools/arena/rogue-ldaps.py tools/arena/cve-quickref.md ./tools/arena/
+# Headless Chromium (R8, bctf top-6 post-mortem): the #2 efficiency runner's
+# real-browser discipline for JS-rendered/login-gated pages — driven via
+# run_command (chromium --headless --dump-dom / --screenshot) since the
+# heavyweight web-reasoning browser mode is not enabled for CTF runs.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends chromium fonts-liberation fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/* \
+    && chromium --version
+# Generic web-attack knowledge base (R8, bctf top-6 post-mortem: the #2 agent's
+# core capability was "fingerprint the product, open the matching CVE template,
+# never fuzz a known product from scratch"). nuclei binary + curated template
+# subsets + SecLists wordlists land in /opt/kb; the task text points agents at
+# tools/arena/cve-quickref.md. All failures fail the build loudly (CI red)
+# rather than shipping a silently missing capability.
+RUN NUCLEI_VER=3.4.5 \
+    && curl -fsSL --retry 5 -o /tmp/nuclei.zip \
+      "https://github.com/projectdiscovery/nuclei/releases/download/v${NUCLEI_VER}/nuclei_${NUCLEI_VER}_linux_amd64.zip" \
+    && unzip -j -o /tmp/nuclei.zip '*nuclei' -d /usr/local/bin/ \
+    && rm /tmp/nuclei.zip \
+    && nuclei -version 2>/dev/null | head -1 \
+    && mkdir -p /opt/kb \
+    && git clone --depth 1 https://github.com/projectdiscovery/nuclei-templates /tmp/nct \
+    && mkdir -p /opt/kb/nuclei-templates/http \
+    && cp -r /tmp/nct/http/technologies /tmp/nct/http/cves /tmp/nct/http/exposures \
+             /tmp/nct/http/takeovers /opt/kb/nuclei-templates/http/ 2>/dev/null || true \
+    && cp /tmp/nct/README.md /opt/kb/nuclei-templates/ 2>/dev/null || true \
+    && rm -rf /tmp/nct \
+    && git clone --depth 1 https://github.com/danielmiessler/SecLists /tmp/sl \
+    && mkdir -p /opt/kb/seclists/Discovery /opt/kb/seclists/Usernames /opt/kb/seclists/Passwords \
+    && cp -r /tmp/sl/Discovery/Web-Content /opt/kb/seclists/Discovery/ \
+    && cp /tmp/sl/Usernames/*.txt /opt/kb/seclists/Usernames/ 2>/dev/null || true \
+    && cp /tmp/sl/Passwords/*.txt /opt/kb/seclists/Passwords/ 2>/dev/null || true \
+    && rm -rf /tmp/sl \
+    && cp tools/arena/cve-quickref.md /opt/kb/cve-quickref.md \
+    && du -sh /opt/kb \
+    && test -x /usr/local/bin/nuclei \
+    && test -d /opt/kb/nuclei-templates/http/cves \
+    && test -f /opt/kb/seclists/Discovery/Web-Content/common.txt
 RUN rm -rf /app/dist
 COPY --from=build /app/dist ./dist
 RUN chmod +x /app/tools/arena/hosted-entrypoint.sh \

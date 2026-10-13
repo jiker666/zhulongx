@@ -50,6 +50,7 @@ scope:
     - binwalk
     - bzip2
     - checksec
+    - chromium
     - convert
     - curl
     - dcfldd
@@ -87,6 +88,7 @@ scope:
     - multimon-ng
     - nmap
     - nm
+    - nuclei
     - objdump
     - one_gadget
     - outguess
