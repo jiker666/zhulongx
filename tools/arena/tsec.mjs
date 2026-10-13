@@ -366,6 +366,44 @@ function boardClear(code) {
   try { rmSync(boardPath(code), { force: true }); } catch { /* best effort */ }
 }
 
+// ── arena-wide lesson ledger (R10, user directive: 不要重做错误的事) ──────────
+// Every settled run banks its GENERIC lessons (record_lesson output) into a
+// shared ledger and its CONTRADICTED hypotheses onto the challenge board, so
+// later task builds — other challenges included — start with the negative
+// knowledge instead of repeating it. The per-challenge board already carries
+// rejected flags and verified facts; this adds cross-challenge methodology.
+function lessonsPath() { return resolve(WORK_DIR, "lessons.json"); }
+function readArenaLessons() { try { return JSON.parse(readFileSync(lessonsPath(), "utf8")); } catch { return []; } }
+function recordArenaLessons(code, state) {
+  try {
+    const lessons = readArenaLessons();
+    const seen = new Set(lessons.map((l) => l.text));
+    for (const lesson of state?.lessons ?? []) {
+      const parts = [];
+      if (lesson?.title) parts.push(String(lesson.title).slice(0, 160));
+      const pitfalls = (lesson?.pitfalls ?? []).map((pitfall) => `坑:${String(pitfall).slice(0, 140)}`);
+      if (pitfalls.length > 0) parts.push(pitfalls.join(";"));
+      const when = (lesson?.applicableWhen ?? []).map((condition) => String(condition).slice(0, 100));
+      if (when.length > 0) parts.push(`适用:${when.join(";")}`);
+      const text = parts.join(" | ");
+      if (!text || seen.has(text)) continue;
+      seen.add(text);
+      lessons.push({ at: new Date().toISOString(), code, text: text.slice(0, 320) });
+    }
+    writeFileSync(lessonsPath(), JSON.stringify(lessons.slice(-40), null, 2));
+  } catch { /* best effort */ }
+}
+async function bankKnowledge(code, runId) {
+  try {
+    const state = (await xuanshu(`/v1/runs/${runId}`)).json?.state ?? {};
+    const deadEnds = (state.hypotheses ?? [])
+      .filter((h) => h?.status === "contradicted" && typeof h.statement === "string")
+      .map((h) => `已排除假设:${h.statement.slice(0, 200)}${Array.isArray(h.evidence) && h.evidence[0] ? `(证据:${String(h.evidence[0]).slice(0, 100)})` : ""}`);
+    if (deadEnds.length > 0) boardUpdate(code, { facts: deadEnds.slice(0, 6) });
+    recordArenaLessons(code, state);
+  } catch { /* state cold; the live mirror already covered findings */ }
+}
+
 // Cross-lane in-flight locks (user directive 2026-10-09: 并发开跑). Parallel
 // loops elect the same byPriority winner within seconds of each other; a
 // claim file (age-bounded) is the only coordination the local ledger gives
@@ -521,6 +559,15 @@ function buildTask(challenge, budgetMinutes, direction) {
   const pulledHint = hintFor(code)?.hint;
   if (pulledHint) {
     lines.push(`题目提示(已按比例扣分获取,必须充分利用):${pulledHint}`);
+    lines.push("");
+  }
+  // R10: cross-challenge negative knowledge — cheap to inject, expensive to
+  // relearn. Same-code entries are skipped: those already live on this
+  // challenge's board section below.
+  const arenaLessons = readArenaLessons().filter((l) => l.code !== code).slice(-8);
+  if (arenaLessons.length > 0) {
+    lines.push(`全场共享教训(其他题实测记录的通用方法论与坑,先看再动手,严禁重做同样的错事):`);
+    for (const lesson of arenaLessons) lines.push(`- ${lesson.text}`);
     lines.push("");
   }
   // Angle rotation (Cruiser's independent-session diversity, single-lane
@@ -770,6 +817,7 @@ async function solveOneInner(challenge) {
   console.log(`[tsec] xuanshu run ${runId} queued${parentRunId ? ` (scratch inherited from ${parentRunId.slice(0, 8)})` : ""}`);
 
   const terminal = await watchRun(runId, budgetMs, code);
+  await bankKnowledge(code, runId); // R10: bank lessons + ruled-out hypotheses before settling
   if (!terminal) {
     console.warn(`[tsec] driver budget exhausted; stopping run ${runId}`);
     await stopRun(runId);
@@ -1017,6 +1065,7 @@ async function solveFanOut(challenge) {
       writeLastrun(code, runId);
       console.log(`[tsec] fan-out worker ${index + 1}/${dirs.length} run ${runId.slice(0, 8)}: ${direction.slice(0, 70)}`);
       const terminal = await watchRun(runId, Math.max(60_000, deadline - Date.now()), code);
+      await bankKnowledge(code, runId); // R10: per-worker lessons also reach the shared ledger
       if (!terminal) {
         await record({ challenge: code, runId, outcome: "fanout-worker-timeout" });
         return false;

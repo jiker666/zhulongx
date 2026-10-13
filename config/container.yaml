@@ -28,7 +28,9 @@ runtime:
   maxImageObservations: 8
   maxScratchFileBytes: 1048576
   finalizationReserveMs: 90000
-  commandTimeoutMs: 30000
+  # R10: 30s silently truncated decompiles/scans (nuclei/apktool); 300s
+  # matches observed per-command needs, run budget still bounds the total.
+  commandTimeoutMs: 300000
   httpTimeoutMs: 15000
   maxHttpRequests: 40
   maxTcpSessions: 8

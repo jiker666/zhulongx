@@ -54,7 +54,7 @@ COPY tools/arena/tsec.mjs tools/arena/hosted-entrypoint.sh tools/arena/rogue-lda
 # run_command (chromium --headless --dump-dom / --screenshot) since the
 # heavyweight web-reasoning browser mode is not enabled for CTF runs.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends chromium fonts-liberation fonts-dejavu-core \
+    && apt-get install -y --no-install-recommends chromium fonts-liberation fonts-dejavu-core iproute2 \
     && rm -rf /var/lib/apt/lists/* \
     && chromium --version
 # Generic web-attack knowledge base (R8, bctf top-6 post-mortem: the #2 agent's

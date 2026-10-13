@@ -267,7 +267,9 @@ interface TcpOpenInput {
 }
 
 interface TcpSendInput {
-  sessionId: string;
+  sessionId?: string;
+  session_id?: string;
+  id?: string;
   data: string;
   encoding?: "utf8" | "base64";
   newline?: boolean;
@@ -699,7 +701,14 @@ async function observeImageFile(
   const bytes = Buffer.from(await readFile(path, { signal }));
   signal?.throwIfAborted();
   const mimeType = supportedImageMimeType(bytes);
-  if (!mimeType) throw new Error("Unsupported image format; expected JPEG, PNG, GIF, or WebP");
+  if (!mimeType) {
+    // R10: name the detected format and the exact recovery command — a bare
+    // "unsupported" left the model guessing (run 29070 had one dead-end here).
+    const magic2 = bytes.subarray(0, 2).toString("latin1");
+    const magic4 = bytes.subarray(0, 4).toString("latin1");
+    const detected = magic2 === "BM" ? " (detected BMP)" : magic4 === "II*\u0000" || magic4 === "MM\u0000*" ? " (detected TIFF)" : "";
+    throw new Error(`Unsupported image format; expected JPEG, PNG, GIF, or WebP${detected}. Convert first, e.g. run_command {program:"python3", args:["-c","from PIL import Image; Image.open('input.ext').convert('RGB').save('output.png')"]} or convert input.ext output.png, then observe_image the PNG.`);
+  }
   const details = {
     source,
     path: relative(root, path),
@@ -984,21 +993,29 @@ export function createToolSet(context: ToolContext): ToolSet {
           Type.Literal("infrastructure"),
         ])),
         nextActionRationale: Type.Optional(Type.String({ minLength: 1, maxLength: 1000 })),
+        // R10 (run 29070): the model occasionally emits malformed items
+        // (missing hypothesis text / free-form status / absent evidence); a
+        // hard schema reject burned the whole checkpoint call. Accept loosely
+        // and normalize inside execute.
         hypotheses: Type.Optional(Type.Array(Type.Object({
-          hypothesis: Type.String({ minLength: 1, maxLength: 500 }),
-          status: Type.Union([
-            Type.Literal("open"),
-            Type.Literal("supported"),
-            Type.Literal("contradicted"),
-            Type.Literal("confirmed"),
-          ]),
-          evidence: Type.Array(Type.String({ maxLength: 500 }), { maxItems: 10 }),
+          hypothesis: Type.Optional(Type.String({ maxLength: 500 })),
+          status: Type.Optional(Type.String({ maxLength: 32 })),
+          evidence: Type.Optional(Type.Array(Type.String({ maxLength: 500 }), { maxItems: 10 })),
         }), { maxItems: 12 })),
       }),
       async execute(_id, params) {
         const input = params as CheckpointInput;
         const now = new Date().toISOString();
-        for (const update of input.hypotheses ?? []) {
+        const validStatuses = new Set(["open", "supported", "contradicted", "confirmed"]);
+        const hypothesisUpdates = ((input.hypotheses ?? []) as Array<Partial<NonNullable<CheckpointInput["hypotheses"]>[number]>>)
+          .map((update) => ({
+            hypothesis: typeof update.hypothesis === "string" ? update.hypothesis.trim().slice(0, 500) : "",
+            status: (validStatuses.has(String(update.status)) ? update.status : "open") as NonNullable<CheckpointInput["hypotheses"]>[number]["status"],
+            evidence: Array.isArray(update.evidence) ? update.evidence.slice(0, 10) : [] as string[],
+          }))
+          .filter((update) => update.hypothesis.length > 0) as NonNullable<CheckpointInput["hypotheses"]>;
+        const malformedHypotheses = (input.hypotheses?.length ?? 0) - hypothesisUpdates.length;
+        for (const update of hypothesisUpdates) {
           let record = state.hypotheses.find((item) => item.statement === update.hypothesis);
           if (!record) {
             record = {
@@ -1051,14 +1068,14 @@ export function createToolSet(context: ToolContext): ToolSet {
           ...(resolvedFailure ? { resolvedFailure } : {}),
         };
         await audit.append("decision.checkpoint", checkpoint);
-        if ((input.hypotheses?.length ?? 0) > 0) {
+        if (hypothesisUpdates.length > 0) {
           await audit.append("hypothesis.updated", {
-            updates: input.hypotheses,
+            updates: hypothesisUpdates,
             ledger: state.hypotheses,
           });
         }
         if (sharedEvidence) {
-          for (const update of input.hypotheses ?? []) {
+          for (const update of hypothesisUpdates) {
             if (update.evidence.length === 0 || update.status === "open") continue;
             const published = sharedEvidence.publish(state.id, {
               kind: update.status === "contradicted" ? "dead-end" : update.status === "confirmed" ? "fact" : "candidate",
@@ -1090,6 +1107,7 @@ export function createToolSet(context: ToolContext): ToolSet {
         return textResult(
           [
             "Checkpoint recorded; action counter reset and the hypothesis ledger was updated.",
+            ...(malformedHypotheses > 0 ? [`${malformedHypotheses} malformed hypothesis item(s) were dropped (no hypothesis text); re-send them with an explicit "hypothesis" string if they mattered.`] : []),
             ...planEcho,
           ].join("\n"),
           { ...checkpoint, ...(checkpointUnmet.length > 0 ? { unmetDependencies: checkpointUnmet } : {}) },
@@ -1426,7 +1444,10 @@ export function createToolSet(context: ToolContext): ToolSet {
         cwd: Type.Optional(Type.Union([Type.Literal("scratch"), Type.Literal("workspace")])),
         stdin: Type.Optional(Type.String({ maxLength: 1048576 })),
         stdinEncoding: Type.Optional(Type.Union([Type.Literal("utf8"), Type.Literal("base64")])),
-        timeoutMs: Type.Optional(Type.Integer({ minimum: 100, maximum: 120000 })),
+        // R10: the model asks for long timeouts on decompiles/scans; the hard
+        // reject wasted the call. Accept up to 10 min; execute() still clamps
+        // to runtime.commandTimeoutMs.
+        timeoutMs: Type.Optional(Type.Integer({ minimum: 100, maximum: 600000 })),
       }),
       executionMode: "sequential",
       async execute(_id, params, signal) {
@@ -1766,7 +1787,9 @@ export function createToolSet(context: ToolContext): ToolSet {
       label: "Send TCP data",
       description: "Send bounded UTF-8 or base64 data over an existing scoped TCP session.",
       parameters: Type.Object({
-        sessionId: Type.String({ minLength: 1 }),
+        sessionId: Type.Optional(Type.String({ minLength: 1 })),
+        session_id: Type.Optional(Type.String({ minLength: 1 })), // R10: alias the model tends to send
+        id: Type.Optional(Type.String({ minLength: 1 })), // R10: alias the model tends to send
         data: Type.String({ maxLength: 1048576 }),
         encoding: Type.Optional(Type.Union([Type.Literal("utf8"), Type.Literal("base64")])),
         newline: Type.Optional(Type.Boolean()),
@@ -1774,8 +1797,14 @@ export function createToolSet(context: ToolContext): ToolSet {
       executionMode: "sequential",
       async execute(_id, params) {
         const input = params as TcpSendInput;
-        const session = tcpSessions.get(input.sessionId);
-        if (!session || session.closed) throw new Error("TCP session is not open");
+        const openSessions = () => [...tcpSessions.values()].filter((item) => !item.closed);
+        const requested = input.sessionId ?? input.session_id ?? input.id;
+        let session = requested ? tcpSessions.get(requested) : undefined;
+        if (!session && !requested && openSessions().length === 1) session = openSessions()[0]; // R10: unambiguous default
+        if (!session || session.closed) {
+          const open = openSessions().map((item) => item.id).join(", ") || "none";
+          throw new Error(`TCP session is not open${requested ? ` (got ${requested})` : ""}. Open session(s): ${open}. Use the sessionId returned by tcp_open for tcp_send/tcp_receive/tcp_close; if it expired, re-open with tcp_open.`);
+        }
         const data = decodeToolData(input.data, input.encoding ?? "utf8");
         const payload = input.newline ? Buffer.concat([data, Buffer.from("\n")]) : data;
         await new Promise<void>((resolveWrite, reject) => {

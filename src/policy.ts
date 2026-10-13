@@ -9,7 +9,11 @@ export interface PolicyDecision {
   signature: string;
 }
 
-const META_TOOLS = new Set(["submit_plan", "checkpoint", "record_finding", "record_lesson", "finish_task"]);
+// R10 (run 29070): update_plan_steps lives in the catalog and profiles but was
+// missing from both META_TOOLS and ACTION_TOOLS, so policy.evaluate returned
+// "Unknown tool" for it — the model saw it in the system prompt, called it,
+// and lost the turn.
+const META_TOOLS = new Set(["submit_plan", "update_plan_steps", "checkpoint", "record_finding", "record_lesson", "finish_task"]);
 const ACTION_TOOLS = new Set([
   "list_files",
   "read_file",
