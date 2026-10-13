@@ -13,6 +13,7 @@ import { inferTrajectorySource } from "./session-trajectory.js";
 import { appendRunReview, listPersistedRuns, loadDecisionTrace, loadPersistedRun, prepareRunContinuation, readAuditRecords, truncateTraceData } from "./trace.js";
 import { ManualJobManager, validateManualJobInput } from "./manual-jobs.js";
 import { ManualUploadError, ManualUploadStore } from "./manual-uploads.js";
+import { SharedEvidenceBoard } from "./shared-evidence.js";
 import { PermissionBroker, type PermissionDecision } from "./permissions.js";
 import { QuestionBank, questionToTaskRequest } from "./question-bank.js";
 import { QuestionBankInstanceRunner } from "./question-bank-instances.js";
@@ -356,6 +357,25 @@ export function createApiServer(config: AppConfig, dependencies: ApiServerDepend
     ...(targetConnectorId ? { executorFactory: () => new ConnectorExecutor(targetConnectorId, connectorBroker) } : {}),
   });
   const manager = new RunManager(runtime);
+  // Same-challenge shared evidence boards: /v1/runs callers pass an
+  // `evidenceGroup` (e.g. "tsec-bctf2026-07") and every run created under the
+  // same group receives the SAME board instance — check-pointed dead-ends and
+  // findings then broadcast live to the group's concurrent runs (fan-out
+  // workers on one challenge) instead of dying with each run. Boards are
+  // bounded objects (64 entries / 64 KB); the map keeps a FIFO of 32 groups
+  // so a long-lived arena server stays constant-memory.
+  const evidenceGroupBoards = new Map<string, SharedEvidenceBoard>();
+  const EVIDENCE_GROUP_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,95}$/;
+  const sharedEvidenceFor = (group: string): SharedEvidenceBoard => {
+    const existing = evidenceGroupBoards.get(group);
+    if (existing) return existing;
+    if (evidenceGroupBoards.size >= 32) {
+      evidenceGroupBoards.delete(evidenceGroupBoards.keys().next().value as string);
+    }
+    const board = new SharedEvidenceBoard();
+    evidenceGroupBoards.set(group, board);
+    return board;
+  };
   const agentStore = dependencies.agentStore ?? new DurableAgentStore(orchestrationRoot);
   const agentWorker = dependencies.agentWorker ?? new BoundedAgentWorker(agentStore, runManagerAgentTaskRunner(manager));
   agentWorker.start();
@@ -720,9 +740,15 @@ export function createApiServer(config: AppConfig, dependencies: ApiServerDepend
           && typeof (lineageInput as { parentRunId?: unknown }).parentRunId === "string"
           ? (lineageInput as { parentRunId: string }).parentRunId
           : undefined;
-        const id = manager.start(input, parentRunId
-          ? { lineage: { parentRunId, boundarySequence: 0, mode: "resume" as const, inheritedEventCount: 0, context: "" } }
-          : {});
+        const evidenceGroupRaw = (input as { evidenceGroup?: unknown }).evidenceGroup;
+        const evidenceGroup = typeof evidenceGroupRaw === "string" && EVIDENCE_GROUP_RE.test(evidenceGroupRaw)
+          ? evidenceGroupRaw
+          : undefined;
+        const id = manager.start(input, {
+          ...(parentRunId ? { lineage: { parentRunId, boundarySequence: 0, mode: "resume" as const, inheritedEventCount: 0, context: "" } } : {}),
+          // Same-group runs share one board; see evidenceGroupBoards above.
+          ...(evidenceGroup ? { sharedEvidence: sharedEvidenceFor(evidenceGroup) } : {}),
+        });
         json(response, 202, { id, status: "queued", statusUrl: `/v1/runs/${id}`, ...(parentRunId ? { parentRunId } : {}) });
         return;
       }

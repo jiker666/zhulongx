@@ -51,8 +51,11 @@ function cloneEntry(entry: SharedEvidenceEntry): SharedEvidenceEntry {
   };
 }
 
+export type SharedEvidenceListener = (result: SharedEvidencePublishResult) => void;
+
 export class SharedEvidenceBoard {
   private readonly entries: Array<SharedEvidenceEntry & { signature: string }> = [];
+  private readonly listeners = new Set<SharedEvidenceListener>();
 
   constructor(
     private readonly maxEntries = DEFAULT_MAX_ENTRIES,
@@ -85,7 +88,7 @@ export class SharedEvidenceBoard {
       existing.sourceRunIds = [...new Set([...existing.sourceRunIds, sourceRunId])].slice(-MAX_SOURCE_RUNS);
       existing.updatedAt = now;
       const evicted = this.enforceBounds();
-      return { entry: cloneEntry(existing), deduplicated: true, evicted };
+      return this.notify({ entry: cloneEntry(existing), deduplicated: true, evicted });
     }
 
     const entry: SharedEvidenceEntry & { signature: string } = {
@@ -101,7 +104,22 @@ export class SharedEvidenceBoard {
     };
     this.entries.push(entry);
     const evicted = this.enforceBounds();
-    return { entry: cloneEntry(entry), deduplicated: false, evicted };
+    return this.notify({ entry: cloneEntry(entry), deduplicated: false, evicted });
+  }
+
+  /**
+   * Live subscriber hook: same-group concurrent runs (fan-out workers on one
+   * challenge) subscribe so a dead-end published by one worker reaches its
+   * running siblings before they walk the same path. Returns an unsubscriber.
+   */
+  subscribe(listener: SharedEvidenceListener): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  private notify(result: SharedEvidencePublishResult): SharedEvidencePublishResult {
+    for (const listener of this.listeners) listener(result);
+    return result;
   }
 
   snapshot(limit = DEFAULT_MAX_ENTRIES, maxOutputBytes = DEFAULT_MAX_BYTES): {

@@ -619,6 +619,7 @@ export class XuanShuRuntime {
     // The pipeline is built before the agent session exists; observer
     // escalations ride this holder so they inject into the live session.
     let agentPrompt: ((text: string) => void) | undefined;
+    let unsubscribeSharedEvidence: (() => void) | undefined;
     const pipeline = createToolCallPipeline({
       state,
       runtime: runtimeConfig,
@@ -816,6 +817,24 @@ export class XuanShuRuntime {
         });
         const activeSession = session;
         agentPrompt = (text) => activeSession.prompt(text);
+        // Same-group sibling broadcast: runs sharing one evidence board (the
+        // fan-out workers of a single challenge) hear each other's publishes
+        // live. Entries that pre-date this run stay silent — the task text or
+        // read_shared_evidence already covers those — and the run's own
+        // publishes (checkpoint contradicted hypotheses, findings) are
+        // filtered out by sourceRunId so a worker never advises itself.
+        if (options.sharedEvidence) {
+          const board = options.sharedEvidence;
+          const seenEntryIds = new Set(board.snapshot(64, 1 << 16).entries.map((entry) => entry.id));
+          unsubscribeSharedEvidence = board.subscribe(({ entry }) => {
+            if (seenEntryIds.has(entry.id) || entry.sourceRunIds.includes(id)) return;
+            seenEntryIds.add(entry.id);
+            const proof = entry.evidence[0] ? `（证据：${entry.evidence[0].slice(0, 160)}）` : "";
+            agentPrompt?.(entry.kind === "dead-end"
+              ? `[同题黑板-实时] 兄弟会话刚排除了这条路径：${entry.claim}${proof}。如果你正走在同一条路上，立即停止并换一个方向；不要重复已排除的工作。完整黑板可用 read_shared_evidence 查看。`
+              : `[同题黑板-实时] 兄弟会话发布了已验证${entry.kind === "fact" ? "事实" : "候选"}：${entry.claim}${proof}。直接复用，不要重新推导；完整黑板可用 read_shared_evidence 查看。`);
+          });
+        }
         session.prompt(promptSections.map((section) => section.content).join("\n\n"));
         const result = await session.done;
         const lastAssistant = [...session.messages].reverse().find((message) => message.role === "assistant");
@@ -855,6 +874,7 @@ export class XuanShuRuntime {
       await audit.append("run.error", { message: state.stopReason, providerError: state.providerError, terminalReason: state.terminalReason });
     } finally {
       options.signal?.removeEventListener("abort", abortRun);
+      unsubscribeSharedEvidence?.();
       const tokenUsage = gateway.routeUsage(runKey);
       if (tokenUsage && tokenUsage.requests > 0) {
         state.tokenUsage = tokenUsage;

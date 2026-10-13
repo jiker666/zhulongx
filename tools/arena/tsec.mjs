@@ -808,6 +808,10 @@ async function solveOneInner(challenge) {
     body: JSON.stringify({
       task,
       metadata: { source: "question-bank", questionId: `tsec-${code}`, ...(categoryOf(code) ? { category: categoryOf(code) } : {}) },
+      // R11: all runs on one challenge share the live evidence board —
+      // checkpoint-contradicted hypotheses and findings broadcast to the
+      // concurrent fan-out siblings of the same code.
+      evidenceGroup: `tsec-${code}`,
       ...(parentRunId ? { lineage: { parentRunId } } : {}),
     }),
   });
@@ -1050,12 +1054,13 @@ async function solveFanOut(challenge) {
 
     const worker = async (direction, index) => {
       const budgetMin = Math.max(12, Math.round((deadline - Date.now()) / 60_000));
-      const task = buildTask(ready, budgetMin, `${direction}。(同题有并行工作会话:并发连接≤2、只读优先,严禁重启或破坏性操作)`);
+      const task = buildTask(ready, budgetMin, `${direction}。(同题并行协作纪律:同一题还有兄弟会话在跑,共享黑板互通;开工第一步先 read_shared_evidence 看兄弟已发布的事实与死端,严禁重走已排除的路径;自己每排除一条路径或验证一个关键事实,立即用 checkpoint 记录假设状态——证伪的假设会实时广播给兄弟会话,也可直接 publish_shared_evidence;并发连接≤2、只读优先,严禁重启或破坏性操作)`);
       const created = await xuanshu("/v1/runs", {
         method: "POST",
         body: JSON.stringify({
           task,
           metadata: { source: "question-bank", questionId: `tsec-${code}-fan${index}`, ...(categoryOf(code) ? { category: categoryOf(code) } : {}) },
+          evidenceGroup: `tsec-${code}`, // R11: siblings share the live board
           ...(parentRunId ? { lineage: { parentRunId } } : {}),
         }),
       });
