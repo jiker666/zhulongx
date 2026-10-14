@@ -26,12 +26,21 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - name: Download agent-oci artifact
-        uses: actions/download-artifact@v4
-        with:
-          run-id: ${{ inputs.run_id }}
-          name: agent-oci
-          path: out
+      - name: Download agent-oci artifact via REST
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ inputs.run_id }}
+        run: |
+          # download-artifact@v4 cross-run is flaky ("Artifact not found"
+          # while the REST API lists it fine) — hit the same API directly.
+          mkdir -p out
+          aid=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.name=="agent-oci") | .id' | head -1)
+          [ -n "$aid" ] || { echo "artifact agent-oci not found in run $RUN_ID"; exit 1; }
+          echo "artifact id: $aid"
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$aid/zip" > out/agent-oci.zip
+          (cd out && unzip -o agent-oci.zip && rm agent-oci.zip)
+          ls -lh out/
 
       - name: Publish release asset
         env:
