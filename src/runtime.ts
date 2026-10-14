@@ -652,6 +652,10 @@ export class XuanShuRuntime {
         await emit("turn.started", { turn: state.turns });
       } else if (type === "assistant.message") {
         await audit.append("assistant.message", publicMessage(data), { source: "model", actor: "primary-agent", ...(activeModelRequestId ? { correlationId: activeModelRequestId } : {}) });
+        // R14 frontier note: settle paths render persisted state only — mirror the latest assistant text so a
+        // budget-killed run's live reasoning (29070: 7 mid-breakthrough deaths) reaches handoff/board.
+        const text = assistantText((data ?? {}) as Record<string, unknown>);
+        if (text.trim()) state.frontierNote = text.trim().slice(-1_600);
       } else if (type === "tool.started") {
         await emit("tool.started", data);
       } else if (type === "model.length_recovery") {

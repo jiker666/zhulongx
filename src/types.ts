@@ -372,6 +372,14 @@ export interface RunState {
    * frontier regardless.
    */
   evidenceTail?: Array<{ tool: string; summary: string }>;
+  /**
+   * Tail of the LAST assistant reasoning message (auto-captured). A run killed
+   * mid-breakthrough by budget hands its live reasoning — "prototype pollution
+   * passes the manifest check, next error is X" — forward on every settle
+   * path (handoff, board mirror) even when nothing was checkpointed (29070:
+   * seven unsolved challenges died with the breakthrough only in the transcript).
+   */
+  frontierNote?: string;
   turns: number;
   toolCalls: number;
   imageObservations: number;

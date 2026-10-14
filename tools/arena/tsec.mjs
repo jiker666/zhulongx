@@ -198,6 +198,7 @@ function findingsTexts(findings) {
 async function watchRun(runId, deadlineMs, code) {
   const deadline = Date.now() + deadlineMs;
   const banked = new Set(); // finding texts already mirrored to the board
+  let bankedFrontier = ""; // last frontier note mirrored for this run
   while (Date.now() < deadline) {
     await sleep(20_000);
     let snapshot;
@@ -221,6 +222,15 @@ async function watchRun(runId, deadlineMs, code) {
           boardUpdate(code, { facts: [text] });
           console.log(`[tsec] live finding banked: ${text.slice(0, 90)}`);
         }
+      }
+      // R14: mirror the live frontier too — a budget-killed run's last
+      // reasoning ("__proto__ passes the manifest check") must land on the
+      // board without waiting for any settle path (29070: 7 challenges died
+      // mid-breakthrough with the breakthrough only in the transcript).
+      const frontier = String(snapshot.json?.state?.frontierNote ?? "");
+      if (frontier && frontier !== bankedFrontier) {
+        bankedFrontier = frontier;
+        boardFrontier(code, frontier);
       }
     }
     if (["completed", "blocked", "failed", "aborted"].includes(status)) {
@@ -342,6 +352,14 @@ function boardFor(code) {
   }
 }
 function boardWrite(code, board) { writeFileSync(boardPath(code), JSON.stringify(board, null, 2)); }
+// R14 frontier slot: ONE record per challenge holding the last assistant
+// reasoning of the newest killed run (single slot, overwritten — unlike
+// intents it never pushes real next-steps out of the bounded board).
+function boardFrontier(code, text) {
+  const board = boardFor(code);
+  board.frontier = { at: new Date().toISOString(), text: String(text).slice(0, 600) };
+  boardWrite(code, board);
+}
 function boardUpdate(code, { facts = [], intents = [], hints = [], solvedIntentSubstr } = {}) {
   const board = boardFor(code);
   const factTexts = new Set(board.facts.map((f) => f.text));
@@ -509,6 +527,10 @@ function buildTask(challenge, budgetMinutes, direction) {
     if (priorHandoff?.handoffText) lines.push(`前一轮 handoff 原文:\n${priorHandoff.handoffText}`);
     lines.push("");
   }
+  if (board.frontier?.text) {
+    lines.push(`前沿笔记(上一会话被截断时的最后推理,未验证——优先接续或证伪该方向,严禁从头再来):${board.frontier.text}`);
+    lines.push("");
+  }
   const accepted = readLedger().accepted[code] ?? [];
   if (challenge.flag_count > 1 || accepted.length > 0) {
     // Harvest mode (2026-10-10): one-run-one-flag serialization was the
@@ -611,6 +633,11 @@ function buildTask(challenge, budgetMinutes, direction) {
     // repo. Pointer only; the tool is capability, not an answer.
     if (/ldap|jndi|目录服务|directory/i.test(String(challenge.description ?? ""))) {
       lines.push("目录服务集成题:沙箱已内置通用 rogue LDAP(S) 测试服务器 /workspace/tools/rogue-ldaps.py(LDAP bind/search 应答与 JNDI Reference 的 BER 编码已内置,payload 从 /workspace/tools/rogue-ldaps-payload.json 每请求热加载迭代,--port 可用高位端口监听,自签证书 openssl req -x509 一行生成)——严禁从零手写 BER 编码或逐字节试错编码结构。");
+    }
+    // R14 (-36): a Jolokia exec gadget error is a depth signal, not a dead end
+    // — the exposed MBean tree usually carries several independent paths.
+    if (/jolokia|\bjmx\b|mbean|tomcat|actuator/i.test(String(challenge.description ?? ""))) {
+      lines.push("JMX/Jolokia 面:先 /jolokia/list(或 /actuator/jolokia/list)拿全量 MBean 树,按序尝试——MBeanFactory createStandardContext/createStandardHost 部署 WAR(参数按当前 Tomcat 版本文档逐个对齐,单个 gadget 报错≠整个面无效)、JNDI/logback lookup 类 MBean 可指向沙箱 rogue LDAP(S)、SystemProperties/Environment/Catalina 配置与部署描述类 MBean 直接读 flag 与凭据;严禁只试一个 exec 失败就判定不可利用。");
     }
   }
   lines.push("平台提供付费提示(查看即按比例扣分),本运行严禁依赖提示,请自行分析。");
