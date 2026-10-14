@@ -1,0 +1,55 @@
+# Republish an existing build-hosted-oci artifact through download paths that
+# survive throttled networks: the Actions artifact store lives on Azure Blob,
+# which some operator networks reach at tens of KB/s, while release-assets and
+# ghcr.io edges measure ~1.2 MB/s from the same network. The runner itself is
+# in the same datacenter as the artifact store, so this is fast on its side.
+# Produces two equivalent deliverables from run <run_id>:
+#   1. release asset <tag>/agent-oci.tar — bit-identical to the artifact zip
+#   2. ghcr.io/<owner>/<repo>:<tag> — layered, resumable pull via skopeo/docker
+name: release-oci
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: build-hosted-oci run id holding the agent-oci artifact
+        required: true
+      tag:
+        description: release tag / image tag (e.g. oci-67200cc)
+        required: true
+
+permissions:
+  actions: read
+  contents: write
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download agent-oci artifact
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ inputs.run_id }}
+          name: agent-oci
+          path: out
+
+      - name: Publish release asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          ls -lh out/
+          gh release create "$TAG" out/agent-oci.tar --repo "$REPO" \
+            --title "OCI $TAG" \
+            --notes "Automated republish of the build-hosted-oci artifact (Azure CDN unreachable from operator network)." \
+          || gh release upload "$TAG" out/agent-oci.tar --repo "$REPO" --clobber
+
+      - name: Push image to GHCR
+        env:
+          REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          command -v skopeo >/dev/null || sudo apt-get update -qq && sudo apt-get install -y -qq skopeo
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          skopeo copy "oci-archive:out/agent-oci.tar" "docker://ghcr.io/${REPO,,}:${TAG#oci-}"
