@@ -366,7 +366,7 @@ export function createToolCallPipeline(deps: ToolCallPipelineDeps): ToolCallPipe
       const webAction = webReasoning.prepareToolCall(toolCall.toolName, toolCall.args, toolCall.toolCallId);
       if (webAction.duplicate) {
         await audit.append("WEB_ACTION_SKIPPED_DUPLICATE", { actionId: webAction.actionId, toolName: toolCall.toolName }, { source: "policy", actor: "web-action-deduplicator", correlationId: toolCall.toolCallId, parentSequence: requested.sequence });
-        return { block: true, reason: "Duplicate Web action skipped; use new evidence or change strategy." };
+        return { block: true, reason: "Duplicate Web action skipped; use new evidence or change strategy. If the endpoint is stateful (rotating captcha/signature, poll target, TTL session — content changes between identical requests), re-observe by adding a cache-buster (append a unique query param like ?_=n7 or a unique header value); identical reads also re-run automatically after 10 minutes." };
       }
       const decision = policy.evaluate(toolCall.toolName, toolCall.args, state);
       await audit.append("policy.decision", {

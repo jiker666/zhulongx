@@ -459,6 +459,9 @@ function releaseOwnClaims() {
 }
 // Per-lane counter of fast no-submission settles (infra-wall signature).
 let fastFails = 0;
+// R13 slot-hold joins: codes this lane already joined during the current
+// hold episode — cleared when the lane wins a slot again.
+const joinEpisodeCodes = new Set();
 
 // ---------------------------------------------------------------- task build
 
@@ -526,6 +529,14 @@ function buildTask(challenge, budgetMinutes, direction) {
   // — a run that banked everything must exit immediately instead of idling to
   // the last minute, and every run takes the shortest path to the flag.
   lines.push("节奏要求:预算是上限不是目标。所有已获 flag 自交确认后立即 finish_task 结束运行,严禁解出后继续无意义探索;每步优先最短解路径,卡住就固化发现尽快收尾。");
+  // R13 throughput (29070: 2914 model calls in 6h — the lanes spent their
+  // wall-clock waiting on tools, one probe per turn): independent probes must
+  // ride together in one assistant turn so reads execute in parallel.
+  lines.push("并行探测纪律:互不依赖的探测(一组 http_request / 文件读取 / 搜索)必须在同一次回复里批量发出并行执行,严禁一次一个地排队等;只有后一步依赖前一步结果时才串行。");
+  // R13 rotating-state discipline (29070 -32: every decode of cap2.bmp was
+  // stale because the code rotates on a 2-min TTL and the session cookie was
+  // captured at solve1): stale captures decode nothing — re-fetch first.
+  lines.push("有状态目标纪律(轮换验证码/动态签名/短TTL会话):每次尝试前重新抓取最新状态(图/码/令牌),严禁用早前抓包或截图解码过期的值;重取被去重器拦截时加随机查询参数(?_=随机数)绕过。");
   // Live-run 28506 (08): the agent extracted a candidate, then fought the
   // LOCAL finish_task gate 6 times over 12 minutes — and never once used the
   // platform's free authoritative submit channel. 25 self-submitted 5 values
@@ -960,6 +971,14 @@ async function solveOneInner(challenge) {
 
   console.log(`[tsec] run settled as ${terminal.status} without a submission`);
   await record({ challenge: code, runId, outcome: terminal.status });
+  // R13: a run that died on the MODEL side (quota exhausted, rate-limit
+  // retries exhausted) never evaluated the challenge — the 29070 outage
+  // burned real misses this way (hung requests >5min fell past the fast-settle
+  // guard). Park the lane on the existing infra-wall cooldown instead.
+  if (terminal.status === "failed" && ["quota", "rate_limit"].includes(terminal.providerError?.code)) {
+    console.warn(`[tsec] run failed on provider ${terminal.providerError.code} — infra wall, miss NOT counted`);
+    throw Object.assign(new Error(`provider wall (${terminal.providerError.code})`), { infraWall: true });
+  }
   // A no-submission settle inside 5 minutes is an infra suspect (quota wall,
   // model outage), not a capability miss — the agent never got a real look.
   // Burning miss caps on them capped five healthy challenges during the
@@ -1379,6 +1398,56 @@ async function settleMiss(code, challenge, { pullHint = true } = {}) {
   try { await closeChallenge(code); } catch { /* best-effort slot release */ }
 }
 
+// ------------------------------------------- slot-hold join worker (R13)
+// 29070 post-mortem: the platform's 3-container cap parked the other half of
+// the fleet in 60s hold loops (145 slot-full retries in 62 minutes) while
+// three single-stream runs under-used their containers. A lane stuck on a
+// slot hold burns zero capacity; every second consecutive hold instead joins
+// the strongest LIVE challenge as one extra directed worker — no new
+// container needed, and the worker shares the challenge's R11 live evidence
+// board with whatever runs are already in flight on it.
+const JOIN_BUDGET_MIN = 25;
+async function joinActiveWorker(items) {
+  const ledger = readLedger();
+  const live = items.filter((item) => {
+    if (item.is_completed) return false;
+    const addrs = item.container_addr ?? [];
+    if (addrs.length === 0 && item.container_status !== "available") return false;
+    const done = ledger.done[item.unique_code];
+    // Only join fronts that are already open — a never-attempted code has no
+    // live container to share; opening one from a hold would just race the
+    // next slot pick for the same scarcity.
+    if (!done || done.status === "solved") return false;
+    if ((done.misses ?? 0) >= attemptCap(item, ledger)) return false;
+    if (hardSpentCapped(item, ledger)) return false;
+    return !joinEpisodeCodes.has(item.unique_code);
+  }).sort((a, b) => (b.total_score ?? 0) - (a.total_score ?? 0));
+  const target = live[0];
+  if (!target) return false;
+  const code = target.unique_code;
+  joinEpisodeCodes.add(code);
+  console.log(`[tsec] slot-hold join: extra worker on ${code} (${JOIN_BUDGET_MIN}min, shares its live board)`);
+  const task = buildTask({ ...target, container_status: "available" }, JOIN_BUDGET_MIN,
+    "加援产能:你是在既有工作会话之外临时加入的额外会话,选一条黑板未覆盖的独立新路,严禁重复已排除路径;开工先 read_shared_evidence。(并发连接≤2、只读优先,严禁重启或破坏性操作)");
+  const created = await xuanshu("/v1/runs", {
+    method: "POST",
+    body: JSON.stringify({
+      task,
+      metadata: { source: "question-bank", questionId: `tsec-${code}-join` },
+      evidenceGroup: `tsec-${code}`, // R11: share the live board with in-flight runs
+    }),
+  });
+  if (created.status !== 202) return false;
+  const runId = created.json.id;
+  const terminal = await watchRun(runId, JOIN_BUDGET_MIN * 60_000, code);
+  await bankKnowledge(code, runId);
+  if (!terminal) {
+    console.warn(`[tsec] join worker budget exhausted on ${code}; stopping run`);
+    await stopRun(runId);
+  }
+  return true;
+}
+
 // Cruiser tier-3 semantics: an unsolved challenge is never parked forever.
 // When nothing is eligible, re-open the parked set with fresh miss budgets —
 // a 30-minute per-code cooldown keeps genuinely broken environments to at
@@ -1414,6 +1483,9 @@ async function cmdLoop() {
   const role = process.env.TSEC_ROLE ?? "mixed";
   if (role !== "mixed") console.log(`[tsec] lane role: ${role}`);
   let consecutiveMisses = 0;
+  // R13 slot-hold join: consecutive slot-full holds per lane, and the codes
+  // already joined this hold episode (reset once the lane wins a slot again).
+  let slotHoldStreak = 0;
   // Retry fatigue (round 3): two warm-retry misses in a row on this lane
   // force the next pick to a fresh (never-attempted) open — the drought's
   // 0/14 conversion came from lanes cycling warm retries while fresh hards
@@ -1479,6 +1551,8 @@ async function cmdLoop() {
         const solved = candidate.fanout ? await solveFanOut(candidate) : await solveOne(candidate);
         consecutiveMisses = solved ? 0 : consecutiveMisses + 1;
         retryMisses = solved || wasFresh ? 0 : retryMisses + 1;
+        slotHoldStreak = 0; // a real pick resets the hold episode
+        joinEpisodeCodes.clear();
         if (!solved && !wasFresh && retryMisses >= 2) console.warn(`[tsec] ${retryMisses} warm-retry misses in a row — next pick forced fresh`);
       } catch (error) {
         if (error.taskEnded || isTaskEnded(error)) {
@@ -1503,6 +1577,23 @@ async function cmdLoop() {
           // starved lane-c through the 20:15-20:24 window.
           console.warn("[tsec] solveOne crashed: already_claimed; re-picking in 15s");
           await sleep(15_000);
+        } else if (error.slotsBusy) {
+          // R13: a lane that cannot win a container slot stops idling —
+          // every second consecutive hold spends 25 minutes as an extra
+          // directed worker on the strongest already-live challenge (its
+          // container is running; no new slot is claimed).
+          slotHoldStreak += 1;
+          if (slotHoldStreak >= 2) {
+            try {
+              await joinActiveWorker(items);
+            } catch (joinError) {
+              if (joinError.taskEnded || isTaskEnded(joinError)) throw joinError;
+              console.warn(`[tsec] slot-hold join failed (${joinError?.message ?? joinError}); falling back to hold`);
+              await sleep(60_000);
+            }
+          } else {
+            await sleep(60_000);
+          }
         } else {
           console.warn(`[tsec] solveOne crashed: ${error?.message ?? error}; pausing 60s`);
           await sleep(60_000);

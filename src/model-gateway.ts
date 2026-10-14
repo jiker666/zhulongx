@@ -257,8 +257,17 @@ export class ModelGateway {
     } else {
       const proxyUrl = process.env.XUANSHU_MODEL_PROXY?.trim();
       const dispatcher = proxyUrl ? new ProxyAgent(proxyUrl) : undefined;
-      this.fetcher = (input, init) =>
-        fetch(input, (dispatcher ? { ...init, dispatcher } : init) as RequestInit);
+      // Per-request hard timeout (29070 quota outage): an exhausted upstream
+      // can accept the connection and never answer — the hung request then
+      // sits for the SDK's own long deadline while the lane burns its budget
+      // waiting. Timing out fast reclassifies as a network error, which the
+      // SDK retries — so the moment quota returns, the next retry lands.
+      const requestTimeoutMs = Number(process.env.XUANSHU_MODEL_TIMEOUT_MS ?? "") || 180_000;
+      this.fetcher = (input, init) => {
+        const timeoutSignal = AbortSignal.timeout(requestTimeoutMs);
+        const signal = init?.signal ? AbortSignal.any([init.signal as AbortSignal, timeoutSignal]) : timeoutSignal;
+        return fetch(input, (dispatcher ? { ...init, dispatcher, signal } : { ...init, signal }) as RequestInit);
+      };
     }
     this.server = createServer((request, response) => {
       response.on("error", () => {});
