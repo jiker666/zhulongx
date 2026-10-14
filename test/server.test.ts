@@ -473,6 +473,29 @@ describe("REST API", () => {
     } finally { await running.close(); }
   });
 
+  it("serves the light poll shape for persisted runs (arena watch loop)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "xuan-lite-")); roots.push(root); const config = testConfig(root); await mkdir(config.scope.workspaceRoot, { recursive: true });
+    const runId = "44444444-4444-4444-8444-444444444444"; const runRoot = join(config.runtime.artifactRoot, runId); await mkdir(runRoot, { recursive: true });
+    await writeFile(join(runRoot, "state.json"), JSON.stringify({
+      id: runId, status: "completed", phase: "reporting",
+      findings: [{ title: "VERIFIED_FLAG", description: "flag{lite-shape}" }],
+      frontierNote: "last reasoning before the clock",
+      submission: "flag{lite-shape}",
+    }), "utf8");
+    const running = await startApiServer(config);
+    try {
+      const lite = await fetch(`${running.url}/v1/runs/${runId}/lite`);
+      expect(lite.status).toBe(200);
+      await expect(lite.json()).resolves.toMatchObject({
+        id: runId, status: "completed", frontierNote: "last reasoning before the clock", submission: "flag{lite-shape}",
+      });
+      // The poll shape must stay light: no events array, no task transcript.
+      const body = await (await fetch(`${running.url}/v1/runs/${runId}/lite`)).json();
+      expect(body.events).toBeUndefined();
+      expect((await fetch(`${running.url}/v1/runs/55555555-5555-4555-8555-555555555555/lite`)).status).toBe(404);
+    } finally { await running.close(); }
+  });
+
   it("isolates streams by run and returns 404 for unknown runs", async () => {
     const root = await mkdtemp(join(tmpdir(), "xuan-sse-isolation-")); roots.push(root); const config = testConfig(root); await mkdir(config.scope.workspaceRoot, { recursive: true }); const ids = ["22222222-2222-4222-8222-222222222222", "33333333-3333-4333-8333-333333333333"];
     for (const [index, runId] of ids.entries()) { const runRoot = join(config.runtime.artifactRoot, runId); await mkdir(runRoot, { recursive: true }); await writeFile(join(runRoot, "state.json"), JSON.stringify({ id: runId, status: "completed" }), "utf8"); const audit = new AuditChain(join(runRoot, "audit.jsonl"), runId); await audit.append("fixture.event", { marker: `run-${index}` }); }

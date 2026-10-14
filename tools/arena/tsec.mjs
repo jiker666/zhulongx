@@ -37,6 +37,12 @@
 //  - Hard singles were starved at 35-40min while every board showed
 //    "one step from flag" timeouts (R2 hard chains converted at 46/60).
 //    Hard singles now use the deep ladder: 46, then 60 after 2 misses.
+// R20 (29896 post-mortem, 10-14): settle paths are leak-proofed (hardened
+//    stops, isolated hint pulls, retried closes), a per-code watch registry +
+//    slot watchdog reclaims orphaned containers, wall-time-stuck challenges
+//    arm hints/rescue like a miss (exploration deadlock), fresh-eyes retries
+//    drop inherited dead-end context, polls use the light /lite shape, and
+//    driver flag relays stop on solved codes.
 //  - The warm-before-fresh priority left fresh hards untouched for hours
 //    (a high-value quick win sat untouched for
 //    hours while retries went 0/14). Two counter-forces now: role "prospector" (fresh
@@ -85,29 +91,43 @@ async function api(path, { method = "GET", body, query } = {}, timeoutMs = 30_00
   if (!BASE || !TOKEN) die("TSEC_BASE_URL / TSEC_TOKEN missing in .env (issued when the TSecBench task is created)");
   const url = new URL(`${BASE}${path}`);
   for (const [key, value] of Object.entries(query ?? {})) if (value !== undefined) url.searchParams.set(key, value);
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(url, {
-      method,
-      signal: controller.signal,
-      headers: { BENCHMARK_TOKEN: TOKEN, ...(body ? { "content-type": "application/json" } : {}) },
-      ...(body ? { body: JSON.stringify(body) } : {}),
-    });
-    const text = await response.text();
-    let json;
-    try { json = JSON.parse(text); } catch { json = { raw: text.slice(0, 400) }; }
-    if (response.status >= 300) {
-      const error = new Error(`TSec HTTP ${response.status}: ${json.code ?? "?"} ${json.message ?? text.slice(0, 200)}`);
-      error.status = response.status;
-      error.code = json.code;
-      error.apiMessage = json.message ?? "";
-      throw error;
+  // One-shot 10h final: transient network/5xx/429 blips must never drop a
+  // submission or wedge a lane. 4 attempts, ~0.75s/2.25s/6.75s(+jitter) backoff;
+  // 4xx (auth/invalid-state/duplicate semantics) stays a single immediate
+  // failure so the 409 classifier above keeps its meaning.
+  const MAX_ATTEMPTS = 4;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(url, {
+        method,
+        signal: controller.signal,
+        headers: { BENCHMARK_TOKEN: TOKEN, ...(body ? { "content-type": "application/json" } : {}) },
+        ...(body ? { body: JSON.stringify(body) } : {}),
+      });
+      const text = await response.text();
+      let json;
+      try { json = JSON.parse(text); } catch { json = { raw: text.slice(0, 400) }; }
+      if (response.status >= 300) {
+        const error = new Error(`TSec HTTP ${response.status}: ${json.code ?? "?"} ${json.message ?? text.slice(0, 200)}`);
+        error.status = response.status;
+        error.code = json.code;
+        error.apiMessage = json.message ?? "";
+        throw error;
+      }
+      return json;
+    } catch (error) {
+      const status = error?.status;
+      const retriable = status === undefined || status === 429 || status >= 500;
+      if (!retriable || attempt >= MAX_ATTEMPTS) throw error;
+      console.warn(`[tsec] ${path} attempt ${attempt} failed (${error?.message ?? error}); retrying`);
+      await sleep(750 * 3 ** (attempt - 1) + Math.random() * 400);
+    } finally {
+      clearTimeout(timer);
     }
-    return json;
-  } finally {
-    clearTimeout(timer);
   }
+  throw new Error(`TSec ${path}: exhausted ${MAX_ATTEMPTS} attempts`);
 }
 
 // 409 invalid_state is overloaded: on /start it means the 3-slot limit, on
@@ -135,26 +155,47 @@ async function closeChallenge(code) {
 }
 
 async function submitFlag(code, flag) {
+  // R20: once the platform confirmed every flag, a late driver relay (e.g. a
+  // finish_task value still settling when the correct answer landed) is pure
+  // noise — 29896 logged post-solve wrongs on two challenges this way.
+  const done = readLedger().done[code];
+  if (done?.status === "solved") {
+    console.log(`[tsec] ${code} already solved — dropping driver relay of "${String(flag).slice(0, 24)}"`);
+    // Shape it like a fully-banked submit so the relay's verdict handling
+    // settles idempotently instead of misreading undefined counters.
+    const progress = done.progress ?? 0;
+    return { skipped: true, correct: true, correct_flag_count: progress, total_flag_count: progress };
+  }
   return api("/openapi/v1/challenges/submit", { method: "POST", body: { unique_code: code, flag } });
 }
 
 // ---------------------------------------------------------------- xuanshu API
 
-async function xuanshu(path, options = {}, timeoutMs = 45_000) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(`${XUANSHU_BASE}${path}`, {
-      ...options,
-      signal: controller.signal,
-      ...(options.body ? { headers: { "content-type": "application/json", authorization: `Bearer ${SERVER_TOKEN}`, ...(options.headers ?? {}) } } : { headers: { authorization: `Bearer ${SERVER_TOKEN}` } }),
-    });
-    const text = await response.text();
-    let json;
-    try { json = JSON.parse(text); } catch { json = { raw: text.slice(0, 800) }; }
-    return { status: response.status, json };
-  } finally {
-    clearTimeout(timer);
+async function xuanshu(path, options = {}, timeoutMs = 45_000, retries = 1) {
+  // R20: idempotent xuanshu calls (polls, stops, handoff reads) retry once on
+  // transient failure — 29896's slot leak was a settle path whose single-shot
+  // stop/poll aborted against a busy server and skipped the instance close.
+  // Run CREATION keeps retries=0 (a replayed create would double-run).
+  for (let attempt = 0; ; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(`${XUANSHU_BASE}${path}`, {
+        ...options,
+        signal: controller.signal,
+        ...(options.body ? { headers: { "content-type": "application/json", authorization: `Bearer ${SERVER_TOKEN}`, ...(options.headers ?? {}) } } : { headers: { authorization: `Bearer ${SERVER_TOKEN}` } }),
+      });
+      const text = await response.text();
+      let json;
+      try { json = JSON.parse(text); } catch { json = { raw: text.slice(0, 800) }; }
+      if (response.status >= 500 && attempt < retries) { await sleep(2_000); continue; }
+      return { status: response.status, json };
+    } catch (error) {
+      if (attempt < retries) { console.warn(`[tsec] xuanshu ${path} attempt ${attempt + 1} failed (${error?.message ?? error}); retrying`); await sleep(2_000); continue; }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 }
 
@@ -184,8 +225,21 @@ async function apiHealthy() {
 }
 
 async function stopRun(runId) {
-  const result = await xuanshu(`/v1/runs/${runId}/stop`, { method: "POST", body: "{}" });
-  if (result.status >= 300) console.warn(`[tsec] stop run ${runId} -> ${result.status}`);
+  // R20: never single-shot. A budget stop that times out against a busy
+  // server used to throw into the settle path and skip the instance close —
+  // three of those leaked every slot and froze the whole fleet (29896).
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const result = await xuanshu(`/v1/runs/${runId}/stop`, { method: "POST", body: "{}" }, 120_000, 0);
+      if (result.status < 300) return;
+      console.warn(`[tsec] stop run ${runId} -> ${result.status} (attempt ${attempt}/3)`);
+    } catch (error) {
+      console.warn(`[tsec] stop run ${runId} attempt ${attempt}/3 failed (${error?.message ?? error})`);
+    }
+    if (attempt < 3) await sleep(3_000 * attempt);
+  }
+  // The watchdog below is the second net: even a failed stop cannot leak a
+  // slot forever once the watch deadline lapses.
 }
 
 // Findings arrive as objects (Finding) or plain strings; normalize once.
@@ -199,24 +253,41 @@ async function watchRun(runId, deadlineMs, code) {
   const deadline = Date.now() + deadlineMs;
   const banked = new Set(); // finding texts already mirrored to the board
   let bankedFrontier = ""; // last frontier note mirrored for this run
+  // R20: poll the light /lite shape (status + findings + frontier). The full
+  // snapshot serializes up to 1000 events plus the entire state every 20s —
+  // under three heavy web grinds that load is what pushed settle-path stops
+  // past their budget in 29896. Old servers without /lite fall back once.
+  let liteMissing = false;
   while (Date.now() < deadline) {
     await sleep(20_000);
-    let snapshot;
-    try {
-      snapshot = await xuanshu(`/v1/runs/${runId}`);
-    } catch (error) {
-      console.warn(`[tsec] poll ${runId} failed (${error?.message ?? error}); continuing`);
-      continue;
+    let poll;
+    if (!liteMissing) {
+      try {
+        poll = await xuanshu(`/v1/runs/${runId}/lite`);
+      } catch (error) {
+        console.warn(`[tsec] poll ${runId} failed (${error?.message ?? error}); continuing`);
+        continue;
+      }
+      if (poll.status === 404) { liteMissing = true; }
     }
-    const status = snapshot.json?.status ?? snapshot.json?.state?.status;
-    if (snapshot.status !== 200 || !status) continue;
+    if (liteMissing) {
+      try {
+        const full = await xuanshu(`/v1/runs/${runId}`);
+        poll = { status: full.status, json: { status: full.json?.status ?? full.json?.state?.status, ...(full.json?.state ?? {}) } };
+      } catch (error) {
+        console.warn(`[tsec] poll ${runId} failed (${error?.message ?? error}); continuing`);
+        continue;
+      }
+    }
+    const status = poll.json?.status ?? poll.json?.state?.status;
+    if (poll.status !== 200 || !status) continue;
     console.log(`[xuanshu] ${runId.slice(0, 8)} status=${status}`);
     // Watcher-lite (Cruiser lesson 2026-10-10): record_finding persists into
     // the run state IMMEDIATELY, so mirror new findings onto the board as
     // they land instead of waiting for settle — a wedged or budget-killed
     // run no longer takes its discoveries with it.
     if (code) {
-      for (const text of findingsTexts(snapshot.json?.state?.findings)) {
+      for (const text of findingsTexts(poll.json?.findings ?? poll.json?.state?.findings)) {
         if (!banked.has(text)) {
           banked.add(text);
           boardUpdate(code, { facts: [text] });
@@ -227,14 +298,21 @@ async function watchRun(runId, deadlineMs, code) {
       // reasoning ("__proto__ passes the manifest check") must land on the
       // board without waiting for any settle path (29070: 7 challenges died
       // mid-breakthrough with the breakthrough only in the transcript).
-      const frontier = String(snapshot.json?.state?.frontierNote ?? "");
+      const frontier = String(poll.json?.frontierNote ?? poll.json?.state?.frontierNote ?? "");
       if (frontier && frontier !== bankedFrontier) {
         bankedFrontier = frontier;
         boardFrontier(code, frontier);
       }
     }
     if (["completed", "blocked", "failed", "aborted"].includes(status)) {
-      return snapshot.json.state ?? snapshot.json ?? {};
+      // The settle path needs the full terminal state (submission, nextSteps,
+      // summary) — one final full fetch, never the poll shape.
+      try {
+        const full = await xuanshu(`/v1/runs/${runId}`);
+        return full.json?.state ?? full.json ?? poll.json ?? {};
+      } catch {
+        return poll.json ?? {}; // degraded transport: settle with what we have
+      }
     }
   }
   return null;
@@ -475,6 +553,55 @@ function releaseOwnClaims() {
     }
   } catch { /* WORK_DIR unreadable */ }
 }
+// ---- watch registry + slot watchdog (R20, 29896 post-mortem) ----------------
+// Every episode (instance launch -> run -> settle) registers a watch file so
+// ANY lane can tell, from shared disk, whether an open container still has a
+// live owner. A settle path that dies before closing its instance (crash,
+// wedged stop, create-timeout) leaves the container open with a stale/dead
+// watch — the watchdog reclaims it instead of letting 3 leaks freeze the
+// fleet behind the platform's container cap.
+const WATCH_GRACE_MS = 5 * 60_000;
+function watchPath(code) { return resolve(WORK_DIR, `watch-${code}.json`); }
+function watchFor(code) {
+  try { return JSON.parse(readFileSync(watchPath(code), "utf8")); } catch { return undefined; }
+}
+function registerWatch(code, runId, horizonMs) {
+  try {
+    writeFileSync(watchPath(code), JSON.stringify({ lane: process.env.TSEC_LANE ?? "main", pid: process.pid, runId, deadline: Date.now() + horizonMs, at: new Date().toISOString() }));
+  } catch { /* registry is best-effort; the watchdog errs toward reclaiming */ }
+}
+function clearWatch(code) {
+  try { rmSync(watchPath(code), { force: true }); } catch { /* already gone */ }
+}
+function pidAlive(pid) {
+  try { process.kill(pid, 0); return true; } catch (probe) { return probe.code === "EPERM"; }
+}
+async function reconcileSlots(items) {
+  for (const item of items) {
+    const open = ["pending", "available", "stop_pending"].includes(item.container_status ?? "");
+    if (!open) continue;
+    const code = item.unique_code;
+    if (item.is_completed) continue; // platform closes solved containers itself
+    const w = watchFor(code);
+    if (w && pidAlive(w.pid) && Date.now() < w.deadline + WATCH_GRACE_MS) continue; // healthy episode
+    // Hint keep-warm: an intentionally parked container waiting for the
+    // hint-armed revive — not a leak.
+    const done = readLedger().done[code];
+    if (done?.warmUntil && Date.now() < done.warmUntil) continue;
+    if (done?.warmUntil && Date.now() >= done.warmUntil) ledgerMark(code, "parked"); // marker consumed
+    if (!w && claimFor(code)) continue; // live lane mid-launch, watch not yet written
+    console.warn(`[tsec] watchdog reclaiming orphan slot ${code} (watch=${w ? "stale" : "none"}, owner=${w ? `pid ${w.pid} alive=${pidAlive(w.pid)}` : "unclaimed"})`);
+    if (w?.runId) await stopRun(w.runId);
+    try {
+      await closeChallenge(code);
+    } catch (error) {
+      if (isTaskEnded(error)) throw error;
+      console.warn(`[tsec] watchdog close ${code} failed: ${error?.message ?? error}`);
+    }
+    clearWatch(code);
+  }
+}
+
 // Per-lane counter of fast no-submission settles (infra-wall signature).
 let fastFails = 0;
 // R13 slot-hold joins: codes this lane already joined during the current
@@ -592,7 +719,7 @@ function disciplineFor(code) {
   return pack ? ARENA_DISCIPLINE + "\n【本类题打法】\n" + pack : ARENA_DISCIPLINE;
 }
 
-function buildTask(challenge, budgetMinutes, direction) {
+function buildTask(challenge, budgetMinutes, direction, freshEyes = false) {
   const code = challenge.unique_code;
   const lines = [];
   const addrs = (challenge.container_addr ?? []).filter(Boolean);
@@ -619,9 +746,9 @@ function buildTask(challenge, budgetMinutes, direction) {
   const board = boardFor(code);
   const priorHandoff = handoffFor(code);
   const accepted = readLedger().accepted[code] ?? [];
-  if (board.facts.length > 0 || accepted.length > 0 || priorHandoff?.summary) {
+  if (board.facts.length > 0 || accepted.length > 0 || (priorHandoff?.summary && !freshEyes)) {
     lines.push(`# VERIFIED FACTS(前轮实际验证,直接采信,禁止重推)`);
-    if (priorHandoff?.summary) lines.push(`- 前轮总结:${String(priorHandoff.summary).replace(/\s+/g, " ").slice(0, 240)}`);
+    if (priorHandoff?.summary && !freshEyes) lines.push(`- 前轮总结:${String(priorHandoff.summary).replace(/\s+/g, " ").slice(0, 240)}`);
     for (const fact of board.facts.filter((f) => !/^已排除假设:/.test(f.text)).slice(-12)) lines.push(`- ${fact.text.slice(0, 260)}`);
     if (accepted.length > 0) lines.push(`- 已正确提交:${accepted.map((v) => `"${v}"`).join("、")}`);
     lines.push("");
@@ -651,10 +778,14 @@ function buildTask(challenge, budgetMinutes, direction) {
   }
   if (currentPhase === "endgame") lines.push(`- 尾盘攻坚:本题被调度为重点投入,禁止浅尝即弃;沿前沿笔记/优先待办推进到预算尽或解出`);
   for (const h of board.hints) lines.push(`- 操作员指令(最高优先级):${h.text.slice(0, 240)}`);
-  if (board.frontier?.text) lines.push(`- best_frontier(上一会话被截断时的最后推理,未验证):${board.frontier.text.slice(0, 300)}`);
-  const openIntents = board.intents.filter((i) => !i.done).slice(0, 2);
-  if (openIntents.length > 0) lines.push(`- next_exact_test(按序执行,完成一个立即 checkpoint 勾选):${openIntents.map((i) => i.text.slice(0, 160)).join(" / ")}`);
-  if (board.frontier?.text || openIntents.length > 0) lines.push(`- resume_instruction:接续或证伪 best_frontier,严禁从头再来;dead_ends 见 EXCLUDED;动态类事实(会话/cookie/临时地址)跨重启即过期,技术栈/逻辑结论仍有效`);
+  if (freshEyes) {
+    lines.push(`- 独立重审:上一方向已多轮未破,本轮刻意不继承其推理链与中间产物——从题面原文与远程环境重新独立审题,建立与黑板待办不同的新主线;EXCLUDED 中的死路仍然严禁重走`);
+  } else {
+    if (board.frontier?.text) lines.push(`- best_frontier(上一会话被截断时的最后推理,未验证):${board.frontier.text.slice(0, 300)}`);
+    const openIntents = board.intents.filter((i) => !i.done).slice(0, 2);
+    if (openIntents.length > 0) lines.push(`- next_exact_test(按序执行,完成一个立即 checkpoint 勾选):${openIntents.map((i) => i.text.slice(0, 160)).join(" / ")}`);
+    if (board.frontier?.text || openIntents.length > 0) lines.push(`- resume_instruction:接续或证伪 best_frontier,严禁从头再来;dead_ends 见 EXCLUDED;动态类事实(会话/cookie/临时地址)跨重启即过期,技术栈/逻辑结论仍有效`);
+  }
   const priorMisses = readLedger().done[code]?.misses ?? 0;
   if (priorMisses >= 2) {
     const angles = [
@@ -778,9 +909,11 @@ async function solveOne(challenge) {
     throw Object.assign(new Error("already_claimed"), { claimed: true });
   }
   const claimedAt = Date.now();
+  registerWatch(code, null, 90 * 60_000); // provisional: covers launch->build->create
   try {
     return await solveOneInner(challenge);
   } finally {
+    clearWatch(code); // episode over: the watchdog must not see a stale owner
     releaseClaim(code);
     ledgerAddSpent(code, Math.round((Date.now() - claimedAt) / 60_000));
   }
@@ -831,8 +964,9 @@ async function solveOneInner(challenge) {
   const carryBoard = boardFor(code);
   const warm = handoffFor(code) || carryBoard.facts.length > 0 || carryBoard.intents.length > 0;
   const misses = ledgerEntry(code).misses ?? 0;
+  const effMisses = effectiveMisses(code); // R20: wall-time-stuck counts as a miss for arming
   const rank = DIFFICULTY_RANK[String(ready.difficulty ?? "").toLowerCase()] ?? 3;
-  await maybePullHint(code, misses); // R9: pull before the task build; misses>=1 means the unaided shot already failed
+  await maybePullHint(code, effMisses); // R9: pull before the task build; misses>=1 means the unaided shot already failed
   const isChain = (ready.flag_count ?? 1) > 1;
   // R17 budget ladder: stop-loss caps are GONE (operator ruling 10-14: token
   // cost is not a constraint, parking/truncating a challenge is pure loss);
@@ -846,12 +980,25 @@ async function solveOneInner(challenge) {
       ? (misses >= 1 ? 60 : 46)
       : warm ? 46 : rank === 0 ? 20 : rank === 1 ? 30 : 40;
   const budgetMs = budgetMin * 60_000;
-  const task = buildTask(ready, Math.round(budgetMs / 60_000));
+  // R20 lifecycle registration: re-stamp the watch with the real budget
+  // horizon once it is known (the provisional claim-time stamp is a ceiling).
+  registerWatch(code, watchFor(code)?.runId ?? null, budgetMs + 30 * 60_000);
+  // R20 fresh-eyes: from the 3rd effective miss on, every other retry is a
+  // deliberate blind re-audit — no scratch inheritance, no frontier/intents
+  // resume — because 29896's bctf2026-22 ground one inherited JNDI hypothesis
+  // for 4h while a fresh 38-minute pass solved it in the previous round.
+  const freshEyes = effMisses >= 2 && effMisses % 2 === 0;
+  if (freshEyes) console.log(`[tsec] ${code} fresh-eyes retry (effective misses=${effMisses}): dropping inherited context for an independent re-audit`);
+  const task = buildTask(ready, Math.round(budgetMs / 60_000), undefined, freshEyes);
   await writeFile(resolve(dir, "task.txt"), task);
   // Scratch inheritance (round-3 lesson): retries rebuilt whole toolchains
   // because each run's scratch namespace is wiped. lineage.parentRunId makes
   // the runtime copy the parent's scratch in and tell the agent to reuse it.
-  const parentRunId = lastrunFor(code);
+  const parentRunId = freshEyes ? null : lastrunFor(code);
+  // No-hint finals: stuck challenges (misses past the old hint-arming point)
+  // get the fallback model's lens on alternating attempts.
+  const rescueRole = rescueModelRole(effMisses);
+  if (rescueRole) console.log(`[tsec] rescue dispatch for ${code} (misses=${misses}): next attempt on the fallback model`);
   const created = await xuanshu("/v1/runs", {
     method: "POST",
     body: JSON.stringify({
@@ -862,11 +1009,13 @@ async function solveOneInner(challenge) {
       // concurrent fan-out siblings of the same code.
       evidenceGroup: `tsec-${code}`,
       discipline: disciplineFor(code),
+      ...(rescueRole ? { modelRole: rescueRole } : {}),
       ...(parentRunId ? { lineage: { parentRunId } } : {}),
     }),
-  });
+  }, 45_000, 0);
   if (created.status !== 202) die(`xuanshu run creation failed: ${created.status} ${JSON.stringify(created.json).slice(0, 300)}`);
   const runId = created.json.id;
+  registerWatch(code, runId, budgetMs + 30 * 60_000); // now with the runId for watchdog stops
   writeLastrun(code, runId);
   console.log(`[tsec] xuanshu run ${runId} queued${parentRunId ? ` (scratch inherited from ${parentRunId.slice(0, 8)})` : ""}`);
 
@@ -911,7 +1060,9 @@ async function solveOneInner(challenge) {
       if (isTaskEnded(error)) throw error;
       // list hiccup: fall through to the miss mark
     }
-    await record({ challenge: code, runId, outcome: "driver-timeout" });
+    // R20: every await here is failure-isolated — one bad call must never
+    // again skip the instance close below it (the 29896 slot-leak chain).
+    await record({ challenge: code, runId, outcome: "driver-timeout" }).catch((error) => console.warn(`[tsec] timeout record failed: ${error?.message ?? error}`));
     ledgerMark(code, "miss");
     await settleMiss(code, challenge); // R9: pay the hint now; release or keep-warm the slot
     return false;
@@ -1066,6 +1217,7 @@ async function solveFanOut(challenge) {
     throw Object.assign(new Error("already_claimed"), { claimed: true });
   }
   const claimedAt = Date.now();
+  registerWatch(code, null, 90 * 60_000); // episode-wide horizon: workers + settles
   try {
     console.log(`[tsec] fan-out retry ${code} (${challenge.difficulty}, ${challenge.total_score}pts): ${FANOUT_WORKERS} directed workers`);
     const ready = await ensureContainer(challenge);
@@ -1082,7 +1234,7 @@ async function solveFanOut(challenge) {
 
     const dirs = fanoutDirections(code);
     const deadline = Date.now() + FANOUT_WALL_MIN * 60_000;
-    const parentRunId = lastrunFor(code);
+    const parentRunId = freshEyes ? null : lastrunFor(code);
     const runIds = [];
     let solvedFlag = false;
     let stopped = false;
@@ -1204,6 +1356,7 @@ async function solveFanOut(challenge) {
     await settleMiss(code, challenge); // R9: pay the hint now; release or keep-warm the slot
     return false;
   } finally {
+    clearWatch(code);
     releaseClaim(code);
     ledgerAddSpent(code, Math.round((Date.now() - claimedAt) / 60_000));
   }
@@ -1400,8 +1553,30 @@ function hintDue(misses) {
   return misses >= (currentPhase === "endgame" ? 1 : 2);
 }
 
+// R20: hints and rescue dispatch used to arm ONLY on settled misses — but an
+// exploration-stuck challenge never submits anything, so it can grind one
+// hypothesis for hours with no miss ever recorded (29896: bctf2026-22 burned
+// 4h across two attempts on a JNDI path that never fired). Wall-time invested
+// with zero platform progress counts as one miss once it crosses the arm
+// threshold, unlocking the hint pull and the fallback-model lens.
+const STUCK_ARM_MIN = 75;
+function effectiveMisses(code) {
+  const done = readLedger().done[code] ?? {};
+  const misses = done.misses ?? 0;
+  if ((done.progress ?? 0) > 0) return misses; // partial credit = it is converting
+  const w = watchFor(code);
+  const liveMin = w ? Math.max(0, (Date.now() - Date.parse(w.at)) / 60_000) : 0;
+  const spentMin = (done.spentMin ?? 0) + liveMin;
+  return misses + (spentMin >= STUCK_ARM_MIN ? 1 : 0);
+}
+
+// No-hint finals: once the platform hint endpoint proves absent (persistent
+// failure after the api() retry ladder), stop paying for the probe on every
+// settle — the rescue dispatch below replaces hints as the unstick tool.
+let hintsUnavailable = false;
+
 async function maybePullHint(code, misses) {
-  if (hintFor(code) || !hintDue(misses)) return;
+  if (hintsUnavailable || hintFor(code) || !hintDue(misses)) return;
   try {
     const result = await api("/openapi/v1/challenges/hint", { query: { unique_code: code } });
     const text = typeof result?.hint === "string" ? result.hint.trim() : "";
@@ -1413,7 +1588,20 @@ async function maybePullHint(code, misses) {
   } catch (error) {
     if (isTaskEnded(error)) throw error;
     console.warn(`[tsec] hint pull failed for ${code}: ${error.message}`);
+    hintsUnavailable = true;
+    console.warn("[tsec] hint endpoint unavailable — treating this run as a no-hint final; rescue dispatch (fallback model) replaces hints");
   }
+}
+
+// Rescue dispatch (no-hint finals): at the point hints used to arm (2 unaided
+// misses; 1 in endgame), route the challenge's NEXT attempt to the fallback
+// model via modelRole — a genuinely different lens, carrying the shared board
+// so it does not start blind. Alternates afterwards: every other attempt gets
+// the second lens while GLM keeps the majority.
+function rescueModelRole(misses) {
+  if (!hintDue(misses)) return undefined;
+  const past = Math.max(0, misses - (currentPhase === "endgame" ? 1 : 2));
+  return past % 2 === 0 ? "fallback" : undefined;
 }
 
 // R9: pay the hint AND settle the container at miss time. The pull must not
@@ -1423,16 +1611,32 @@ async function maybePullHint(code, misses) {
 // releases immediately (run 29070: bctf2026-02 sat unclaimed on a slot
 // ~30min before eviction, burning a third of the lane capacity).
 async function settleMiss(code, challenge, { pullHint = true } = {}) {
-  const misses = readLedger().done[code]?.misses ?? 0;
-  if (pullHint) await maybePullHint(code, misses);
+  const misses = effectiveMisses(code);
+  if (pullHint) {
+    try {
+      await maybePullHint(code, misses);
+    } catch (error) {
+      console.warn(`[tsec] hint pull for ${code} failed (${error?.message ?? error}); settling without`);
+    }
+  }
   const hint = hintFor(code)?.hint;
   const ledger = readLedger();
   if (hint) {
     console.log(`[tsec] ${code} miss settled with hint armed (${misses} misses); keeping container warm for the revive`);
+    // R20: keep-warm is now an explicit, time-bounded marker — the watchdog
+    // must be able to tell an intentional park from a leaked container.
+    ledger.done[code] = { ...ledger.done[code], warmUntil: Date.now() + 30 * 60_000, at: new Date().toISOString() };
+    writeLedger(ledger);
     return;
   }
   console.log(`[tsec] ${code} miss settled; releasing container slot`);
-  try { await closeChallenge(code); } catch { /* best-effort slot release */ }
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try { await closeChallenge(code); return; } catch (error) {
+      if (isTaskEnded(error)) throw error;
+      console.warn(`[tsec] close ${code} attempt ${attempt}/3 failed: ${error?.message ?? error}`);
+      await sleep(3_000 * attempt);
+    }
+  }
 }
 
 // ------------------------------------------- slot-hold join worker (R13)
@@ -1568,6 +1772,17 @@ async function cmdLoop() {
       // Sync platform-confirmed progress into the ledger (resets miss counts).
       for (const item of items) {
         if ((item.correct_flag_count ?? 0) > 0) ledgerNoteProgress(item.unique_code, item.correct_flag_count);
+      }
+      // R20 watchdog: open containers with no live owner get reclaimed here,
+      // so a crashed/wedged settle can no longer freeze the fleet's slots.
+      try {
+        await reconcileSlots(items);
+      } catch (error) {
+        if (isTaskEnded(error)) {
+          console.warn("[tsec] benchmark task ended (invalid_state) — loop exiting");
+          return 0;
+        }
+        console.warn(`[tsec] slot reconcile failed (${error.message}); continuing`);
       }
       const phase = phaseOf(items, Date.now());
       if (phase !== currentPhase) {

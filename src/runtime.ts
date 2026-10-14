@@ -11,7 +11,7 @@ import { ExperienceStore, renderExperienceContext } from "./experience.js";
 import { renderRunHandoff } from "./handoff.js";
 import { normalizeTask, renderTaskContext } from "./input.js";
 import { renderTriageSection, triageAttachments } from "./artifact-triage.js";
-import { startModelGateway, type ModelGateway, type ModelGatewayUpstream, type ModelRouteOptions } from "./model-gateway.js";
+import { fallbackUpstreamFromConfig, gatewayTextQuery, startModelGateway, type ModelGateway, type ModelGatewayUpstream, type ModelRouteOptions } from "./model-gateway.js";
 import { PolicyEngine } from "./policy.js";
 import { classifyProviderError } from "./provider-errors.js";
 import { filterProfileTools, narrowToolsForCategory, resolveAgentProfile, validateProfileCapabilities } from "./profiles.js";
@@ -47,6 +47,7 @@ const UNLIMITED_MODEL_LIMITS = {
 /** Pre-flight budget for the model layer of challenge-type recognition; on expiry the
  * deterministic signal pass decides instead. */
 const CHALLENGE_CLASSIFY_TIMEOUT_MS = 30_000;
+const CHALLENGE_CLASSIFIER_SYSTEM_PROMPT = "You are the challenge-type classifier for a CTF solving platform. Reply with the required output block only.";
 
 export interface RuntimeModelStatus {
   configured: boolean;
@@ -242,6 +243,8 @@ export interface RunOptions {
   sharedEvidence?: SharedEvidenceBoard;
   discipline?: string;
   thinkingLevel?: AgentThinkingLevel;
+  /** Route this run to model.fallback (rescue dispatch); primary otherwise. */
+  modelRole?: "primary" | "fallback";
   allowedToolEffects?: ToolEffect[];
   contextSections?: Array<{ name: string; content: string }>;
   lineage?: RunLineage & { context: string };
@@ -261,7 +264,7 @@ export class XuanShuRuntime {
 
   private ensureGateway(): Promise<ModelGateway> {
     if (this.overrides.gateway) return Promise.resolve(this.overrides.gateway);
-    this.gatewayPromise ??= startModelGateway();
+    this.gatewayPromise ??= startModelGateway({ fallbackUpstream: fallbackUpstreamFromConfig(this.config.modelFallback) });
     return this.gatewayPromise;
   }
 
@@ -407,7 +410,15 @@ export class XuanShuRuntime {
       workspaceRoot: workspaceMode === "attachments-only" ? isolatedInputRoot : configuredScope.workspaceRoot,
       allowedPrograms: availablePrograms,
     };
-    const { modelConfig, apiKey, headers: sessionHeaders } = this.effectiveModel();
+    // Rescue dispatch (no-hint finals): a run may route to model.fallback for
+    // a second lens on stuck challenges. Missing fallback config fails loudly
+    // at launch instead of silently degrading every rescue run to GLM.
+    if (options.modelRole === "fallback" && !this.config.modelFallback) {
+      throw new Error("model.fallback is not configured; rescue dispatch requires a second model");
+    }
+    const { modelConfig, apiKey, headers: sessionHeaders } = options.modelRole === "fallback" && this.config.modelFallback
+      ? { modelConfig: this.config.modelFallback, apiKey: process.env[this.config.modelFallback.apiKeyEnv], headers: undefined as Record<string, string> | undefined }
+      : this.effectiveModel();
     const audit = new AuditChain(join(runDirectory, "audit.jsonl"), id);
     // Challenge-type recognition runs before any category consumer (playbook, tool
     // narrowing, experience retrieval, web gate) reads the task, so a missing or
@@ -423,30 +434,9 @@ export class XuanShuRuntime {
         });
         try {
           classification = await classifyChallenge(task, {
-            // Direct loopback-gateway request: no agent subprocess, so a dead or
-            // unavailable upstream fails in milliseconds instead of stalling intake.
-            queryModel: async (prompt, signal) => {
-              const response = await fetch(gateway.routeUrl(classifyKey), {
-                method: "POST",
-                headers: { "content-type": "application/json", "anthropic-version": "2023-06-01" },
-                body: JSON.stringify({
-                  model: modelConfig.id,
-                  max_tokens: 300,
-                  system: "You are the challenge-type classifier for a CTF solving platform. Reply with the required output block only.",
-                  messages: [{ role: "user", content: prompt }],
-                }),
-                signal,
-              });
-              if (!response.ok) throw new Error(`classification model request failed with status ${response.status}`);
-              const payload = await response.json() as { content?: Array<{ type?: string; text?: string }> };
-              const text = (payload.content ?? [])
-                .filter((block) => block?.type === "text")
-                .map((block) => block.text ?? "")
-                .join("\n")
-                .trim();
-              if (!text) throw new Error("classification model response contained no text");
-              return text;
-            },
+            queryModel: (prompt, signal) => gatewayTextQuery(
+              gateway, classifyKey, modelConfig.id, CHALLENGE_CLASSIFIER_SYSTEM_PROMPT, prompt, signal,
+            ),
             timeoutMs: CHALLENGE_CLASSIFY_TIMEOUT_MS,
             ...(options.signal ? { signal: options.signal } : {}),
           });

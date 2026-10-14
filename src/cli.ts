@@ -9,6 +9,7 @@ import { exportResources, loadResourceIds, writeResourceExportReport } from "./r
 import { XuanShuRuntime } from "./runtime.js";
 import { SandboxClient, startSandboxServer } from "./sandbox.js";
 import { startApiServer } from "./server.js";
+import { installProcessGuards } from "./process-guards.js";
 import { resolveWorkspacePath } from "./policy.js";
 import { QuestionBank, questionToTaskRequest } from "./question-bank.js";
 import { QuestionBankInstanceRunner } from "./question-bank-instances.js";
@@ -334,6 +335,9 @@ async function main(): Promise<void> {
       }
     }
     const running = await startApiServer(config);
+    // One-shot endurance (10-hour final): a stray async throw must never end
+    // the only launch. Guards log and keep serving; exit stays signal-only.
+    installProcessGuards({ stats: () => ({ ...running.manager.stats() }) });
     console.log(`烛龙·玄枢 API listening at ${running.url}`);
     console.log(`scope=${config.scope.mode} workspace=${config.scope.workspaceRoot}`);
     const close = async () => {

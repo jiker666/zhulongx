@@ -127,6 +127,8 @@ export interface QuestionBankConfig {
 
 export interface AppConfig {
   model: ModelConfig;
+  /** Optional second model (GLM primary + DPSK rescue/failover); see model.fallback in config. */
+  modelFallback?: ModelConfig;
   runtime: RuntimeConfig;
   scope: ScopeConfig;
   server: ServerConfig;

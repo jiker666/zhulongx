@@ -6,7 +6,17 @@ model:
   apiKeyEnv: XUANSHU_MODEL_API_KEY
   reasoning: true
   contextWindow: 400000
-
+  # Rescue model (no-hint finals): transparent gateway failover when GLM
+  # errors or is rate-limited, plus per-run rescue dispatch (POST /v1/runs
+  # {"modelRole":"fallback"}). Inert until XUANSHU_FALLBACK_API_KEY is set.
+  fallback:
+    provider: anthropic
+    id: dpsk-4.1
+    name: DPSK 4.1
+    baseUrl: https://api.deepseek.com/anthropic
+    apiKeyEnv: XUANSHU_FALLBACK_API_KEY
+    reasoning: true
+    contextWindow: 128000
 runtime:
   # Permissive mode: maxTurns/maxToolCalls/maxRuntimeMs/maxHttpRequests/
   # maxTcpSessions/maxImageObservations/maxActionsWithoutCheckpoint/

@@ -65,6 +65,12 @@ export type GatewayFetch = (input: string | URL, init?: RequestInit & { dispatch
 export interface ModelGatewayOptions {
   gate?: ModelRequestGate;
   fetch?: GatewayFetch;
+  /** Rescue upstream (DPSK etc.): transparently takes over when the primary errors or is rate-limited. */
+  fallbackUpstream?: ModelGatewayUpstream | undefined;
+  /** Consecutive primary failures before requests skip the primary for cooldownMs. */
+  failureThreshold?: number | undefined;
+  /** How long a degraded primary is bypassed before the next request probes it again. */
+  cooldownMs?: number | undefined;
 }
 
 interface ModelRouteState {
@@ -72,6 +78,8 @@ interface ModelRouteState {
   options: ModelRouteOptions;
   requestCount: number;
   usage: UsageDetail;
+  consecutiveFailures: number;
+  fallbackUntil: number;
 }
 
 interface MatchedRoute {
@@ -247,10 +255,16 @@ export class ModelGateway {
   private readonly server: Server;
   private readonly gate: ModelRequestGate;
   private readonly fetcher: GatewayFetch;
+  private readonly fallbackUpstream: ModelGatewayUpstream | undefined;
+  private readonly failureThreshold: number;
+  private readonly cooldownMs: number;
   private port = 0;
 
   constructor(options: ModelGatewayOptions = {}) {
     this.gate = options.gate ?? new ModelRequestGate();
+    this.fallbackUpstream = options.fallbackUpstream;
+    this.failureThreshold = options.failureThreshold ?? (Number(process.env.XUANSHU_FAILOVER_THRESHOLD ?? "") || 3);
+    this.cooldownMs = options.cooldownMs ?? (Number(process.env.XUANSHU_FAILOVER_COOLDOWN_MS ?? "") || 300_000);
     const customFetch = options.fetch;
     if (customFetch) {
       this.fetcher = customFetch;
@@ -311,7 +325,7 @@ export class ModelGateway {
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
       throw new Error("Upstream baseUrl must use http or https");
     }
-    this.routes.set(runKey, { runKey, options, requestCount: 0, usage: emptyUsage() });
+    this.routes.set(runKey, { runKey, options, requestCount: 0, usage: emptyUsage(), consecutiveFailures: 0, fallbackUntil: 0 });
   }
 
   releaseRoute(runKey: string): void {
@@ -452,33 +466,83 @@ export class ModelGateway {
       });
     }
 
-    const upstream = route.options.upstream;
-    const headers: Record<string, string> = {
+    const baseHeaders: Record<string, string> = {
       "content-type": "application/json",
       "anthropic-version": pickHeader(request, "anthropic-version") ?? DEFAULT_ANTHROPIC_VERSION,
     };
     for (const name of FORWARDED_REQUEST_HEADERS) {
       const value = pickHeader(request, name);
-      if (value) headers[name] = value;
+      if (value) baseHeaders[name] = value;
     }
-    if (upstream.apiKey) {
-      if ((upstream.authScheme ?? "bearer") === "bearer") headers.authorization = `Bearer ${upstream.apiKey}`;
-      else headers["x-api-key"] = upstream.apiKey;
-    }
-    // Client-supplied credential headers are never forwarded; operator headers win.
-    Object.assign(headers, upstream.headers);
-
-    let upstreamResponse: Response;
-    try {
-      upstreamResponse = await this.fetcher(joinUrl(upstream.baseUrl, upstreamPath), {
+    const attemptUpstream = async (upstream: ModelGatewayUpstream): Promise<Response> => {
+      const attemptHeaders: Record<string, string> = { ...baseHeaders };
+      if (upstream.apiKey) {
+        if ((upstream.authScheme ?? "bearer") === "bearer") attemptHeaders.authorization = `Bearer ${upstream.apiKey}`;
+        else attemptHeaders["x-api-key"] = upstream.apiKey;
+      }
+      // Client-supplied credential headers are never forwarded; operator headers win.
+      Object.assign(attemptHeaders, upstream.headers);
+      const payload = upstream.modelId ? { ...body, model: upstream.modelId } : body;
+      return await this.fetcher(joinUrl(upstream.baseUrl, upstreamPath), {
         method: "POST",
-        headers,
-        body: JSON.stringify(body),
+        headers: attemptHeaders,
+        body: JSON.stringify(payload),
         signal: clientGone.signal,
       });
+    };
+    /**
+     * One-shot endurance failover: a primary failure (network throw / 5xx /
+     * 429) is transparently retried once on the rescue upstream BEFORE any
+     * response byte is written, so the SDK never sees the outage; after
+     * failureThreshold consecutive failures the route bypasses the primary
+     * entirely for cooldownMs. 4xx is a config problem failover cannot fix
+     * and passes through untouched.
+     */
+    const failoverActive = this.fallbackUpstream !== undefined && route.fallbackUntil > Date.now();
+    const primaryChoice = failoverActive ? this.fallbackUpstream! : route.options.upstream;
+    let upstreamResponse: Response;
+    try {
+      upstreamResponse = await attemptUpstream(primaryChoice);
+      const retriable = upstreamResponse.status >= 500 || upstreamResponse.status === 429;
+      if (retriable) {
+        if (!failoverActive) {
+          route.consecutiveFailures += 1;
+          if (route.consecutiveFailures >= this.failureThreshold) route.fallbackUntil = Date.now() + this.cooldownMs;
+        }
+        if (this.fallbackUpstream && primaryChoice === route.options.upstream) {
+          await upstreamResponse.body?.cancel().catch(() => undefined);
+          void route.options.emit?.({
+            type: "model.failover",
+            data: { reason: `HTTP ${upstreamResponse.status}`, consecutiveFailures: route.consecutiveFailures, fallbackUntil: route.fallbackUntil },
+          });
+          try {
+            upstreamResponse = await attemptUpstream(this.fallbackUpstream);
+          } catch {
+            this.sendJson(response, 502, { type: "error", error: { type: "api_error", message: "Upstream model request failed (primary and fallback)" } });
+            return;
+          }
+        }
+      } else if (!failoverActive) {
+        route.consecutiveFailures = 0;
+      }
     } catch {
-      this.sendJson(response, 502, { type: "error", error: { type: "api_error", message: "Upstream model request failed" } });
-      return;
+      if (!failoverActive && this.fallbackUpstream) {
+        route.consecutiveFailures += 1;
+        if (route.consecutiveFailures >= this.failureThreshold) route.fallbackUntil = Date.now() + this.cooldownMs;
+        void route.options.emit?.({
+          type: "model.failover",
+          data: { reason: "network", consecutiveFailures: route.consecutiveFailures, fallbackUntil: route.fallbackUntil },
+        });
+        try {
+          upstreamResponse = await attemptUpstream(this.fallbackUpstream);
+        } catch {
+          this.sendJson(response, 502, { type: "error", error: { type: "api_error", message: "Upstream model request failed (primary and fallback)" } });
+          return;
+        }
+      } else {
+        this.sendJson(response, 502, { type: "error", error: { type: "api_error", message: "Upstream model request failed" } });
+        return;
+      }
     }
 
     const responseHeaders: Record<string, string> = {};
@@ -543,8 +607,56 @@ export class ModelGateway {
  * Process-wide gateway: one loopback listener and one shared request gate per
  * API process. Routes are registered per run (and per writeup attempt).
  */
+/**
+ * Build the rescue upstream from the optional model.fallback config; returns
+ * undefined when the config or its API key is absent (single-model deploy).
+ */
+export function fallbackUpstreamFromConfig(model: { baseUrl: string; id: string; apiKeyEnv: string; authScheme?: "bearer" | "api-key" } | undefined): ModelGatewayUpstream | undefined {
+  if (!model) return undefined;
+  const apiKey = process.env[model.apiKeyEnv];
+  if (!apiKey) return undefined;
+  return {
+    baseUrl: model.baseUrl,
+    apiKey,
+    ...(model.authScheme ? { authScheme: model.authScheme } : {}),
+    modelId: model.id,
+  };
+}
+
 export async function startModelGateway(options?: ModelGatewayOptions): Promise<ModelGateway> {
   const gateway = new ModelGateway(options ?? {});
   await gateway.start();
   return gateway;
+}
+
+/**
+ * One-shot raw completion through a gateway route for non-agent callers (the
+ * challenge classifier etc.): direct loopback POST, no subprocess, so a dead
+ * or unavailable upstream fails in milliseconds instead of stalling intake.
+ * Callers own retry and audit policy.
+ */
+export async function gatewayTextQuery(
+  gateway: ModelGateway,
+  runKey: string,
+  modelId: string,
+  system: string,
+  prompt: string,
+  signal?: AbortSignal | undefined,
+  maxTokens = 300,
+): Promise<string> {
+  const response = await fetch(gateway.routeUrl(runKey), {
+    method: "POST",
+    headers: { "content-type": "application/json", "anthropic-version": "2023-06-01" },
+    body: JSON.stringify({ model: modelId, max_tokens: maxTokens, system, messages: [{ role: "user", content: prompt }] }),
+    ...(signal ? { signal } : {}),
+  });
+  if (!response.ok) throw new Error(`model query failed with status ${response.status}`);
+  const payload = await response.json() as { content?: Array<{ type?: string; text?: string }> };
+  const text = (payload.content ?? [])
+    .filter((block) => block?.type === "text")
+    .map((block) => block.text ?? "")
+    .join("\n")
+    .trim();
+  if (!text) throw new Error("model query response contained no text");
+  return text;
 }

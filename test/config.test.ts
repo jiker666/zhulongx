@@ -8,7 +8,7 @@ describe("generic configuration", () => {
     const source = await readFile("config/default.yaml", "utf8");
     const config = await loadConfig("config/default.yaml");
     expect(config.model).toMatchObject({ provider: "anthropic", apiKeyEnv: "XUANSHU_MODEL_API_KEY", baseUrl: "https://api.anthropic.com" });
-    expect(Object.keys(config).sort()).toEqual(["connectors", "model", "profile", "runtime", "scope", "server"]);
+    expect(Object.keys(config).sort()).toEqual(["connectors", "model", "modelFallback", "profile", "runtime", "scope", "server"]);
     expect(source).not.toMatch(/Bearer\s+[A-Za-z0-9._~-]+/i);
   });
 

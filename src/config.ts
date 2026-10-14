@@ -80,6 +80,30 @@ function validateConfig(value: unknown, configPath: string): AppConfig {
       ...(contextWindow === undefined ? {} : { contextWindow }),
       ...(authScheme ? { authScheme: authScheme as NonNullable<AppConfig["model"]["authScheme"]> } : {}),
     },
+    // Optional rescue model (model.fallback): same shape as model, never
+    // required — deployments without it stay single-model.
+    ...(root.model !== undefined && (root.model as { fallback?: unknown }).fallback !== undefined
+      ? {
+          modelFallback: (() => {
+            const fallback = requireObject((root.model as { fallback: unknown }).fallback, "model.fallback");
+            const fallbackAuthScheme = fallback.authScheme === undefined ? undefined : requireString(fallback.authScheme, "model.fallback.authScheme");
+            if (fallbackAuthScheme !== undefined && fallbackAuthScheme !== "bearer" && fallbackAuthScheme !== "api-key") {
+              throw new Error("model.fallback.authScheme must be bearer or api-key");
+            }
+            const fallbackContextWindow = fallback.contextWindow === undefined ? undefined : requireNumber(fallback.contextWindow, "model.fallback.contextWindow");
+            return {
+              provider: requireString(fallback.provider, "model.fallback.provider"),
+              id: requireString(fallback.id, "model.fallback.id"),
+              name: requireString(fallback.name, "model.fallback.name"),
+              baseUrl: requireString(fallback.baseUrl, "model.fallback.baseUrl").replace(/\/$/, ""),
+              apiKeyEnv: requireString(fallback.apiKeyEnv, "model.fallback.apiKeyEnv"),
+              ...(fallback.reasoning === undefined ? {} : { reasoning: Boolean(fallback.reasoning) }),
+              ...(fallbackContextWindow === undefined ? {} : { contextWindow: fallbackContextWindow }),
+              ...(fallbackAuthScheme ? { authScheme: fallbackAuthScheme as "bearer" | "api-key" } : {}),
+            } satisfies AppConfig["modelFallback"];
+          })(),
+        }
+      : {}),
     runtime: {
       thinkingLevel: thinkingLevel as AppConfig["runtime"]["thinkingLevel"],
       artifactRoot: isAbsolute(artifactRoot) ? artifactRoot : resolve(baseDir, "..", artifactRoot),

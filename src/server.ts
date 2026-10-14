@@ -27,7 +27,7 @@ import { EvaluationLedger, type EvaluationAttempt } from "./evaluation-ledger.js
 import { DISCLOSURE_REASON_LABELS, DisclosureLedger, DisclosureLedgerError } from "./disclosure-ledger.js";
 import { CapabilityLedger } from "./capability-ledger.js";
 import { KnowledgeStore, type KnowledgeTrust } from "./knowledge-store.js";
-import { startModelGateway, type ModelGateway } from "./model-gateway.js";
+import { fallbackUpstreamFromConfig, startModelGateway, type ModelGateway } from "./model-gateway.js";
 import { EnterpriseStore } from "./enterprise/store.js";
 import { GuardStore } from "./enterprise/guard.js";
 import { NotifyStore } from "./enterprise/notify.js";
@@ -480,7 +480,13 @@ export function createApiServer(config: AppConfig, dependencies: ApiServerDepend
     try {
       const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
       if (request.method === "GET" && url.pathname === "/health") {
-        json(response, 200, { status: "ok", service: "zhulong-xuanshu", version: "0.2.2" });
+        const runStats = manager.stats();
+        json(response, 200, {
+          status: "ok", service: "zhulong-xuanshu", version: "0.2.2",
+          uptimeSec: Math.round(process.uptime()),
+          rssBytes: process.memoryUsage().rss,
+          runs: { total: runStats.total, active: runStats.active, queued: runStats.queued, evicted: runStats.evicted },
+        });
         return;
       }
       if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/ui" || !url.pathname.startsWith("/v1/") && !url.pathname.startsWith("/health"))) {
@@ -788,12 +794,17 @@ export function createApiServer(config: AppConfig, dependencies: ApiServerDepend
         const thinkingLevel = typeof thinkingRaw === "string" && THINKING_LEVELS.has(thinkingRaw)
           ? thinkingRaw as "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
           : undefined;
+        // Rescue dispatch (no-hint finals): the arena driver may route a
+        // stuck challenge's next attempt to model.fallback for a second lens.
+        const modelRoleRaw = (input as { modelRole?: unknown }).modelRole;
+        const modelRole = modelRoleRaw === "fallback" ? "fallback" as const : undefined;
         const id = manager.start(input, {
           ...(parentRunId ? { lineage: { parentRunId, boundarySequence: 0, mode: "resume" as const, inheritedEventCount: 0, context: "" } } : {}),
           // Same-group runs share one board; see evidenceGroupBoards above.
           ...(evidenceGroup ? { sharedEvidence: sharedEvidenceFor(evidenceGroup) } : {}),
           ...(discipline ? { discipline } : {}),
           ...(thinkingLevel ? { thinkingLevel } : {}),
+          ...(modelRole ? { modelRole } : {}),
         });
         json(response, 202, { id, status: "queued", statusUrl: `/v1/runs/${id}`, ...(parentRunId ? { parentRunId } : {}) });
         return;
@@ -1043,6 +1054,40 @@ export function createApiServer(config: AppConfig, dependencies: ApiServerDepend
         json(response, 200, await experience.update(experienceMatch[1], input));
         return;
       }
+      // Light poll for arena drivers: status + the few state fields their
+      // watch loop mirrors live (findings, frontier). 29896 post-mortem: the
+      // full snapshot serializes up to 1000 events plus the whole state on
+      // every 20s poll, and under three heavy web grinds the load pushed
+      // settle-path requests past their 45s budget — the light shape keeps
+      // polling cheap no matter how big a run grows.
+      const liteMatch = url.pathname.match(/^\/v1\/runs\/([0-9a-f-]+)\/lite$/i);
+      if (request.method === "GET" && liteMatch?.[1]) {
+        const id = liteMatch[1];
+        const active = manager.get(id);
+        if (active) {
+          const state = active.state;
+          json(response, 200, {
+            id,
+            status: active.status,
+            phase: state?.phase,
+            findings: state?.findings ?? [],
+            frontierNote: state?.frontierNote ?? "",
+            submission: state?.submission ?? null,
+          });
+        } else {
+          const persistedState = await loadPersistedRun(config.runtime.artifactRoot, id);
+          if (!persistedState) json(response, 404, { error: "run not found" });
+          else json(response, 200, {
+            id,
+            status: persistedState.status,
+            phase: persistedState.phase,
+            findings: persistedState.findings ?? [],
+            frontierNote: persistedState.frontierNote ?? "",
+            submission: persistedState.submission ?? null,
+          });
+        }
+        return;
+      }
       const match = url.pathname.match(/^\/v1\/runs\/([0-9a-f-]+)$/i);
       if (request.method === "GET" && match?.[1]) {
         const id = match[1];
@@ -1110,7 +1155,7 @@ export function createApiServer(config: AppConfig, dependencies: ApiServerDepend
 export async function startApiServer(
   config: AppConfig,
   dependencies: ApiServerDependencies = {},
-): Promise<{ url: string; close: () => Promise<void> }> {
+): Promise<{ url: string; close: () => Promise<void>; manager: RunManager }> {
   const loopbackHosts = new Set(["127.0.0.1", "::1", "localhost"]);
   if (!loopbackHosts.has(config.server.host) && !process.env[config.server.tokenEnv]) {
     throw new Error(`Refusing non-loopback API without ${config.server.tokenEnv}`);
@@ -1119,8 +1164,8 @@ export async function startApiServer(
   // One loopback gateway per API process: every embedded agent session and
   // writeup subprocess routes through it, so credential injection, request
   // gating, and model audit stay centralized. Owned here unless injected.
-  const gateway = dependencies.gateway ?? await startModelGateway();
-  const { server, manualJobs, manualUploads, agentWorker, workflowWorker, adaptiveCampaigns, closeStreams } = createApiServer(config, { ...dependencies, gateway });
+  const gateway = dependencies.gateway ?? await startModelGateway({ fallbackUpstream: fallbackUpstreamFromConfig(config.modelFallback) });
+  const { server, manager, manualJobs, manualUploads, agentWorker, workflowWorker, adaptiveCampaigns, closeStreams } = createApiServer(config, { ...dependencies, gateway });
   await adaptiveCampaigns.resumePending();
   await new Promise<void>((resolveListen, reject) => {
     server.once("error", reject);
@@ -1130,6 +1175,7 @@ export async function startApiServer(
   const host = address.address.includes(":") ? `[${address.address}]` : address.address;
   return {
     url: `http://${host}:${address.port}`,
+    manager,
     close: async () => {
       closeStreams();
       await new Promise<void>((resolveClose, reject) => server.close((error) => (error ? reject(error) : resolveClose())));
