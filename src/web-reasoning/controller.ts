@@ -4,7 +4,7 @@ import type { AuditChain } from "../audit.js";
 import type { EvidenceRecord, HypothesisRecord, RunState, WebReasoningConfig } from "../types.js";
 import { createWebAgentState } from "../agents/web/web-state-machine.js";
 import { renderWebOrchestrationContext } from "../agents/web/web-orchestrator.js";
-import { ActionDeduplicator } from "./action-deduplicator.js";
+import { ActionDeduplicator, isMutatingToolCall } from "./action-deduplicator.js";
 import { WebActionGuard } from "./action-guard.js";
 import { evaluateProgress } from "./evaluator.js";
 import { HypothesisManager } from "./hypothesis-manager.js";
@@ -157,8 +157,8 @@ export class WebReasoningController {
   prepareToolCall(toolName: string, args: unknown, toolCallId: string): { duplicate: boolean; actionId: string } {
     if (!this.enabled) return { duplicate: false, actionId: "" };
     const proposal = { kind: "invoke_tool" as const, requestedTool: toolName, requestedArguments: args && typeof args === "object" ? args as Record<string, unknown> : {} };
-    const key = this.deduplicator.key(proposal); const previous = this.deduplicator.find(proposal); const action: WebReasoningAction = { id: newId("action"), proposalId: this.state.nextRecommendedAction?.id ?? newId("proposal"), kind: "invoke_tool", objective: `Invoke ${toolName}`, rationaleSummary: "Model-requested registered tool action.", toolName, toolCallId, argumentsFingerprint: key, deduplicationKey: key, status: previous ? "skipped_duplicate" : "executing", evidenceIds: [], startedAt: new Date().toISOString() };
-    this.state.actions.push(action); this.state.actions = this.state.actions.slice(-this.config.maxActions); this.state.lastActionId = action.id;
+    const key = this.deduplicator.key(proposal); const previous = this.deduplicator.find(proposal); const epoch = this.state.mutationEpoch ?? 0; const action: WebReasoningAction = { id: newId("action"), proposalId: this.state.nextRecommendedAction?.id ?? newId("proposal"), kind: "invoke_tool", objective: `Invoke ${toolName}`, rationaleSummary: "Model-requested registered tool action.", toolName, toolCallId, argumentsFingerprint: key, deduplicationKey: key, status: previous ? "skipped_duplicate" : "executing", evidenceIds: [], startedAt: new Date().toISOString(), stateEpoch: epoch };
+    this.state.actions.push(action); this.state.actions = this.state.actions.slice(-this.config.maxActions); this.state.lastActionId = action.id; if (isMutatingToolCall(toolName, proposal.requestedArguments)) this.state.mutationEpoch = epoch + 1;
     if (previous) { this.state.stagnation.consecutiveDuplicateActions += 1; void this.event("WEB_ACTION_SKIPPED_DUPLICATE", { actionId: action.id, duplicateOf: previous.id, toolName }); }
     else void this.event("WEB_ACTION_PROPOSED", { actionId: action.id, toolName, deduplicationKey: key });
     return { duplicate: Boolean(previous), actionId: action.id };

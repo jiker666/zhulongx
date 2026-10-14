@@ -20,6 +20,7 @@ const navigationGroups: Array<{ caption: string; items: Array<{ to: string; labe
     items: [
       { to: "/experiences", label: "经验库", detail: "已验证策略", icon: Library },
       { to: "/capability", label: "能力与公示", detail: "维度统计与披露", icon: BarChart3 },
+      { to: "/security-ops", label: "安全运营", detail: "资产·漏洞·审批·通知", icon: ShieldCheck },
     ],
   },
   {

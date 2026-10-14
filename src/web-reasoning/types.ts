@@ -40,6 +40,8 @@ export interface WebReasoningAction {
   id: string; proposalId: string; kind: WebActionKind; objective: string; rationaleSummary: string;
   hypothesisId?: string; toolName?: string; toolCallId?: string; argumentsFingerprint?: string;
   deduplicationKey: string; status: WebActionStatus; evidenceIds: string[]; startedAt?: string;
+  /** Mutation epoch (R17): how many state-changing calls had run when this action executed. A read taken in an older epoch never blocks a re-read. */
+  stateEpoch?: number;
   completedAt?: string; failureCode?: string; failureSummary?: string;
 }
 
@@ -66,6 +68,7 @@ export interface WebReasoningState {
   unresolvedHypothesisIds: string[]; rejectedHypothesisIds: string[]; confirmedHypothesisIds: string[];
   lastActionId?: string; nextRecommendedAction?: WebReasoningActionProposal; stagnation: WebStagnationState;
   budget: WebReasoningBudgetState; createdAt: string; updatedAt: string;
+  mutationEpoch?: number;
   knowledgeGraph?: WebKnowledgeGraphState;
   roleCoordination?: WebRoleCoordinationState;
   browser?: import("./browser/types.js").BrowserIntelligenceState;

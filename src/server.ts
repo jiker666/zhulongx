@@ -28,6 +28,10 @@ import { DISCLOSURE_REASON_LABELS, DisclosureLedger, DisclosureLedgerError } fro
 import { CapabilityLedger } from "./capability-ledger.js";
 import { KnowledgeStore, type KnowledgeTrust } from "./knowledge-store.js";
 import { startModelGateway, type ModelGateway } from "./model-gateway.js";
+import { EnterpriseStore } from "./enterprise/store.js";
+import { GuardStore } from "./enterprise/guard.js";
+import { NotifyStore } from "./enterprise/notify.js";
+import { enterpriseApi, type EnterpriseRoutesDeps } from "./enterprise/routes.js";
 import { QuestionBankProgressStore } from "./question-bank-progress.js";
 import { AdaptiveCampaignManager, DurableAdaptiveCampaignStore, type AdaptiveCampaignStartInput } from "./adaptive-campaign.js";
 import { sanitizeSensitiveText } from "./sanitize.js";
@@ -67,6 +71,19 @@ async function frontendAsset(pathname: string, configuredRoot: string): Promise<
 function asset(response: ServerResponse, value: { body: Buffer; contentType: string }): void {
   response.writeHead(200, { "content-type": value.contentType, "cache-control": "no-cache", "x-content-type-options": "nosniff" });
   response.end(value.body);
+}
+
+/** Raw body bytes (size-capped); callers decide whether empty is a valid payload. */
+async function readRawBody(request: IncomingMessage): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of request) {
+    const bytes = Buffer.from(chunk as Uint8Array);
+    size += bytes.length;
+    if (size > MAX_BODY_BYTES) throw new Error("request body exceeds 1 MiB");
+    chunks.push(bytes);
+  }
+  return Buffer.concat(chunks);
 }
 
 async function bodyJson(request: IncomingMessage): Promise<unknown> {
@@ -153,6 +170,10 @@ export interface ApiServerDependencies {
   knowledgeStore?: KnowledgeStore;
   /** Process-level model gateway; when omitted, startApiServer owns one and stops it on close. */
   gateway?: ModelGateway;
+  /** Enterprise security-ops layer overrides (tests inject in-memory stores). */
+  enterpriseStore?: EnterpriseStore;
+  guardStore?: GuardStore;
+  notifyStore?: NotifyStore;
   adaptiveCampaigns?: AdaptiveCampaignManager;
 }
 
@@ -343,13 +364,25 @@ async function questionBankSnapshot(questionBank: QuestionBank, progress: Questi
 export function createApiServer(config: AppConfig, dependencies: ApiServerDependencies = {}) {
   const permissionBroker = dependencies.permissionBroker ?? new PermissionBroker(config.profile?.approvalPolicy ?? "never");
   const orchestrationRoot = join(config.runtime.artifactRoot, "..", "orchestration");
+  // Enterprise security-ops layer (ARTEX-inspired, additive): cross-run asset
+  // graph, exploration lineage, finding/retest lifecycle, allow/ask/deny tool
+  // guard, and IM notification fan-out — file-backed under the orchestration
+  // root, surfaced at /v1/enterprise/* and the 安全运营 frontend page.
+  const enterpriseRoot = join(orchestrationRoot, "enterprise");
+  const enterpriseStore = dependencies.enterpriseStore ?? new EnterpriseStore(join(enterpriseRoot, "assets.json"));
+  const guardStore = dependencies.guardStore ?? new GuardStore(join(enterpriseRoot, "guard.json"));
+  const notifyStore = dependencies.notifyStore ?? new NotifyStore(join(enterpriseRoot, "notify.json"));
+  // The guard wraps the broker: rules fire on every risk-carrying tool call
+  // (deny short-circuits, ask holds for operator resolution in the UI),
+  // everything else keeps the broker's own policy semantics.
+  const guardedGate = guardStore.wrap(permissionBroker);
   const memoryStore = dependencies.memoryStore ?? new MemoryStore(orchestrationRoot);
   const knowledgeStore = dependencies.knowledgeStore ?? new KnowledgeStore(orchestrationRoot);
   const connectorBroker = dependencies.connectorBroker ?? new ConnectorBroker(config.connectors ?? []);
   const targetConnectorId = config.profile?.preferredExecutor === "connector" ? config.profile.executorTargetId : undefined;
   const capabilityLedger = dependencies.capabilityLedger ?? new CapabilityLedger(orchestrationRoot);
   const runtime = new XuanShuRuntime(config, {
-    permissionGate: permissionBroker,
+    permissionGate: guardedGate,
     memoryStore,
     knowledgeStore,
     capabilityLedger,
@@ -744,10 +777,23 @@ export function createApiServer(config: AppConfig, dependencies: ApiServerDepend
         const evidenceGroup = typeof evidenceGroupRaw === "string" && EVIDENCE_GROUP_RE.test(evidenceGroupRaw)
           ? evidenceGroupRaw
           : undefined;
+        // Arena discipline (R15): task-agnostic playbook text rides the system
+        // prompt instead of bloating every task body; bounded like a task.
+        const disciplineRaw = (input as { discipline?: unknown }).discipline;
+        const discipline = typeof disciplineRaw === "string" && disciplineRaw.trim() ? disciplineRaw.slice(0, 6_000) : undefined;
+        // R16 racer diversity: per-run thinking-level override (fan-out workers
+        // spread low/medium/high the way top agents spread temperature).
+        const THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+        const thinkingRaw = (input as { thinkingLevel?: unknown }).thinkingLevel;
+        const thinkingLevel = typeof thinkingRaw === "string" && THINKING_LEVELS.has(thinkingRaw)
+          ? thinkingRaw as "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+          : undefined;
         const id = manager.start(input, {
           ...(parentRunId ? { lineage: { parentRunId, boundarySequence: 0, mode: "resume" as const, inheritedEventCount: 0, context: "" } } : {}),
           // Same-group runs share one board; see evidenceGroupBoards above.
           ...(evidenceGroup ? { sharedEvidence: sharedEvidenceFor(evidenceGroup) } : {}),
+          ...(discipline ? { discipline } : {}),
+          ...(thinkingLevel ? { thinkingLevel } : {}),
         });
         json(response, 202, { id, status: "queued", statusUrl: `/v1/runs/${id}`, ...(parentRunId ? { parentRunId } : {}) });
         return;
@@ -1005,6 +1051,52 @@ export function createApiServer(config: AppConfig, dependencies: ApiServerDepend
         const snapshot = active ?? (persistedState ? { id, status: persistedState.status, state: persistedState, events: [] } : undefined);
         if (!snapshot) json(response, 404, { error: "run not found" });
         else json(response, 200, snapshot);
+        return;
+      }
+      if (url.pathname.startsWith("/v1/enterprise/")) {
+        // Additive enterprise surface; see src/enterprise/routes.ts.
+        let enterpriseBody: unknown = undefined;
+        if (request.method !== "GET") {
+          try {
+            const raw = await readRawBody(request);
+            if (raw.length > 0) enterpriseBody = JSON.parse(raw.toString("utf8"));
+          } catch (error) { json(response, 400, { error: `Request body must be valid JSON: ${error instanceof Error ? error.message : String(error)}` }); return; }
+        }
+        const enterpriseDeps: EnterpriseRoutesDeps = {
+          store: enterpriseStore,
+          guard: guardStore,
+          notify: notifyStore,
+          startRun: (task) => {
+            try { return manager.start({ task }, { workspaceMode: "attachments-only" }); } catch { return undefined; }
+          },
+          runStatus: async (runId) => {
+            const active = manager.get(runId);
+            if (active?.state) return { status: active.state.status as string, ...(active.state.summary ? { summary: active.state.summary } : {}), ...(active.state.writeup ? { writeup: active.state.writeup } : {}) };
+            const persisted = await loadPersistedRun(config.runtime.artifactRoot, runId);
+            return persisted ? { status: persisted.status as string, ...(persisted.summary ? { summary: persisted.summary } : {}), ...(persisted.writeup ? { writeup: persisted.writeup } : {}) } : undefined;
+          },
+          persistedRuns: async () => {
+            const runs = await listPersistedRuns(config.runtime.artifactRoot);
+            const states: Array<import("./enterprise/store.js").PersistedRunLike> = [];
+            for (const run of runs.slice(-40)) {
+              const state = await loadPersistedRun(config.runtime.artifactRoot, run.id);
+              if (!state?.task?.task) continue;
+              states.push({
+                id: state.id ?? run.id,
+                task: { task: state.task.task },
+                findings: state.findings.map((finding) => ({ title: finding.title, text: finding.description, evidence: finding.evidence })),
+                hypotheses: state.hypotheses ?? [],
+                httpRequests: state.httpRequests,
+                status: state.status,
+                createdAt: state.createdAt,
+              });
+            }
+            return states;
+          },
+        };
+        const handled = await enterpriseApi(request.method ?? "GET", url, enterpriseBody, enterpriseDeps);
+        if (handled) json(response, handled.status, handled.body);
+        else json(response, 404, { error: "enterprise route not found" });
         return;
       }
       json(response, 404, { error: "not found" });

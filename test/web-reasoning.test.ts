@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { AuditChain } from "../src/audit.js";
-import { ActionDeduplicator } from "../src/web-reasoning/action-deduplicator.js";
+import { ActionDeduplicator, isMutatingToolCall } from "../src/web-reasoning/action-deduplicator.js";
 import { evaluateProgress } from "../src/web-reasoning/evaluator.js";
 import { HypothesisManager } from "../src/web-reasoning/hypothesis-manager.js";
 import { ObservationManager } from "../src/web-reasoning/observation-manager.js";
@@ -84,6 +84,23 @@ describe("Web Reasoning Engine", () => {
     expect(dedup.shouldSkip({ kind: "invoke_tool", requestedTool: "web_collect_baseline", requestedArguments: { url: "http://lab/a" } })).toBe(true);
     state.actions[0]!.status = "timed_out";
     expect(dedup.shouldSkip({ kind: "invoke_tool", requestedTool: "web_collect_baseline", requestedArguments: { url: "http://lab/a" } })).toBe(false);
+  });
+
+  it("re-allows identical reads after a mutating call bumps the epoch (R17 stateful no-dedup)", () => {
+    const state = createInitialWebReasoningState({ isWeb: true, confidence: 1, reasons: [], source: "url" }, 10);
+    const key = new ActionDeduplicator(state).key({ kind: "invoke_tool", requestedTool: "http_request", requestedArguments: { url: "http://lab/profile" } });
+    state.actions.push({ id: "r1", proposalId: "p1", kind: "invoke_tool", objective: "pre-login read", rationaleSummary: "test", toolName: "http_request", argumentsFingerprint: "x", deduplicationKey: key, status: "succeeded", evidenceIds: [], stateEpoch: 0 });
+    const dedup = new ActionDeduplicator(state);
+    // Same epoch: the identical GET stays deduplicated (static class).
+    expect(dedup.shouldSkip({ kind: "invoke_tool", requestedTool: "http_request", requestedArguments: { url: "http://lab/profile" } })).toBe(true);
+    // A login POST bumps the mutation epoch: the post-login GET is a NEW read.
+    state.mutationEpoch = 1;
+    expect(dedup.shouldSkip({ kind: "invoke_tool", requestedTool: "http_request", requestedArguments: { url: "http://lab/profile" } })).toBe(false);
+    // Mutation classifier: write-shaped HTTP and browser interactions.
+    expect(isMutatingToolCall("http_request", { url: "http://lab/login", method: "POST", body: "a=b" })).toBe(true);
+    expect(isMutatingToolCall("http_request", { url: "http://lab/login", method: "get" })).toBe(false);
+    expect(isMutatingToolCall("browser", { action: "submit_form" })).toBe(true);
+    expect(isMutatingToolCall("browser", { action: "capture_dom" })).toBe(false);
   });
 
   it("plans verification/finalization, evaluates stagnation, and records reflection", () => {

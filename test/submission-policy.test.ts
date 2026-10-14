@@ -52,6 +52,25 @@ describe("submission policy", () => {
     }).status).toBe("pending");
   });
 
+  it("accepts blocked exits without ever engaging the candidate gate (R17)", () => {
+    // No submission: clean release.
+    expect(validateSubmission({ policy: "strict", status: "blocked", observedOutputs: [], verification: [], independentlyVerified: false }).status).toBe("accepted");
+    // Blocker/status marker stuffed into submission: still accepted — the
+    // gate must not start a fight over a marker string.
+    const marker = validateSubmission({
+      policy: "strict",
+      status: "blocked",
+      candidate: "BLOCKED_NO_FLAG_401",
+      observedOutputs: [],
+      verification: [],
+      independentlyVerified: false,
+    });
+    expect(marker.status).toBe("accepted");
+    expect(marker.reason).toContain("does not run for blocked exits");
+    // Completed with a candidate still runs the full gate.
+    expect(validateSubmission({ policy: "strict", status: "completed", candidate: "flag{never_grounded}", observedOutputs: [], verification: [], independentlyVerified: true }).status).toBe("pending");
+  });
+
   it("defaults automated question-bank tasks to strict and keeps other tasks compatible", () => {
     expect(submissionPolicyFor({ metadata: { source: "question-bank" } })).toBe("strict");
     expect(submissionPolicyFor({ metadata: {} })).toBe("advisory");

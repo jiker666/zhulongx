@@ -152,6 +152,29 @@ export function toolParameterDefaults(schema: TSchema): Record<string, unknown> 
   return defaults;
 }
 
+/**
+ * Compact "name: type" summary of a tool's expected arguments, appended to
+ * schema-validation errors. Agents used to learn argument shapes by trial
+ * and error ("evidence expected array" loops, R17 checkpoint feedback);
+ * one line of expected shape ends the guessing.
+ */
+function argumentShapeHint(schema: TSchema): string {
+  const node = schema as unknown as SchemaNode;
+  if (!isSchemaNode(node) || !isSchemaNode(node.properties)) return "";
+  const required = new Set(Array.isArray(node.required) ? node.required.filter((item): item is string => typeof item === "string") : []);
+  const describe = (property: unknown): string => {
+    const field = isSchemaNode(property) ? property as SchemaNode : undefined;
+    if (!field || typeof field.type !== "string") return "value";
+    if (field.type === "array") {
+      const items = isSchemaNode(field.items) && typeof (field.items as SchemaNode).type === "string" ? ` of ${(field.items as SchemaNode).type}` : "";
+      return `array${items}`;
+    }
+    if (field.type === "object") return "object";
+    return String(field.type);
+  };
+  return Object.entries(node.properties as Record<string, unknown>).map(([name, property]) => `${name}: ${describe(property)}${required.has(name) ? "" : " (optional)"}`).join("; ");
+}
+
 function publicToolContent(content: ToolContent[]): unknown[] {
   return content.flatMap((block): unknown[] => {
     if (block.type !== "image") return [block];
@@ -366,7 +389,7 @@ export function createToolCallPipeline(deps: ToolCallPipelineDeps): ToolCallPipe
       const webAction = webReasoning.prepareToolCall(toolCall.toolName, toolCall.args, toolCall.toolCallId);
       if (webAction.duplicate) {
         await audit.append("WEB_ACTION_SKIPPED_DUPLICATE", { actionId: webAction.actionId, toolName: toolCall.toolName }, { source: "policy", actor: "web-action-deduplicator", correlationId: toolCall.toolCallId, parentSequence: requested.sequence });
-        return { block: true, reason: "Duplicate Web action skipped; use new evidence or change strategy. If the endpoint is stateful (rotating captcha/signature, poll target, TTL session — content changes between identical requests), re-observe by adding a cache-buster (append a unique query param like ?_=n7 or a unique header value); identical reads also re-run automatically after 10 minutes." };
+        return { block: true, reason: "Duplicate Web action skipped; use new evidence or change strategy. If the endpoint is stateful (rotating captcha/signature, poll target, TTL session — content changes between identical requests), re-observe by adding a cache-buster (append a unique query param like ?_=n7 or a unique header value); identical reads also re-run automatically after 10 minutes or after any mutating request (login/submit/write) changes server state." };
       }
       const decision = policy.evaluate(toolCall.toolName, toolCall.args, state);
       await audit.append("policy.decision", {
@@ -555,7 +578,8 @@ export function wrapXuanShuTools(options: XuanShuToolAdapterOptions): XuanShuToo
       const parsed = validator.safeParse(args);
       if (!parsed.success) {
         const issue = parsed.error.issues[0];
-        return toolErrorResult(`Invalid tool arguments: ${issue ? `${issue.path.join(".") || "arguments"} ${issue.message}` : "failed schema validation"}`);
+        const hint = argumentShapeHint(source.parameters);
+        return toolErrorResult(`Invalid tool arguments: ${issue ? `${issue.path.join(".") || "arguments"} ${issue.message}` : "failed schema validation"}. Expected arguments for ${source.name}${hint ? `: { ${hint} }` : " (check the tool description)"}. Fix the arguments and call again.`.slice(0, 900));
       }
       // Typebox defaults live outside the SDK-facing shape (see
       // convertProperties); merge them here so tools and the audit trail see

@@ -1,7 +1,7 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
-const apiTarget = "http://127.0.0.1:7318";
+const apiTarget = process.env.XUANSHU_API_TARGET ?? "http://127.0.0.1:7318";
 const apiToken = process.env.XUANSHU_SERVER_TOKEN;
 const apiProxy = {
   target: apiTarget,

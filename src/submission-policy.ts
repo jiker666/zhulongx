@@ -120,6 +120,17 @@ export function validateSubmission(input: SubmissionValidationInput): Submission
     return result(input, "accepted", "Advisory submission policy; runtime recorded the candidate without blocking.", Boolean(candidate), Boolean(candidate && input.verification.some((item) => item.includes(candidate))));
   }
   if (input.status === "completed" && !candidate) return result(input, "pending", "A strict task cannot complete without an explicit submission candidate.", false, false);
+  // A blocked exit is accepted with or without a submission payload: the
+  // candidate verification gate must never engage for blocked tasks. Before
+  // this, agents that stuffed a blocker/status marker into the submission
+  // field bounced off marker/echo rejections for 3-6 consecutive finish_task
+  // calls (29070 tails) — fighting an echo trick into a "real" candidate is
+  // strictly worse than releasing the run cleanly.
+  if (input.status === "blocked") {
+    return result(input, "accepted", candidate
+      ? `Blocked task accepted; the supplied submission ("${candidate.slice(0, 80)}") was recorded but ignored — the verification gate does not run for blocked exits.`
+      : "No submission candidate was declared for a blocked task.", false, false);
+  }
   if (!candidate) return result(input, "accepted", "No submission candidate was declared for a blocked task.", false, false);
   if (IDENTIFIER_ONLY.test(candidate) || DECOY_PREFIX.test(candidate) || SECRET_PREFIX.test(candidate)) {
     return result(input, "rejected", "The candidate has the shape of an identifier or credential, not a task result.", false, false);

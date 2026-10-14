@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { chmod, copyFile, lstat, mkdir, readdir, writeFile } from "node:fs/promises";
 import { basename, join, relative, resolve } from "node:path";
 import { AuditChain } from "./audit.js";
-import { createAgentSession, type AgentDriverEventType, type AgentSession } from "./agent-driver.js";
+import { createAgentSession, type AgentDriverEventType, type AgentSession, type AgentThinkingLevel } from "./agent-driver.js";
 import { classifyChallenge, type ChallengeClassification } from "./challenge-classifier.js";
 import { renderCapabilityContext } from "./capability-ledger.js";
 import { mergeScope } from "./config.js";
@@ -240,6 +240,8 @@ export interface RunOptions {
   signal?: AbortSignal;
   workspaceMode?: "configured" | "attachments-only";
   sharedEvidence?: SharedEvidenceBoard;
+  discipline?: string;
+  thinkingLevel?: AgentThinkingLevel;
   allowedToolEffects?: ToolEffect[];
   contextSections?: Array<{ name: string; content: string }>;
   lineage?: RunLineage & { context: string };
@@ -384,7 +386,7 @@ export class XuanShuRuntime {
         });
     const externalTools = this.overrides.externalTools ?? [];
     const profile = resolveAgentProfile(this.config, externalTools.map((item) => item.descriptor.name));
-    const runThinkingLevel = this.config.runtime.thinkingLevel;
+    const runThinkingLevel = options.thinkingLevel ?? this.config.runtime.thinkingLevel;
     let sandboxReachable = false;
     let sandboxNetwork = "unknown";
     let availablePrograms: string[] = [];
@@ -652,8 +654,7 @@ export class XuanShuRuntime {
         await emit("turn.started", { turn: state.turns });
       } else if (type === "assistant.message") {
         await audit.append("assistant.message", publicMessage(data), { source: "model", actor: "primary-agent", ...(activeModelRequestId ? { correlationId: activeModelRequestId } : {}) });
-        // R14 frontier note: settle paths render persisted state only — mirror the latest assistant text so a
-        // budget-killed run's live reasoning (29070: 7 mid-breakthrough deaths) reaches handoff/board.
+        // R14 frontier note: mirror the latest assistant text so a budget-killed run's live reasoning (29070: 7 mid-breakthrough deaths) reaches handoff/board.
         const text = assistantText((data ?? {}) as Record<string, unknown>);
         if (text.trim()) state.frontierNote = text.trim().slice(-1_600);
       } else if (type === "tool.started") {
@@ -807,7 +808,7 @@ export class XuanShuRuntime {
             unavailablePrograms,
             availablePythonModules: [...(executorHealth.pythonModules ?? [])],
             unavailablePythonModules: [...(executorHealth.missingPythonModules ?? [])],
-          }, { sharedEvidence: Boolean(options.sharedEvidence) }, { id: profile.id, instructions: profile.systemPrompt }),
+          }, { sharedEvidence: Boolean(options.sharedEvidence) }, { id: profile.id, instructions: profile.systemPrompt }, options.discipline),
           modelId: modelConfig.id,
           baseUrl: gateway.routeUrl(runKey),
           thinkingLevel: runThinkingLevel,

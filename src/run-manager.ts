@@ -20,7 +20,7 @@ export class RunManager {
 
   constructor(private readonly runtime: XuanShuRuntime) {}
 
-  start(request: TaskRequest, options: Pick<RunOptions, "workspaceMode" | "sharedEvidence" | "allowedToolEffects" | "contextSections" | "lineage" | "writeup"> = {}): string {
+  start(request: TaskRequest, options: Pick<RunOptions, "workspaceMode" | "sharedEvidence" | "allowedToolEffects" | "contextSections" | "lineage" | "writeup" | "discipline" | "thinkingLevel"> = {}): string {
     const id = randomUUID();
     // Attachments belong to the isolated per-run input mount by default. An
     // operator can still explicitly request the configured workspace when a
@@ -38,6 +38,8 @@ export class RunManager {
         id,
         ...(workspaceMode ? { workspaceMode } : {}),
         ...(options.sharedEvidence ? { sharedEvidence: options.sharedEvidence } : {}),
+        ...(options.discipline ? { discipline: options.discipline } : {}),
+        ...(options.thinkingLevel ? { thinkingLevel: options.thinkingLevel } : {}),
         ...(options.allowedToolEffects ? { allowedToolEffects: options.allowedToolEffects } : {}),
         ...(options.contextSections ? { contextSections: options.contextSections } : {}),
         ...(options.lineage ? { lineage: options.lineage } : {}),
