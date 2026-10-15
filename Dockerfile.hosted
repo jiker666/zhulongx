@@ -48,15 +48,18 @@ RUN npm run build
 FROM ${SANDBOX_BASE}
 USER root
 WORKDIR /app
-COPY tools/arena/tsec.mjs tools/arena/hosted-entrypoint.sh tools/arena/rogue-ldaps.py tools/arena/cve-quickref.md ./tools/arena/
+COPY tools/arena/tsec.mjs tools/arena/hosted-entrypoint.sh tools/arena/rogue-ldaps.py tools/arena/captcha-ocr.py tools/arena/cve-quickref.md ./tools/arena/
 # Headless Chromium (R8, bctf top-6 post-mortem): the #2 efficiency runner's
 # real-browser discipline for JS-rendered/login-gated pages — driven via
 # run_command (chromium --headless --dump-dom / --screenshot) since the
 # heavyweight web-reasoning browser mode is not enabled for CTF runs.
+# tesseract-ocr (R22): the web playbook already tells the agent to OCR with
+# tesseract, but it was never in the image — 30661's rotating-captcha
+# challenge burned its whole budget on manual glyph guessing because of it.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends chromium fonts-liberation fonts-dejavu-core iproute2 \
+    && apt-get install -y --no-install-recommends chromium fonts-liberation fonts-dejavu-core iproute2 tesseract-ocr \
     && rm -rf /var/lib/apt/lists/* \
-    && chromium --version
+    && chromium --version && tesseract --version | head -1
 # Generic web-attack knowledge base (R8, bctf top-6 post-mortem: the #2 agent's
 # core capability was "fingerprint the product, open the matching CVE template,
 # never fuzz a known product from scratch"). nuclei binary + curated template

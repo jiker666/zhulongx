@@ -707,7 +707,7 @@ const ARENA_DISCIPLINE = [
 // the core discipline stays lean and no challenge pays tokens for another
 // class's knowledge.
 const CATEGORY_PACKS = {
-  web: "Web:快速题直奔最短路径(默认/弱凭据、已知 CVE、明显注入点、robots/.git/.env 泄露、报错回显、JS 内嵌密钥);优先序 SSTI→SSRF→文件包含→SQLi→命令注入→反序列化;拿到 RCE/任意读后按序排查 env、/proc/self/environ、/proc/1/environ、/proc/mounts、/flag*、/root、/home、/tmp、应用目录、配置密钥,固定路径扫不到再 find/grep 全盘。已知组件先查沙箱 /opt/kb/cve-quickref.md,再用 nuclei-templates/seclists 复核,严禁把已知产品当未知目标从头 fuzz。JS 渲染/登录页用 chromium --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=/tmp/cp --dump-dom <url>(或 --screenshot=);登录态先复现 cookie 再复用。OCR 用 tesseract <img> stdout --psm 7,失败做放大/灰度/二值化重试一次,严禁无限调参。",
+  web: "Web:快速题直奔最短路径(默认/弱凭据、已知 CVE、明显注入点、robots/.git/.env 泄露、报错回显、JS 内嵌密钥);优先序 SSTI→SSRF→文件包含→SQLi→命令注入→反序列化;拿到 RCE/任意读后按序排查 env、/proc/self/environ、/proc/1/environ、/proc/mounts、/flag*、/root、/home、/tmp、应用目录、配置密钥,固定路径扫不到再 find/grep 全盘。已知组件先查沙箱 /opt/kb/cve-quickref.md,再用 nuclei-templates/seclists 复核,严禁把已知产品当未知目标从头 fuzz。JS 渲染/登录页用 chromium --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=/tmp/cp --dump-dom <url>(或 --screenshot=);登录态先复现 cookie 再复用。OCR 用 tesseract <img> stdout --psm 7,失败做放大/灰度/二值化重试一次,严禁无限调参;验证码会轮换或过期的,取码→识别→提交必须写进同一个脚本一次跑完(候选可调 /workspace/tools/captcha-ocr.py),严禁分步交互式操作让码过期(30661 教训:2 分钟轮换的码,交互式必死)。",
   crypto: "Crypto:先识别原语与结构(hash 长度/块大小/密文格式/参数特征),已知攻击优先于自造;长计算(爆破/格)拆批持久化续算,严禁单命令超时硬扛;先试沙箱 /opt/kb 工具链与常见弱参数再看论文级攻击。",
   pwn: "Pwn:先 file/checksec/识别服务与 libc 版本,已知漏洞优先;交互脚本先本地打通再上远端,长 exploit 拆步验证(每步有可判定输出),失败点固定后逐步收敛,严禁整段盲改重跑。",
   reverse: "Reverse:先识别架构/壳/语言与已知特征;静态先 strings/常量/导入表再反汇编热点函数;反混淆优先匹配通用算法与已知变换,严禁逐指令手撸全部。",
@@ -1287,6 +1287,12 @@ async function solveFanOut(challenge) {
 
     const worker = async (direction, index) => {
       const budgetMin = Math.max(12, Math.round((deadline - Date.now()) / 60_000));
+      // R22: the LAST worker (static re-audit) runs without inherited scratch —
+      // a wrong frame survives every direction change when all siblings inherit
+      // it (30661 bctf2026-24: 25 re-attempts all re-chased the same auth
+      // spiral the first attempt framed); only a context-free re-read of the
+      // original material can catch the frame error itself.
+      const inheritScratch = Boolean(parentRunId) && index < dirs.length - 1;
       const task = buildTask(ready, budgetMin, `${direction}。(同题并行协作纪律:同一题还有兄弟会话在跑,共享黑板互通;开工第一步先 read_shared_evidence 看兄弟已发布的事实与死端,严禁重走已排除的路径;自己每排除一条路径或验证一个关键事实,立即用 checkpoint 记录假设状态——证伪的假设会实时广播给兄弟会话,也可直接 publish_shared_evidence;并发连接≤2、只读优先,严禁重启或破坏性操作)`);
       const created = await xuanshu("/v1/runs", {
         method: "POST",
@@ -1299,14 +1305,14 @@ async function solveFanOut(challenge) {
           // spread temperature — low runs the high-probability path, high
           // reaches for structurally different chains.
           thinkingLevel: ["low", "medium", "high"][index % 3],
-          ...(parentRunId ? { lineage: { parentRunId } } : {}),
+          ...(inheritScratch ? { lineage: { parentRunId } } : {}),
         }),
       });
       if (created.status !== 202) throw new Error(`fan-out run create failed: ${created.status}`);
       const runId = created.json.id;
       runIds.push(runId);
       writeLastrun(code, runId);
-      console.log(`[tsec] fan-out worker ${index + 1}/${dirs.length} run ${runId.slice(0, 8)}: ${direction.slice(0, 70)}`);
+      console.log(`[tsec] fan-out worker ${index + 1}/${dirs.length} run ${runId.slice(0, 8)}${inheritScratch ? "" : " (context-free)"}: ${direction.slice(0, 70)}`);
       const terminal = await watchRun(runId, Math.max(60_000, deadline - Date.now()), code);
       await bankKnowledge(code, runId); // R10: per-worker lessons also reach the shared ledger
       if (!terminal) {
@@ -1548,6 +1554,16 @@ function pickNext(items, role = "mixed", forceFresh = false) {
   if (fresh.length > 0 && warmPickStreak >= 2 && role !== "prospector" && !forceFresh) {
     const top = fresh.slice().sort((a, b) => (b.total_score ?? 0) - (a.total_score ?? 0))[0];
     return { ...top };
+  }
+  // R22 endgame coverage: with the clock draining, an unopened medium/easy
+  // single converts faster than another warm hard re-grind — the ranked pool
+  // keeps ranking the warm frontier first, which is how 30661 first-opened
+  // three codes in the final 15 minutes (they never got a real attempt).
+  if (currentPhase === "endgame" && role !== "prospector" && !forceFresh) {
+    const freshShallow = fresh
+      .filter((c) => (c.flag_count ?? 1) === 1 && (DIFFICULTY_RANK[String(c.difficulty ?? "").toLowerCase()] ?? 3) <= 1)
+      .sort((a, b) => (b.total_score ?? 0) - (a.total_score ?? 0));
+    if (freshShallow.length > 0) return { ...freshShallow[0] };
   }
   // R16 value/endgame ordering: past the opening sweep the pool is ordered by
   // expected score rate, not easy-before-hard (rank 1 vs 5 came from three

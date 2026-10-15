@@ -232,6 +232,27 @@ const RECORDS: readonly WebKnowledgeRecord[] = [
       "do not exfiltrate cookies, tokens, personal data, or browser storage as proof",
     ],
   },
+  {
+    name: "rsc_flight_payloads",
+    signals: [
+      "responses or server-action bodies carry React Server Components flight lines ($-prefixed typed fields such as $D, $K, $Q, $F)",
+      "a request field named \"0\"/\"1\" echoes back transformed values, indicating server-side flight decoding of submitted fields",
+      "a build-specific id like \"module#export\" resolves through a server manifest lookup",
+    ],
+    tests: [
+      "probe each $ prefix with benign literals to learn which server-side constructor it maps to (date, form key, map/set, promise, server reference)",
+      "for server-reference ids, enumerate valid ids from shipped client chunk bundles rather than brute-forcing the id space",
+      "pair every probe with a control value to separate decoding from plain reflection",
+    ],
+    verification: [
+      "the same typed prefix deterministically maps to the same constructor across repeated requests",
+      "an id lifted from a shipped bundle resolves while random ids fail with a distinguishable error",
+    ],
+    pitfalls: [
+      "manifest and server-action ids are build-specific — ids from another deployment prove nothing",
+      "edge content filters and app-level filters are different layers: a 403 from the edge does not mean the app rejected the payload; separate them with equivalent encodings before concluding a filter is absolute",
+    ],
+  },
 ];
 
 export function searchWebKnowledge(query: string, limit = 5): WebKnowledgeRecord[] {

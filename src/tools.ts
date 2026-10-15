@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, lstat, open, opendir, readFile, realpath, writeFile } from "node:fs/promises";
 import { createConnection, type Socket } from "node:net";
 import { basename, dirname, relative, resolve } from "node:path";
+import { Agent } from "undici";
 import { Type } from "typebox";
 import type { AuditChain } from "./audit.js";
 import { extractZipArchive, searchArtifact } from "./artifact-tools.js";
@@ -855,6 +856,13 @@ export function createToolSet(context: ToolContext): ToolSet {
   const tcpSessions = new Map<string, TcpSession>();
   const httpSessions = new Map<string, HttpSessionMemory>();
   const httpReplays = new Map<string, HttpReplayMemory>();
+  // R22: serve http_request over connections that are never reused — several
+  // gateway/sidecar stacks (30661 live-run: envoy-fronted Node app) select a
+  // flaky upstream for POSTs on warm keep-alive connections while a fresh
+  // connection reliably reaches the app; the agent had to hand-roll raw TCP
+  // to work around it. A 1ms keep-alive timeout gives every request a fresh
+  // connection without changing anything else about the fetch.
+  const httpFreshConnection = new Agent({ keepAliveTimeout: 1, keepAliveMaxTimeout: 1, pipelining: 0 });
   const httpResponses = new Map<string, HttpResponseMemory>();
   const browserRuntime = state.webReasoning?.browser ? new ControlledBrowserRuntime({ runId: state.id, scope, state: state.webReasoning.browser, ...(browser ? { config: browser } : {}) }) : undefined;
   if (browserRuntime) void audit.append(browserRuntime.capability.available ? "BROWSER_CAPABILITY_DETECTED" : "BROWSER_CAPABILITY_UNAVAILABLE", { provider: browserRuntime.capability.provider, browserType: browserRuntime.capability.browserType, reason: browserRuntime.capability.reason });
@@ -1608,6 +1616,12 @@ export function createToolSet(context: ToolContext): ToolSet {
         const sessionId = input.sessionId ?? "default";
         const session = sessionId ? (httpSessions.get(sessionId) ?? (() => { const created = { cookies: new Map<string, string>() }; httpSessions.set(sessionId, created); return created; })()) : undefined;
         const requestHeaders: Record<string, string> = { ...(replay?.headers ?? {}), ...(input.headers ?? {}) };
+        // R22: default to a browser-ish User-Agent when none was set — the
+        // same live run showed UA-bearing requests passing where bare
+        // undici defaults were dropped at the edge.
+        if (!Object.keys(requestHeaders).some((key) => key.toLowerCase() === "user-agent")) {
+          requestHeaders["User-Agent"] = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+        }
         if (session && !Object.keys(requestHeaders).some((key) => key.toLowerCase() === "cookie") && session.cookies.size > 0) {
           requestHeaders.Cookie = [...session.cookies.entries()].map(([name, value]) => `${name}=${value}`).join("; ");
         }
@@ -1644,7 +1658,8 @@ export function createToolSet(context: ToolContext): ToolSet {
           const nextInit: RequestInit = { ...requestInit, method: currentMethod };
           if (currentBody) nextInit.body = currentBody.buffer.slice(currentBody.byteOffset, currentBody.byteOffset + currentBody.byteLength) as ArrayBuffer;
           else delete nextInit.body;
-          response = await fetch(currentUrl, nextInit);
+          // R22: fresh connection per request (see httpFreshConnection above).
+          response = await fetch(currentUrl, { ...nextInit, dispatcher: httpFreshConnection } as RequestInit);
           if (!input.followRedirects || response.status < 300 || response.status >= 400) break;
           if (redirectCount >= 5) throw new Error("HTTP redirect limit exceeded");
           const location = response.headers.get("location");

@@ -89,6 +89,9 @@ mkdir -p /workspace/input /workspace/work /data/runs /run/xuanshu /app/workspace
 # agent hand-rolls BER encoding byte-by-byte against the target's error oracle
 # and burns its whole budget on encoding bugs (live-run 28506).
 cp /app/tools/arena/rogue-ldaps.py /workspace/tools/rogue-ldaps.py
+# R22: rotating-captcha single-shot helper (fetch + tesseract OCR in one
+# process) — 30661's captcha challenge died to interactive-loop staleness.
+cp /app/tools/arena/captcha-ocr.py /workspace/tools/captcha-ocr.py
 
 echo "[hosted] starting ctf-sandbox executor"
 node dist/cli.js sandbox --config config/container.yaml &
