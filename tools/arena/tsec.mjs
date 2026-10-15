@@ -1499,15 +1499,32 @@ function pickNext(items, role = "mixed", forceFresh = false) {
         || ((DIFFICULTY_RANK[String(b.difficulty ?? "").toLowerCase()] ?? 3) - (DIFFICULTY_RANK[String(a.difficulty ?? "").toLowerCase()] ?? 3))
         || ((b.total_score ?? 0) - (a.total_score ?? 0)))
     : null;
-  // Early-run harvest sweep (R5, live-run 28506 lesson): while ≥4 fresh
-  // easy/medium singles sit unopened, EVERY lane takes them first — fast-track
-  // conversions run 3-5 min at 200-500pts (04/07/20: 950pts in 9 lane-minutes)
-  // while two lanes pinned on two hard singles produced zero for 100+ minutes.
-  // Once the shallow pool is drained below the threshold, normal role logic
-  // (deep grind / prospector) resumes.
-  const sweepPool = fresh
+  // R5's fresh-only early sweep (≥4 threshold) is superseded by the R23
+  // shallow gate below — same pool, no threshold, retries included.
+  // R23 harvest-first (operator ruling 2026-10-15): bank every obtainable
+  // point BEFORE any hard grinding — while ANY unsolved easy/medium single
+  // exists (fresh or retryable), every lane picks from this pool. 30661's
+  // arithmetic: easy/medium singles convert in 2-12min across runs (13: 2min,
+  // 29: 4min, 30: 3.5min, 02: 12min, 11 retry: 7min) while hard metronomes
+  // burned ~44 slots, and three shallow codes never got a real episode.
+  // Order within the pool: warm-with-evidence first (one miss + banked facts
+  // is the cheapest certain conversion), then fresh by score, then bare
+  // re-probes; fewest misses first inside a stage so one stubborn code
+  // rotates instead of monopolizing.
+  const shallowPool = eligible
     .filter((c) => (c.flag_count ?? 1) === 1 && (DIFFICULTY_RANK[String(c.difficulty ?? "").toLowerCase()] ?? 3) <= 1)
-    .sort((a, b) => (b.total_score ?? 0) - (a.total_score ?? 0));
+    .map((c) => {
+      const done = ledger.done[c.unique_code];
+      let stage = 1; // fresh: untapped points
+      if (done) {
+        const hasEvidence = existsSync(boardPath(c.unique_code))
+          && (boardFor(c.unique_code).facts?.length ?? 0) > 0;
+        stage = hasEvidence ? 0 : 2; // proven lead / bare re-probe
+      }
+      return { c, stage, misses: done?.misses ?? 0, score: c.total_score ?? 0 };
+    })
+    .sort((a, b) => a.stage - b.stage || a.misses - b.misses || b.score - a.score)
+    .map((x) => x.c);
   // Truncated-attempt rescue (R6): the 28506 tail was a conveyor of half-
   // attempts — single-flag challenges whose ONLY run banked a rich board
   // (>=3 facts) and then hit the clock mid-attack (27 was still planning its
@@ -1531,9 +1548,7 @@ function pickNext(items, role = "mixed", forceFresh = false) {
     const done = ledger.done[c.unique_code];
     return done && (done.misses ?? 0) >= 1;
   }).sort((a, b) => (b.total_score ?? 0) - (a.total_score ?? 0));
-  const pool = sweepPool.length >= 4
-    ? sweepPool
-    : hintRetryPool.length > 0 ? hintRetryPool
+  const pool = hintRetryPool.length > 0 ? hintRetryPool
     : richRetryPool.length > 0 ? richRetryPool
     : prospectorPool
     ?? (role === "deep" && deepPool.length > 0 ? deepPool
@@ -1546,7 +1561,9 @@ function pickNext(items, role = "mixed", forceFresh = false) {
   // (R4's prospector "hard fresh first" never actually fired — found in the
   // R5 live-run review). Those pools keep their own order; everything else
   // falls through to the shared value-density sort.
-  if (sweepPool.length >= 4) return sweepPool[0];
+  // R23: the shallow gate below covers the old R5 sweep (fresh-only, ≥4
+  // threshold) and its R22 endgame extension — every phase, every role.
+  if (shallowPool.length > 0) return { ...shallowPool[0] };
   // R17 coverage floor: every challenge earns an initial recon slice — after
   // two consecutive warm picks, a never-attempted challenge outranks even an
   // A-bucket frontier (29070: four codes were never opened at all while warm
@@ -1555,16 +1572,8 @@ function pickNext(items, role = "mixed", forceFresh = false) {
     const top = fresh.slice().sort((a, b) => (b.total_score ?? 0) - (a.total_score ?? 0))[0];
     return { ...top };
   }
-  // R22 endgame coverage: with the clock draining, an unopened medium/easy
-  // single converts faster than another warm hard re-grind — the ranked pool
-  // keeps ranking the warm frontier first, which is how 30661 first-opened
-  // three codes in the final 15 minutes (they never got a real attempt).
-  if (currentPhase === "endgame" && role !== "prospector" && !forceFresh) {
-    const freshShallow = fresh
-      .filter((c) => (c.flag_count ?? 1) === 1 && (DIFFICULTY_RANK[String(c.difficulty ?? "").toLowerCase()] ?? 3) <= 1)
-      .sort((a, b) => (b.total_score ?? 0) - (a.total_score ?? 0));
-    if (freshShallow.length > 0) return { ...freshShallow[0] };
-  }
+  // R22's endgame fresh-coverage branch is subsumed by the R23 shallow gate
+  // above (every phase, every role) — removed rather than kept unreachable.
   // R16 value/endgame ordering: past the opening sweep the pool is ordered by
   // expected score rate, not easy-before-hard (rank 1 vs 5 came from three
   // high-value tail flags). A/B buckets fan out into parallel racers; the
