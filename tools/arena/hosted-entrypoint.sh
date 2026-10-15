@@ -40,6 +40,15 @@ DPSK_BASE="${DEEPSEEK_ANTHROPIC_BASE:-http://api.deepseek.com.tsecbench.gw/anthr
 if [ "$DUAL_KEYS" = "1" ]; then
   export XUANSHU_MODEL_API_KEY="${XUANSHU_MODEL_API_KEY:-$BIGMODEL_API_KEY}"
   export XUANSHU_FAST_MODEL_API_KEY="${XUANSHU_FAST_MODEL_API_KEY:-$DEEPSEEK_API_KEY}"
+  # R19 rescue wiring: container.yaml ships the fallback block with a
+  # placeholder id/baseUrl (dpsk-4.1 @ api.deepseek.com); point it at the
+  # same platform DeepSeek gateway the fast lanes use so gateway failover
+  # and modelRole:"fallback" rescue dispatch actually reach a live model.
+  export XUANSHU_FALLBACK_API_KEY="${XUANSHU_FALLBACK_API_KEY:-$DEEPSEEK_API_KEY}"
+  sed -i -e "s|^    id: dpsk-4.1|    id: ${DPSK_ID}|" \
+         -e "s|^    name: DPSK 4.1|    name: DeepSeek Rescue|" \
+         -e "s|^    baseUrl: https://api.deepseek.com/anthropic|    baseUrl: ${DPSK_BASE}|" \
+         config/container.yaml
 elif [ -n "${BIGMODEL_API_KEY:-}" ]; then
   export XUANSHU_MODEL_API_KEY="${XUANSHU_MODEL_API_KEY:-$BIGMODEL_API_KEY}"
 elif [ -n "${DEEPSEEK_API_KEY:-}" ]; then

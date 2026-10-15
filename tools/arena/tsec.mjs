@@ -1599,6 +1599,9 @@ async function maybePullHint(code, misses) {
 // so it does not start blind. Alternates afterwards: every other attempt gets
 // the second lens while GLM keeps the majority.
 function rescueModelRole(misses) {
+  // No fallback provisioned (env unset or inert) → never dispatch the
+  // fallback role: runtime rejects the run outright and burns the slot.
+  if (!process.env.XUANSHU_FALLBACK_API_KEY) return undefined;
   if (!hintDue(misses)) return undefined;
   const past = Math.max(0, misses - (currentPhase === "endgame" ? 1 : 2));
   return past % 2 === 0 ? "fallback" : undefined;
