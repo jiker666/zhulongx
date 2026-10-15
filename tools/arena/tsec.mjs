@@ -1125,6 +1125,10 @@ async function solveOneInner(challenge) {
     }
     const solved = verdict?.correct === true;
     fastFails = 0; // any real submit outcome clears the infra-wall signature
+    { // ...and the per-code metronome streak (R21)
+      const ledger = readLedger();
+      if (ledger.done[code]?.fastSettles) { ledger.done[code] = { ...ledger.done[code], fastSettles: 0 }; writeLedger(ledger); }
+    }
     if (solved) {
       recordAccepted(code, submission);
       // A banked flag on a multi-flag challenge is NOT done: pickNext filters
@@ -1176,6 +1180,24 @@ async function solveOneInner(challenge) {
   if (Date.now() - startedAt < 5 * 60_000) {
     fastFails += 1;
     console.warn(`[tsec] fast no-submission settle (${fastFails}/3) — infra suspect, miss NOT counted`);
+    // R21 metronome guard (30661: bctf2026-24 relapsed into an ~80s
+    // launch-die-relaunch loop — a poisoned board keeps ranking the code top
+    // while every episode exits without a submission, and because fast
+    // settles do not count misses the fresh-eyes arming line is never
+    // reached, so the same inherited context is retried forever). Two
+    // consecutive fast no-submission settles bench the CODE for 25min in the
+    // shared ledger — every lane sees it — instead of recycling the lane.
+    {
+      const ledger = readLedger();
+      const streak = (ledger.done[code]?.fastSettles ?? 0) + 1;
+      if (streak >= 2) {
+        ledger.done[code] = { ...ledger.done[code], fastSettles: 0, quarantineUntil: Date.now() + 25 * 60_000 };
+        console.warn(`[tsec] quarantining ${code} for 25min (metronome guard: ${streak} consecutive fast settles)`);
+      } else {
+        ledger.done[code] = { ...ledger.done[code], fastSettles: streak };
+      }
+      writeLedger(ledger);
+    }
     if (fastFails >= 3) throw Object.assign(new Error("suspected infra wall (quota/model)"), { infraWall: true });
     return false;
   }
@@ -1437,6 +1459,9 @@ function pickNext(items, role = "mixed", forceFresh = false) {
       if (item.is_completed || claimFor(item.unique_code)) return false;
       const done = ledger.done[item.unique_code];
       if (done?.status === "solved") return false;
+      // R21 metronome quarantine: benched after 2 consecutive fast no-submission
+      // settles; expiry re-arms it (a relapse re-quarantines after 2 more).
+      if (done?.quarantineUntil && Date.now() < done.quarantineUntil) return false;
       // R17: no miss/spent parking (operator ruling: budgets are pure
       // downside; unlimited tokens, solve instead of park). Ordering — not
       // eligibility — decides who runs next; reviveParked cooldowns remain
