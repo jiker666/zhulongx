@@ -253,6 +253,47 @@ const RECORDS: readonly WebKnowledgeRecord[] = [
       "edge content filters and app-level filters are different layers: a 403 from the edge does not mean the app rejected the payload; separate them with equivalent encodings before concluding a filter is absolute",
     ],
   },
+{
+name: "spring_boot_actuator_triage",
+signals: [
+"a Spring Boot application exposes management endpoints (e.g. /actuator, /actuator/env, /actuator/health)",
+"the application root returns 404 while framework fingerprints (whitelabel error page, actuator hal links) identify Spring Boot",
+"an actuator endpoint listing mentions mappings, beans, or conditions",
+],
+tests: [
+"enumerate the real business surface FIRST: read the mappings endpoint and list every registered route, then probe those routes — it answers where the app lives without any exploitation",
+"check the env endpoint's visible values: if the goal value is absent, treat the env-hiding hypothesis as refuted and move on",
+"escalate by cost ladder only: business routes → their parameters (fetch/lookup/proxy) → direct read/SSRF → local sensitive files → memory dumps or RCE chains last",
+],
+verification: [
+"a route discovered via mappings responds distinctively rather than with the framework 404, confirming the real application surface",
+"each escalation step cites the observation that motivated it",
+],
+pitfalls: [
+"sanitized values (e.g. ******) are framework-default masking, not evidence that the goal value hides there",
+"management endpoints existing is not evidence the goal lives in them — an env listing without the goal value is negative evidence, not a lead",
+"jumping from a low-evidence hypothesis (goal in env vars or JVM args) straight to high-cost exploitation (heap dumps, JMX bridges, deserialization RCE) burns the budget while the real business route is never enumerated",
+],
+},
+{
+name: "fingerprint_known_pattern_recall",
+signals: [
+"a distinctive application or product name surfaces (spring.application.name, app title, cookie names, generator metadata) that is not a generic scaffold",
+"the framework fingerprint is strong enough to name a product family or a known public exercise pattern",
+],
+tests: [
+"treat the distinctive name as a lookup key: recall the canonical attack class for that product or known exercise family (url-parameter fetch → SSRF, lookup/resolve features → JNDI, admin-gated helpers → auth bypass) and follow that main line first",
+"combine the recalled main line with route enumeration: locate the business endpoints that expose the recalled parameter or feature",
+"once the recalled pattern's primitive is confirmed present, commit to it before opening new research threads",
+],
+verification: [
+"the recalled attack class matches the observed surface (the named parameter actually fetches or loads the recalled resource type)",
+],
+pitfalls: [
+"holding a strong fingerprint while continuing free-form speculation wastes the budget — a distinctive name converts research into pattern matching",
+"the recalled pattern still needs its primitive verified on this deployment: recall sets the priority order, not the conclusion",
+],
+},
 ];
 
 export function searchWebKnowledge(query: string, limit = 5): WebKnowledgeRecord[] {
