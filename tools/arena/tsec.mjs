@@ -506,6 +506,9 @@ async function bankKnowledge(code, runId) {
 // us. Staleness exceeds the 46-min warm budget + container wait so a crashed
 // lane's claim cannot strand a challenge for long.
 const CLAIM_STALE_MS = 55 * 60_000;
+// R6/R27: cumulative lane-minutes a hard single may burn before it is done
+// for good — gated in pickNext AND reviveParked (double gate).
+const HARD_SPENT_CAP = 90;
 function claimPath(code) { return resolve(WORK_DIR, `claim-${code}.json`); }
 function claimFor(code) {
   try {
@@ -707,7 +710,7 @@ const ARENA_DISCIPLINE = [
 // the core discipline stays lean and no challenge pays tokens for another
 // class's knowledge.
 const CATEGORY_PACKS = {
-  web: "Web:快速题直奔最短路径(默认/弱凭据、已知 CVE、明显注入点、robots/.git/.env 泄露、报错回显、JS 内嵌密钥);优先序 SSTI→SSRF→文件包含→SQLi→命令注入→反序列化;拿到 RCE/任意读后按序排查 env、/proc/self/environ、/proc/1/environ、/proc/mounts、/flag*、/root、/home、/tmp、应用目录、配置密钥,固定路径扫不到再 find/grep 全盘。已知组件先查沙箱 /opt/kb/cve-quickref.md,再用 nuclei-templates/seclists 复核,严禁把已知产品当未知目标从头 fuzz。JS 渲染/登录页用 chromium --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=/tmp/cp --dump-dom <url>(或 --screenshot=);登录态先复现 cookie 再复用。OCR 用 tesseract <img> stdout --psm 7,失败做放大/灰度/二值化重试一次,严禁无限调参;验证码会轮换或过期的,取码→识别→提交必须写进同一个脚本一次跑完(候选可调 /workspace/tools/captcha-ocr.py),严禁分步交互式操作让码过期(30661 教训:2 分钟轮换的码,交互式必死)。管理面与指纹决策纪律:发现框架管理面(如 actuator)先拉路由清单(如 /actuator/mappings)枚举真实业务接口再谈利用,按 业务路由→参数→直接读/SSRF→本地敏感文件→RCE/堆转储 的成本阶梯推进;管理面字段脱敏(****)是框架默认行为不是线索,env 已可见且无目标值即排除该假设;持有强指纹(独特应用名/产品名)先匹配该产品已知打法主线(取 URL 参数→SSRF、lookup/JNDI、admin 鉴权绕过等),严禁从"管理面存在"直接跳堆内存/RCE 类高成本利用。",
+  web: "Web:快速题直奔最短路径(默认/弱凭据、已知 CVE、明显注入点、robots/.git/.env 泄露、报错回显、JS 内嵌密钥);优先序 SSTI→SSRF→文件包含→SQLi→命令注入→反序列化;拿到 RCE/任意读后按序排查 env、/proc/self/environ、/proc/1/environ、/proc/mounts、/flag*、/root、/home、/tmp、应用目录、配置密钥,固定路径扫不到再 find/grep 全盘。已知组件先查沙箱 /opt/kb/cve-quickref.md,再用 nuclei-templates/seclists 复核,严禁把已知产品当未知目标从头 fuzz。JS 渲染/登录页用 chromium --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --user-data-dir=/tmp/cp --dump-dom <url>(或 --screenshot=);登录态先复现 cookie 再复用。OCR 用 tesseract <img> stdout --psm 7,失败做放大/灰度/二值化重试一次,严禁无限调参;验证码会轮换或过期的,取码→识别→提交必须写进同一个脚本一次跑完(候选可调 /workspace/tools/captcha-ocr.py),严禁分步交互式操作让码过期(30661 教训:2 分钟轮换的码,交互式必死)。管理面与指纹决策纪律:发现框架管理面(如 actuator)先拉路由清单(如 /actuator/mappings)枚举真实业务接口再谈利用,按 业务路由→参数→直接读/SSRF→本地敏感文件→RCE/堆转储 的成本阶梯推进;管理面字段脱敏(****)是框架默认行为不是线索,env 已可见且无目标值即排除该假设;持有强指纹(独特应用名/产品名)先匹配该产品已知打法主线(取 URL 参数→SSRF、lookup/JNDI、admin 鉴权绕过等),严禁从“管理面存在”直接跳堆内存/RCE 类高成本利用。",
   crypto: "Crypto:先识别原语与结构(hash 长度/块大小/密文格式/参数特征),已知攻击优先于自造;长计算(爆破/格)拆批持久化续算,严禁单命令超时硬扛;先试沙箱 /opt/kb 工具链与常见弱参数再看论文级攻击。",
   pwn: "Pwn:先 file/checksec/识别服务与 libc 版本,已知漏洞优先;交互脚本先本地打通再上远端,长 exploit 拆步验证(每步有可判定输出),失败点固定后逐步收敛,严禁整段盲改重跑。",
   reverse: "Reverse:先识别架构/壳/语言与已知特征;静态先 strings/常量/导入表再反汇编热点函数;反混淆优先匹配通用算法与已知变换,严禁逐指令手撸全部。",
@@ -968,17 +971,17 @@ async function solveOneInner(challenge) {
   const rank = DIFFICULTY_RANK[String(ready.difficulty ?? "").toLowerCase()] ?? 3;
   await maybePullHint(code, effMisses); // R9: pull before the task build; misses>=1 means the unaided shot already failed
   const isChain = (ready.flag_count ?? 1) > 1;
-  // R17 budget ladder: stop-loss caps are GONE (operator ruling 10-14: token
-  // cost is not a constraint, parking/truncating a challenge is pure loss);
-  // per-attempt budgets remain only as slot-rotation under the platform's
-  // 3-slot/6h wall. Warm singles rose 35->46 — the largest 29070 miss class
-  // was breakthroughs truncated by the run clock, not by difficulty.
+  // R27 budget ladder: the 29070 shape — the deep 60min extension needs two
+  // burned attempts AND headroom under HARD_SPENT_CAP; warm singles back to
+  // 35 (46-min episodes traded away coverage; the scarce resource is
+  // lane-minutes under the 3-slot/6h wall, not tokens).
   const deepTier = isChain || rank === 2 || laneRole === "deep";
+  const spentMin = ledgerEntry(code).spentMin ?? 0;
   const budgetMin = laneRole === "prospector"
     ? (rank === 2 ? 30 : rank === 0 ? 20 : 30) // prospector: surface map budgets
     : deepTier
-      ? (misses >= 1 ? 60 : 46)
-      : warm ? 46 : rank === 0 ? 20 : rank === 1 ? 30 : 40;
+      ? (misses >= 2 && (isChain || spentMin + 60 <= HARD_SPENT_CAP) ? 60 : 46)
+      : warm ? 35 : rank === 0 ? 20 : rank === 1 ? 30 : 40;
   const budgetMs = budgetMin * 60_000;
   // R20 lifecycle registration: re-stamp the watch with the real budget
   // horizon once it is known (the provisional claim-time stamp is a ceiling).
@@ -1469,8 +1472,10 @@ async function harvestFlags(code, terminal) {
   }
 }
 
-// (R17) attemptCap/hardSpentCapped were removed with the stop-loss ruling;
-// miss counts no longer gate eligibility anywhere — ordering only.
+// R27 (operator ruling 2026-10-16): the 29070 decision core is back — miss
+// caps, the R6 hard-single lane-minute cap, and the R5 ≥4-fresh sweep gate
+// eligibility again (R17's removal let revive/hint cycles reset miss budgets
+// indefinitely; 30661's hard metronomes burned ~44 slots that way).
 function pickNext(items, role = "mixed", forceFresh = false) {
   const ledger = readLedger();
   const eligible = items
@@ -1481,10 +1486,28 @@ function pickNext(items, role = "mixed", forceFresh = false) {
       // R21 metronome quarantine: benched after 2 consecutive fast no-submission
       // settles; expiry re-arms it (a relapse re-quarantines after 2 more).
       if (done?.quarantineUntil && Date.now() < done.quarantineUntil) return false;
-      // R17: no miss/spent parking (operator ruling: budgets are pure
-      // downside; unlimited tokens, solve instead of park). Ordering — not
-      // eligibility — decides who runs next; reviveParked cooldowns remain
-      // the only anti-spin guard for genuinely broken environments.
+      // Partial chains, warm handoffs and boards with carried facts all get
+      // the 2-miss retry window: each banked flag is sunk analysis the next
+      // flag builds on. A pulled hint extends it to 4 — the deduction is
+      // sunk cost, and parking a hint-carrying challenge wastes it (observed:
+      // parked at 2/6 flags with a live exploit lead still unexploited).
+      // existsSync avoids lazy-migration writes in a read path.
+      // Round 3 corrected the cap for SINGLE-flag challenges: attempts 3-4
+      // went 0/14 — the sunk-cost argument only holds for chains with banked
+      // flags, so singles cap at 2, or 3 with a paid hint.
+      const hinted = existsSync(hintPath(item.unique_code));
+      const singleCap = hinted ? 3 : 2;
+      const cap = (item.flag_count ?? 1) > 1
+        ? (hinted ? 4 : (handoffFor(item.unique_code) || existsSync(boardPath(item.unique_code)) || done?.status === "partial" ? 2 : 1))
+        : (handoffFor(item.unique_code) || existsSync(boardPath(item.unique_code)) ? singleCap : 1);
+      if ((done?.misses ?? 0) >= cap) return false;
+      // Hard-single lane-minute cap (R6): attempts alone never stopped the
+      // 2026-10-12 hards — revive/hint cycles kept resetting the miss budget
+      // while 438 lane-minutes went to zero flags. A hard single that already
+      // consumed HARD_SPENT_CAP minutes of this host's lanes is done for good.
+      const hardSingle = (item.flag_count ?? 1) === 1
+        && (DIFFICULTY_RANK[String(item.difficulty ?? "").toLowerCase()] ?? 3) >= 2;
+      if (hardSingle && (done?.spentMin ?? 0) >= HARD_SPENT_CAP) return false;
       return true;
     });
   // Lane roles (R4: 3 deep + 1 prospector):
@@ -1512,32 +1535,18 @@ function pickNext(items, role = "mixed", forceFresh = false) {
         || ((DIFFICULTY_RANK[String(b.difficulty ?? "").toLowerCase()] ?? 3) - (DIFFICULTY_RANK[String(a.difficulty ?? "").toLowerCase()] ?? 3))
         || ((b.total_score ?? 0) - (a.total_score ?? 0)))
     : null;
-  // R5's fresh-only early sweep (≥4 threshold) is superseded by the R23
-  // shallow gate below — same pool, no threshold, retries included.
-  // R23 harvest-first (operator ruling 2026-10-15): bank every obtainable
-  // point BEFORE any hard grinding — while ANY unsolved easy/medium single
-  // exists (fresh or retryable), every lane picks from this pool. 30661's
-  // arithmetic: easy/medium singles convert in 2-12min across runs (13: 2min,
-  // 29: 4min, 30: 3.5min, 02: 12min, 11 retry: 7min) while hard metronomes
-  // burned ~44 slots, and three shallow codes never got a real episode.
-  // Order within the pool: warm-with-evidence first (one miss + banked facts
-  // is the cheapest certain conversion), then fresh by score, then bare
-  // re-probes; fewest misses first inside a stage so one stubborn code
-  // rotates instead of monopolizing.
-  const shallowPool = eligible
+  // Early-run harvest sweep (R5, live-run 28506 lesson): while ≥4 fresh
+  // easy/medium singles sit unopened, EVERY lane takes them first — fast-track
+  // conversions run 3-5 min at 200-500pts (04/07/20: 950pts in 9 lane-minutes)
+  // while two lanes pinned on two hard singles produced zero for 100+ minutes.
+  // Once the shallow pool is drained below the threshold, normal role logic
+  // (deep grind / prospector) resumes.
+  // R27: the ≥4 fresh threshold is restored — R23's unconditional gate
+  // (retries included, every phase, every role) kept all lanes out of the
+  // deep pool while any shallow re-probe remained.
+  const sweepPool = fresh
     .filter((c) => (c.flag_count ?? 1) === 1 && (DIFFICULTY_RANK[String(c.difficulty ?? "").toLowerCase()] ?? 3) <= 1)
-    .map((c) => {
-      const done = ledger.done[c.unique_code];
-      let stage = 1; // fresh: untapped points
-      if (done) {
-        const hasEvidence = existsSync(boardPath(c.unique_code))
-          && (boardFor(c.unique_code).facts?.length ?? 0) > 0;
-        stage = hasEvidence ? 0 : 2; // proven lead / bare re-probe
-      }
-      return { c, stage, misses: done?.misses ?? 0, score: c.total_score ?? 0 };
-    })
-    .sort((a, b) => a.stage - b.stage || a.misses - b.misses || b.score - a.score)
-    .map((x) => x.c);
+    .sort((a, b) => (b.total_score ?? 0) - (a.total_score ?? 0));
   // Truncated-attempt rescue (R6): the 28506 tail was a conveyor of half-
   // attempts — single-flag challenges whose ONLY run banked a rich board
   // (>=3 facts) and then hit the clock mid-attack (27 was still planning its
@@ -1561,7 +1570,9 @@ function pickNext(items, role = "mixed", forceFresh = false) {
     const done = ledger.done[c.unique_code];
     return done && (done.misses ?? 0) >= 1;
   }).sort((a, b) => (b.total_score ?? 0) - (a.total_score ?? 0));
-  const pool = hintRetryPool.length > 0 ? hintRetryPool
+  const pool = sweepPool.length >= 4
+    ? sweepPool
+    : hintRetryPool.length > 0 ? hintRetryPool
     : richRetryPool.length > 0 ? richRetryPool
     : prospectorPool
     ?? (role === "deep" && deepPool.length > 0 ? deepPool
@@ -1574,35 +1585,19 @@ function pickNext(items, role = "mixed", forceFresh = false) {
   // (R4's prospector "hard fresh first" never actually fired — found in the
   // R5 live-run review). Those pools keep their own order; everything else
   // falls through to the shared value-density sort.
-  // R23: the shallow gate below covers the old R5 sweep (fresh-only, ≥4
-  // threshold) and its R22 endgame extension — every phase, every role.
-  if (shallowPool.length > 0) return { ...shallowPool[0] };
-  // R17 coverage floor: every challenge earns an initial recon slice — after
-  // two consecutive warm picks, a never-attempted challenge outranks even an
-  // A-bucket frontier (29070: four codes were never opened at all while warm
-  // retries cycled). The prospector lane is already fresh-only.
-  if (fresh.length > 0 && warmPickStreak >= 2 && role !== "prospector" && !forceFresh) {
-    const top = fresh.slice().sort((a, b) => (b.total_score ?? 0) - (a.total_score ?? 0))[0];
-    return { ...top };
-  }
-  // R22's endgame fresh-coverage branch is subsumed by the R23 shallow gate
-  // above (every phase, every role) — removed rather than kept unreachable.
-  // R16 value/endgame ordering: past the opening sweep the pool is ordered by
-  // expected score rate, not easy-before-hard (rank 1 vs 5 came from three
-  // high-value tail flags). A/B buckets fan out into parallel racers; the
-  // endgame fans out every pick (Cruiser tail solving). Breadth keeps the
-  // R4-R9 pool precedence unchanged.
-  if (currentPhase !== "breadth") {
-    const ranked = eligible.slice().sort((a, b) => expectedScoreRate(b) - expectedScoreRate(a));
-    if (ranked.length > 0) {
-      const bucket = evidenceBucket(ranked[0]);
-      return { ...ranked[0], fanout: currentPhase === "endgame" || bucket === "A" || bucket === "B" };
-    }
-  }
+  // R27: the 29070 return ladder — sweep, hint-armed revive, rich retry,
+  // prospector, then the shared value-density sort. R17's warmPickStreak
+  // injection and R16's expectedScoreRate reordering came out with the
+  // 2026-10-16 regression audit (they traded lane continuity — 29070's
+  // 22-full-solve shape — for rate-hopping). Endgame/A/B-bucket fanout stays
+  // (0c06fc3 尾盘蜂群).
+  if (sweepPool.length >= 4) return sweepPool[0];
   if (hintRetryPool.length > 0) return { ...hintRetryPool[0], fanout: true };
   if (richRetryPool.length > 0) return { ...richRetryPool[0], fanout: true };
   if (prospectorPool) return prospectorPool[0];
-  return pool.sort(byPriority)[0] ?? null;
+  const pick = pool.sort(byPriority)[0];
+  if (!pick) return null;
+  return { ...pick, fanout: currentPhase === "endgame" || evidenceBucket(pick) === "A" || evidenceBucket(pick) === "B" };
 }
 
 // Hint gate (R9 -> R17 operator policy): prefer the no-hint full score, buy
@@ -1771,6 +1766,11 @@ function reviveParked(items) {
     // challenges is 1/12th of the remaining clock spent waiting.
     const cooldown = currentPhase === "endgame" ? 10 * 60_000 : REVIVE_COOLDOWN_MS;
     if (now - Date.parse(done.revivedAt ?? 0) < cooldown) continue; // NaN (never revived) passes
+    // R27: a hard single that already burned its HARD_SPENT_CAP lane-minutes
+    // is done for good — reviving it is how 30661's metronomes burned ~44 slots.
+    const hardSingle = (item.flag_count ?? 1) === 1
+      && (DIFFICULTY_RANK[String(item.difficulty ?? "").toLowerCase()] ?? 3) >= 2;
+    if (hardSingle && (done.spentMin ?? 0) >= HARD_SPENT_CAP) continue;
     ledger.done[item.unique_code] = { ...done, misses: 0, revivedAt: new Date().toISOString() };
     revived.push(item.unique_code);
   }

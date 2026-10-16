@@ -31,6 +31,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # R27: arena drivers are plain .mjs — tsc never sees them. A syntax
+      # error here shipped a dead driver into oci-e7af66e (run 31910 booted
+      # zero sessions). Gate every image build on node --check.
+      - name: Syntax-gate arena tooling
+        run: |
+          shopt -s nullglob
+          files=(tools/arena/*.mjs)
+          echo "syntax-checking ${#files[@]} arena script(s)"
+          for f in "${files[@]}"; do node --check "$f" && echo "OK $f"; done
+
       - name: Build slim ctf-sandbox base (amd64, no ghidra)
         run: |
           docker build --platform linux/amd64 -f Dockerfile.ctf-sandbox \
