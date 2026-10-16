@@ -4,6 +4,12 @@ model:
   name: GLM 5.3
   baseUrl: https://open.bigmodel.cn/api/anthropic
   apiKeyEnv: XUANSHU_MODEL_API_KEY
+  # R25 multi-account key pool (10h finals): hosted-entrypoint fills
+  # XUANSHU_MODEL_API_KEYS with the comma-joined GLM coding-plan keys from
+  # the panel's BIGMODEL_API_KEY / BIGMODEL_API_KEY_2. The gateway
+  # round-robins the pool and rotates on quota exhaustion before the
+  # self-funded DPSK rescue is touched; unset = single-key behaviour.
+  apiKeyPoolEnv: XUANSHU_MODEL_API_KEYS
   reasoning: true
   contextWindow: 400000
   # Rescue model (no-hint finals): transparent gateway failover when GLM

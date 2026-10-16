@@ -26,6 +26,8 @@ export interface ModelConfig {
   /** Anthropic-protocol endpoint; the loopback model gateway forwards here. */
   baseUrl: string;
   apiKeyEnv: string;
+  /** R25: env holding a comma-separated same-model key pool (multi-account quota rotation). Optional. */
+  apiKeyPoolEnv?: string;
   reasoning?: boolean;
   /** Optional because the SDK manages its own request sizing; used only for gate estimates. */
   contextWindow?: number;

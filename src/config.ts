@@ -76,6 +76,7 @@ function validateConfig(value: unknown, configPath: string): AppConfig {
       name: requireString(model.name, "model.name"),
       baseUrl: requireString(model.baseUrl, "model.baseUrl").replace(/\/$/, ""),
       apiKeyEnv: requireString(model.apiKeyEnv, "model.apiKeyEnv"),
+      ...(model.apiKeyPoolEnv === undefined ? {} : { apiKeyPoolEnv: requireString(model.apiKeyPoolEnv, "model.apiKeyPoolEnv") }),
       ...(model.reasoning === undefined ? {} : { reasoning: Boolean(model.reasoning) }),
       ...(contextWindow === undefined ? {} : { contextWindow }),
       ...(authScheme ? { authScheme: authScheme as NonNullable<AppConfig["model"]["authScheme"]> } : {}),

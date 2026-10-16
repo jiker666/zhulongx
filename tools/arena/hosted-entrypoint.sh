@@ -34,6 +34,22 @@ if [ -n "${BIGMODEL_API_KEY:-}" ] && [ -n "${DEEPSEEK_API_KEY:-}" ]; then
   DUAL_KEYS=1
 fi
 
+# R25 multi-account GLM key pool (10h finals): two coding-plan-max accounts
+# whose 5h quota windows cannot cover the run alone. The panel fills
+# BIGMODEL_API_KEY (account 1) and optional BIGMODEL_API_KEY_2 (account 2);
+# BIGMODEL_API_KEYS (raw comma list) overrides both. The gateway round-robins
+# the pool and rotates on quota exhaustion before the self-funded DPSK rescue
+# is ever touched (user ruling 2026-10-16: GLM first, DPSK strictly reserve).
+GLM_POOL=""
+if [ -n "${BIGMODEL_API_KEYS:-}" ]; then
+  GLM_POOL="$BIGMODEL_API_KEYS"
+elif [ -n "${BIGMODEL_API_KEY:-}" ]; then
+  GLM_POOL="${BIGMODEL_API_KEY}${BIGMODEL_API_KEY_2:+,$BIGMODEL_API_KEY_2}"
+fi
+if [ -n "$GLM_POOL" ]; then
+  export XUANSHU_MODEL_API_KEYS="$GLM_POOL"
+fi
+
 DPSK_ID="${DEEPSEEK_MODEL_ID:-deepseek-reasoner}"
 DPSK_BASE="${DEEPSEEK_ANTHROPIC_BASE:-http://api.deepseek.com.tsecbench.gw/anthropic}"
 
@@ -117,10 +133,15 @@ node -e "fetch('http://127.0.0.1:7318/health').then(r=>process.exit(r.ok?0:1)).c
 # :7319 carries the fast lanes (sweep/prospector) on DeepSeek while the deep
 # grinders stay on the proven GLM. Each server has its own rate gate and its
 # own upstream key, so the per-key gateway quota holds. Falls back to the
-# single server if :7319 fails to come up.
+# single server if :7319 fails to come up. NOTE (user ruling 2026-10-16): the
+# DeepSeek key is self-funded, so this split is OPT-IN — TSEC_DPSK_MODE=lanes.
+# Default reserve mode keeps every lane on the GLM key pool at :7318; DPSK
+# answers only through gateway failover (R19) and rescue dispatch.
+DPSK_MODE="${TSEC_DPSK_MODE:-reserve}"
 FAST_BASE="http://127.0.0.1:7318"
-if [ "$DUAL_KEYS" = "1" ]; then
+if [ "$DUAL_KEYS" = "1" ] && [ "$DPSK_MODE" = "lanes" ]; then
   sed -e "s|^  port: 7318|  port: 7319|" \
+      -e "s|^  apiKeyPoolEnv: XUANSHU_MODEL_API_KEYS|  apiKeyPoolEnv: XUANSHU_FAST_MODEL_API_KEYS|" \
       -e "s|^  id: glm-5.3|  id: ${DPSK_ID}|" \
       -e "s|^  name: GLM 5.3|  name: DeepSeek Fast|" \
       -e "s|^  baseUrl: https://open.bigmodel.cn/api/anthropic|  baseUrl: ${DPSK_BASE}|" \

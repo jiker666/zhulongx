@@ -11,7 +11,7 @@ import { ExperienceStore, renderExperienceContext } from "./experience.js";
 import { renderRunHandoff } from "./handoff.js";
 import { normalizeTask, renderTaskContext } from "./input.js";
 import { renderTriageSection, triageAttachments } from "./artifact-triage.js";
-import { fallbackUpstreamFromConfig, gatewayTextQuery, startModelGateway, type ModelGateway, type ModelGatewayUpstream, type ModelRouteOptions } from "./model-gateway.js";
+import { fallbackUpstreamFromConfig, gatewayTextQuery, keyPoolUpstreamsFromConfig, startModelGateway, type ModelGateway, type ModelGatewayUpstream, type ModelRouteOptions } from "./model-gateway.js";
 import { PolicyEngine } from "./policy.js";
 import { classifyProviderError } from "./provider-errors.js";
 import { filterProfileTools, narrowToolsForCategory, resolveAgentProfile, validateProfileCapabilities } from "./profiles.js";
@@ -264,7 +264,7 @@ export class XuanShuRuntime {
 
   private ensureGateway(): Promise<ModelGateway> {
     if (this.overrides.gateway) return Promise.resolve(this.overrides.gateway);
-    this.gatewayPromise ??= startModelGateway({ fallbackUpstream: fallbackUpstreamFromConfig(this.config.modelFallback) });
+    this.gatewayPromise ??= startModelGateway({ fallbackUpstream: fallbackUpstreamFromConfig(this.config.modelFallback), keyPool: keyPoolUpstreamsFromConfig(this.config.model) });
     return this.gatewayPromise;
   }
 
@@ -324,6 +324,7 @@ export class XuanShuRuntime {
     const writeupKey = `${state.id}:writeup:manual`;
     gateway.setRoute(writeupKey, {
       upstream: this.buildUpstream(modelConfig, apiKey, headers),
+      useKeyPool: !this.overrides.sessionModel,
       // Rate limiting is disabled: no minimum interval or RPM/TPM caps. The
       // gateway still audits every request and accounts actual token usage.
       limits: UNLIMITED_MODEL_LIMITS,
@@ -419,6 +420,10 @@ export class XuanShuRuntime {
     const { modelConfig, apiKey, headers: sessionHeaders } = options.modelRole === "fallback" && this.config.modelFallback
       ? { modelConfig: this.config.modelFallback, apiKey: process.env[this.config.modelFallback.apiKeyEnv], headers: undefined as Record<string, string> | undefined }
       : this.effectiveModel();
+    // R25 key pool eligibility: only the configured primary model rides the
+    // multi-account pool — session-model overrides and rescue-role runs keep
+    // their own single credentials.
+    const poolEligible = options.modelRole !== "fallback" && !this.overrides.sessionModel;
     const audit = new AuditChain(join(runDirectory, "audit.jsonl"), id);
     // Challenge-type recognition runs before any category consumer (playbook, tool
     // narrowing, experience retrieval, web gate) reads the task, so a missing or
@@ -431,6 +436,7 @@ export class XuanShuRuntime {
         gateway.setRoute(classifyKey, {
           upstream: this.buildUpstream(modelConfig, apiKey, sessionHeaders),
           limits: UNLIMITED_MODEL_LIMITS,
+          useKeyPool: poolEligible,
         });
         try {
           classification = await classifyChallenge(task, {
@@ -593,6 +599,7 @@ export class XuanShuRuntime {
     let activeModelRequestId: string | undefined;
     const routeOptions: ModelRouteOptions = {
       upstream: this.buildUpstream(modelConfig, apiKey, sessionHeaders),
+      useKeyPool: poolEligible,
       limits,
       audit,
       emit: (event) => emit(event.type, event.data),

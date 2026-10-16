@@ -27,7 +27,7 @@ import { EvaluationLedger, type EvaluationAttempt } from "./evaluation-ledger.js
 import { DISCLOSURE_REASON_LABELS, DisclosureLedger, DisclosureLedgerError } from "./disclosure-ledger.js";
 import { CapabilityLedger } from "./capability-ledger.js";
 import { KnowledgeStore, type KnowledgeTrust } from "./knowledge-store.js";
-import { fallbackUpstreamFromConfig, startModelGateway, type ModelGateway } from "./model-gateway.js";
+import { fallbackUpstreamFromConfig, keyPoolUpstreamsFromConfig, startModelGateway, type ModelGateway } from "./model-gateway.js";
 import { EnterpriseStore } from "./enterprise/store.js";
 import { GuardStore } from "./enterprise/guard.js";
 import { NotifyStore } from "./enterprise/notify.js";
@@ -1164,7 +1164,7 @@ export async function startApiServer(
   // One loopback gateway per API process: every embedded agent session and
   // writeup subprocess routes through it, so credential injection, request
   // gating, and model audit stay centralized. Owned here unless injected.
-  const gateway = dependencies.gateway ?? await startModelGateway({ fallbackUpstream: fallbackUpstreamFromConfig(config.modelFallback) });
+  const gateway = dependencies.gateway ?? await startModelGateway({ fallbackUpstream: fallbackUpstreamFromConfig(config.modelFallback), keyPool: keyPoolUpstreamsFromConfig(config.model) });
   const { server, manager, manualJobs, manualUploads, agentWorker, workflowWorker, adaptiveCampaigns, closeStreams } = createApiServer(config, { ...dependencies, gateway });
   await adaptiveCampaigns.resumePending();
   await new Promise<void>((resolveListen, reject) => {

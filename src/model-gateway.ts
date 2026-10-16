@@ -58,6 +58,12 @@ export interface ModelRouteOptions {
   emit?: (event: ModelRouteEvent) => void | Promise<void>;
   /** Extra model.context fields per request (turn counter, model info, thinking level). */
   contextMeta?: () => Record<string, unknown>;
+  /**
+   * R25 key pool: opt this route into the gateway's same-model key pool
+   * (multi-account quota rotation). Default off — session-model and rescue
+   * routes keep their own single credentials.
+   */
+  useKeyPool?: boolean;
 }
 
 export type GatewayFetch = (input: string | URL, init?: RequestInit & { dispatcher?: unknown }) => Promise<Response>;
@@ -67,10 +73,27 @@ export interface ModelGatewayOptions {
   fetch?: GatewayFetch;
   /** Rescue upstream (DPSK etc.): transparently takes over when the primary errors or is rate-limited. */
   fallbackUpstream?: ModelGatewayUpstream | undefined;
+  /**
+   * R25 same-model key pool (multi-account quota rotation, competition 10h
+   * finals): every entry shares the primary endpoint with its own API key.
+   * Requests round-robin across healthy keys and rotate on 429/5xx/network
+   * failures inside the same request — before the rescue upstream (self-funded
+   * DPSK) is ever touched. Auth failures (401/403) disable that key only.
+   * Undefined/empty = pre-R25 single-key behaviour.
+   */
+  keyPool?: ModelGatewayUpstream[] | undefined;
   /** Consecutive primary failures before requests skip the primary for cooldownMs. */
   failureThreshold?: number | undefined;
   /** How long a degraded primary is bypassed before the next request probes it again. */
   cooldownMs?: number | undefined;
+}
+
+/** One rotating account in the R25 key pool: the upstream plus its own health. */
+interface PoolKeyState {
+  upstream: ModelGatewayUpstream;
+  consecutiveFailures: number;
+  cooldownUntil: number;
+  disabled: boolean;
 }
 
 interface ModelRouteState {
@@ -97,6 +120,15 @@ class RequestBodyError extends Error {
 
 function joinUrl(baseUrl: string, pathWithQuery: string): string {
   return `${baseUrl.replace(/\/+$/, "")}${pathWithQuery.startsWith("/") ? pathWithQuery : `/${pathWithQuery}`}`;
+}
+
+function forwardedResponseHeaders(upstream: Response): Record<string, string> {
+  const headers: Record<string, string> = {};
+  for (const name of FORWARDED_RESPONSE_HEADERS) {
+    const value = upstream.headers.get(name);
+    if (value) headers[name] = value;
+  }
+  return headers;
 }
 
 function pickHeader(request: IncomingMessage, name: string): string | undefined {
@@ -258,11 +290,16 @@ export class ModelGateway {
   private readonly fallbackUpstream: ModelGatewayUpstream | undefined;
   private readonly failureThreshold: number;
   private readonly cooldownMs: number;
+  private readonly pool: PoolKeyState[] = [];
+  private poolCursor = 0;
   private port = 0;
 
   constructor(options: ModelGatewayOptions = {}) {
     this.gate = options.gate ?? new ModelRequestGate();
     this.fallbackUpstream = options.fallbackUpstream;
+    this.pool = (options.keyPool ?? [])
+      .filter((upstream) => upstream.apiKey)
+      .map((upstream) => ({ upstream, consecutiveFailures: 0, cooldownUntil: 0, disabled: false }));
     this.failureThreshold = options.failureThreshold ?? (Number(process.env.XUANSHU_FAILOVER_THRESHOLD ?? "") || 3);
     this.cooldownMs = options.cooldownMs ?? (Number(process.env.XUANSHU_FAILOVER_COOLDOWN_MS ?? "") || 300_000);
     const customFetch = options.fetch;
@@ -491,54 +528,77 @@ export class ModelGateway {
       });
     };
     /**
-     * One-shot endurance failover: a primary failure (network throw / 5xx /
-     * 429) is transparently retried once on the rescue upstream BEFORE any
-     * response byte is written, so the SDK never sees the outage; after
-     * failureThreshold consecutive failures the route bypasses the primary
-     * entirely for cooldownMs. 4xx is a config problem failover cannot fix
-     * and passes through untouched.
+     * One-shot endurance failover + R25 key pool. Primary candidates: a
+     * pool-opted route draws them from a gateway-wide round-robin over
+     * same-model keys — a 429/5xx/network failure on one account rotates to
+     * the next account inside the SAME request, before the rescue upstream
+     * (self-funded DPSK) is ever touched; auth failures (401/403) disable
+     * that key only. When every candidate fails retriably, the request takes
+     * one rung up the R19 ladder: route failure counter, then cooldown
+     * bypass, then one transparent rescue attempt. Without a pool the ladder
+     * is the pre-R25 single-candidate one. Non-retriable 4xx is a config
+     * problem failover cannot fix and passes through untouched.
      */
     const failoverActive = this.fallbackUpstream !== undefined && route.fallbackUntil > Date.now();
-    const primaryChoice = failoverActive ? this.fallbackUpstream! : route.options.upstream;
-    let upstreamResponse: Response;
-    try {
-      upstreamResponse = await attemptUpstream(primaryChoice);
-      const retriable = upstreamResponse.status >= 500 || upstreamResponse.status === 429;
-      if (retriable) {
-        if (!failoverActive) {
-          route.consecutiveFailures += 1;
-          if (route.consecutiveFailures >= this.failureThreshold) route.fallbackUntil = Date.now() + this.cooldownMs;
-        }
-        if (this.fallbackUpstream && primaryChoice === route.options.upstream) {
-          await upstreamResponse.body?.cancel().catch(() => undefined);
-          void route.options.emit?.({
-            type: "model.failover",
-            data: { reason: `HTTP ${upstreamResponse.status}`, consecutiveFailures: route.consecutiveFailures, fallbackUntil: route.fallbackUntil },
-          });
-          try {
-            upstreamResponse = await attemptUpstream(this.fallbackUpstream);
-          } catch {
-            this.sendJson(response, 502, { type: "error", error: { type: "api_error", message: "Upstream model request failed (primary and fallback)" } });
-            return;
-          }
-        }
-      } else if (!failoverActive) {
-        route.consecutiveFailures = 0;
+    const poolActive = this.pool.length > 0 && route.options.useKeyPool === true && !failoverActive;
+    const candidates: ModelGatewayUpstream[] = failoverActive
+      ? [this.fallbackUpstream!]
+      : poolActive
+        ? this.poolCandidates()
+        : [route.options.upstream];
+    let upstreamResponse: Response | undefined;
+    let lastPrimaryError: { status: number; text: string; headers: Record<string, string> } | undefined;
+    let primaryFailed = false;
+    for (const candidate of candidates) {
+      let attempted: Response;
+      try {
+        attempted = await attemptUpstream(candidate);
+      } catch {
+        primaryFailed = true;
+        if (poolActive) this.notePoolFailure(candidate, "network");
+        continue;
       }
-    } catch {
-      if (!failoverActive && this.fallbackUpstream) {
+      const credentialFailure = poolActive && (attempted.status === 401 || attempted.status === 403);
+      if (attempted.status >= 500 || attempted.status === 429 || credentialFailure) {
+        primaryFailed = true;
+        lastPrimaryError = { status: attempted.status, text: await attempted.text(), headers: forwardedResponseHeaders(attempted) };
+        if (poolActive) this.notePoolFailure(candidate, `HTTP ${attempted.status}`);
+        continue;
+      }
+      upstreamResponse = attempted;
+      if (!failoverActive) {
+        route.consecutiveFailures = 0;
+        if (poolActive) this.notePoolSuccess(candidate);
+      }
+      break;
+    }
+    if (!upstreamResponse) {
+      if (!failoverActive && primaryFailed) {
         route.consecutiveFailures += 1;
         if (route.consecutiveFailures >= this.failureThreshold) route.fallbackUntil = Date.now() + this.cooldownMs;
         void route.options.emit?.({
           type: "model.failover",
-          data: { reason: "network", consecutiveFailures: route.consecutiveFailures, fallbackUntil: route.fallbackUntil },
+          data: {
+            reason: poolActive ? "pool exhausted" : lastPrimaryError ? `HTTP ${lastPrimaryError.status}` : "network",
+            ...(poolActive ? { poolSize: this.pool.length } : {}),
+            consecutiveFailures: route.consecutiveFailures,
+            fallbackUntil: route.fallbackUntil,
+          },
         });
+      }
+      if (this.fallbackUpstream && !failoverActive) {
         try {
           upstreamResponse = await attemptUpstream(this.fallbackUpstream);
         } catch {
           this.sendJson(response, 502, { type: "error", error: { type: "api_error", message: "Upstream model request failed (primary and fallback)" } });
           return;
         }
+      } else if (lastPrimaryError) {
+        // No rescue upstream (or the request already ran on it): surface the
+        // upstream's own error untouched so the SDK retry ladder can react.
+        response.writeHead(lastPrimaryError.status, { "content-type": "application/json", ...lastPrimaryError.headers });
+        response.end(lastPrimaryError.text);
+        return;
       } else {
         this.sendJson(response, 502, { type: "error", error: { type: "api_error", message: "Upstream model request failed" } });
         return;
@@ -593,6 +653,45 @@ export class ModelGateway {
     }
   }
 
+  /**
+   * R25 pool pick order: active keys round-robin (healthy first), then
+   * cooling keys sorted by soonest expiry as a last resort — when every key
+   * is cooling, probing the soonest one still prefers a refilled free-tier
+   * window over spending rescue quota.
+   */
+  private poolCandidates(): ModelGatewayUpstream[] {
+    const now = Date.now();
+    const active = this.pool.filter((entry) => !entry.disabled);
+    if (active.length === 0) return [];
+    this.poolCursor = (this.poolCursor + 1) % active.length;
+    const ordered = active.map((_, index) => active[(this.poolCursor + index) % active.length]!);
+    const healthy = ordered.filter((entry) => entry.cooldownUntil <= now);
+    const cooling = ordered.filter((entry) => entry.cooldownUntil > now).sort((a, b) => a.cooldownUntil - b.cooldownUntil);
+    return [...healthy, ...cooling].map((entry) => entry.upstream);
+  }
+
+  private notePoolFailure(candidate: ModelGatewayUpstream, reason: string): void {
+    const state = this.pool.find((entry) => entry.upstream === candidate);
+    if (!state) return;
+    if (reason === "HTTP 401" || reason === "HTTP 403") {
+      if (!state.disabled) {
+        state.disabled = true;
+        // Slot index only — key material never reaches logs or audit records.
+        console.warn(`[model-gateway] key-pool slot ${this.pool.indexOf(state)} disabled (${reason}) and excluded from rotation`);
+      }
+      return;
+    }
+    state.consecutiveFailures += 1;
+    if (state.consecutiveFailures >= this.failureThreshold) state.cooldownUntil = Date.now() + this.cooldownMs;
+  }
+
+  private notePoolSuccess(candidate: ModelGatewayUpstream): void {
+    const state = this.pool.find((entry) => entry.upstream === candidate);
+    if (!state) return;
+    state.consecutiveFailures = 0;
+    state.cooldownUntil = 0;
+  }
+
   private sendJson(response: ServerResponse, status: number, value: unknown, emptyBody = false): void {
     if (response.headersSent || response.writableEnded || response.destroyed) {
       response.end();
@@ -621,6 +720,30 @@ export function fallbackUpstreamFromConfig(model: { baseUrl: string; id: string;
     ...(model.authScheme ? { authScheme: model.authScheme } : {}),
     modelId: model.id,
   };
+}
+
+/**
+ * R25 multi-account key pool from model.apiKeyPoolEnv: a comma-separated list
+ * of same-plan API keys (10h finals: two GLM coding-plan accounts whose 5h
+ * windows cannot cover the run alone). Each key becomes a pool upstream on
+ * the primary endpoint; the gateway drains the windows in parallel
+ * (round-robin) and rotates on quota exhaustion before the self-funded
+ * rescue model is ever touched. Undefined/empty pool env → undefined →
+ * single-key behaviour.
+ */
+export function keyPoolUpstreamsFromConfig(
+  model: { baseUrl: string; id: string; apiKeyPoolEnv?: string; authScheme?: "bearer" | "api-key" } | undefined,
+): ModelGatewayUpstream[] | undefined {
+  if (!model?.apiKeyPoolEnv) return undefined;
+  const raw = process.env[model.apiKeyPoolEnv] ?? "";
+  const keys = [...new Set(raw.split(",").map((key) => key.trim()).filter(Boolean))];
+  if (keys.length === 0) return undefined;
+  return keys.map((apiKey) => ({
+    baseUrl: model.baseUrl,
+    apiKey,
+    ...(model.authScheme ? { authScheme: model.authScheme } : {}),
+    modelId: model.id,
+  }));
 }
 
 export async function startModelGateway(options?: ModelGatewayOptions): Promise<ModelGateway> {
