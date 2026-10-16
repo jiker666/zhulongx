@@ -1217,18 +1217,29 @@ async function solveOneInner(challenge) {
 // #1 agent spent ~1.4B tokens — token throughput correlates with rank).
 // Directions are generic templates plus this challenge's own board intents
 // (runtime-discovered state, never baked knowledge).
-const FANOUT_WORKERS = 3;
+// TSEC_FANOUT_WORKERS widens a fan-out round (competition-tier GLM gateway
+// accepts ~100 concurrent connections — operator info 2026-10-16; more
+// directed workers per wall-minute is the champion's endgame shape).
+// The endgame auto-swarms to at least 5 regardless of the knob: the #1
+// bctf agent threw 25-30 concurrent workers at its unsolved set in the
+// final minutes; with 100-connection headroom 5 is a conservative floor.
+const FANOUT_WORKERS = Number(process.env.TSEC_FANOUT_WORKERS ?? "") || 3;
 const FANOUT_WALL_MIN = 34;
-function fanoutDirections(code) {
+function fanoutDirections(code, count) {
   const board = boardFor(code);
-  const dirs = [];
+  const base = [];
   const topIntent = board.intents.find((intent) => !intent.done);
-  dirs.push(topIntent
+  base.push(topIntent
     ? `主线深化:严格沿黑板待办意图推进到实际读出 flag——${topIntent.text}`
     : "主线深化:沿黑板已验证事实中最接近 flag 的原语/立足点推进到实际读出 flag,严禁重推已验证内容");
-  dirs.push("横向展开:枚举题面与接口中尚未测试的次要功能面、边缘参数与隐藏路由,寻找主线之外的入口;与黑板上已排除路径严格去重");
-  dirs.push("静态重审:重读题面原文、附件与历史响应差异(错误页/注释/响应头/默认凭据),结合 flag 狩猎清单从静态线索直接定位 flag 来源");
-  return dirs.slice(0, FANOUT_WORKERS);
+  base.push("横向展开:枚举题面与接口中尚未测试的次要功能面、边缘参数与隐藏路由,寻找主线之外的入口;与黑板上已排除路径严格去重");
+  base.push("静态重审:重读题面原文、附件与历史响应差异(错误页/注释/响应头/默认凭据),结合 flag 狩猎清单从静态线索直接定位 flag 来源");
+  const dirs = [];
+  for (let i = 0; i < count; i += 1) {
+    const direction = base[i % base.length];
+    dirs.push(i < base.length ? direction : `${direction}(第${i + 1}路:与同方向兄弟严格分工去重,选它未覆盖的子面)`);
+  }
+  return dirs;
 }
 
 async function solveFanOut(challenge) {
@@ -1254,7 +1265,9 @@ async function solveFanOut(challenge) {
     if (!reachable) { await sleep(10_000); reachable = await probeVpn(addrs); }
     if (!reachable) throw Object.assign(new Error("vpn_unreachable"), { vpnDown: true });
 
-    const dirs = fanoutDirections(code);
+    const workers = Math.max(FANOUT_WORKERS, currentPhase === "endgame" ? 5 : 0);
+    const dirs = fanoutDirections(code, workers);
+    if (workers > 3) console.log(`[tsec] fan-out ${code}: ${workers} directed workers (${currentPhase}${FANOUT_WORKERS > 3 ? `, TSEC_FANOUT_WORKERS=${FANOUT_WORKERS}` : ""})`);
     const deadline = Date.now() + FANOUT_WALL_MIN * 60_000;
     const parentRunId = freshEyes ? null : lastrunFor(code);
     const runIds = [];

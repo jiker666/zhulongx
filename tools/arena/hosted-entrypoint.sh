@@ -126,6 +126,9 @@ if [ "$DUAL_KEYS" = "1" ]; then
       -e "s|^  baseUrl: https://open.bigmodel.cn/api/anthropic|  baseUrl: ${DPSK_BASE}|" \
       -e "s|^  apiKeyEnv: XUANSHU_MODEL_API_KEY|  apiKeyEnv: XUANSHU_FAST_MODEL_API_KEY|" \
       -e "s|^  contextWindow: 400000|  contextWindow: 128000|" \
+      -e "s|^  modelMinIntervalMs: 500$|  modelMinIntervalMs: 5000|" \
+      -e "s|^  modelRequestsPerMinute: 120$|  modelRequestsPerMinute: 54|" \
+      -e "s|^  modelTokensPerMinute: 1000000$|  modelTokensPerMinute: 540000|" \
       config/container.yaml > config/container-fast.yaml
   echo "[hosted] dual-key mode: fast-lane xuanshu server (${DPSK_ID}) on :7319"
   node dist/cli.js serve --config config/container-fast.yaml &

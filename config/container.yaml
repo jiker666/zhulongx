@@ -26,11 +26,16 @@ runtime:
   maxRuntimeMs: 900000
   # R7 (bctf top-6 post-mortem): token throughput tracks rank — the #1 agent
   # burned ~1.4B tokens; our 4-lane single-stream runs could not even reach
-  # the old 48 RPM / 480K TPM gate. Raised to ~10% headroom under the stated
-  # 60 RPM / 600K TPM provider quota to feed 6 lanes + directed fan-out.
-  modelMinIntervalMs: 5000
-  modelRequestsPerMinute: 54
-  modelTokensPerMinute: 540000
+  # the old 48 RPM / 480K TPM gate. Competition-tier scaling (operator info
+  # 2026-10-16): the GLM gateway accepts ~100 concurrent connections at
+  # competition time — the min interval drops 5000ms (12 starts/min global,
+  # the real ceiling) to 500ms (120/min), RPM 54→120, TPM 540K→1M. The
+  # DeepSeek fast server derives from this file but restores the proven
+  # conservative gates (hosted-entrypoint seds them back) — its concurrency
+  # budget is unknown; GLM is the one with headroom.
+  modelMinIntervalMs: 500
+  modelRequestsPerMinute: 120
+  modelTokensPerMinute: 1000000
   maxActionsWithoutCheckpoint: 4
   maxRepeatedAction: 2
   maxOutputBytes: 65536
