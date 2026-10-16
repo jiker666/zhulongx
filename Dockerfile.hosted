@@ -67,8 +67,9 @@ RUN apt-get update \
 # tools/arena/cve-quickref.md. All failures fail the build loudly (CI red)
 # rather than shipping a silently missing capability.
 RUN NUCLEI_VER=3.4.5 \
+    && NUCLEI_ARCH="$(dpkg --print-architecture)" \
     && curl -fsSL --retry 5 -o /tmp/nuclei.zip \
-      "https://github.com/projectdiscovery/nuclei/releases/download/v${NUCLEI_VER}/nuclei_${NUCLEI_VER}_linux_amd64.zip" \
+      "https://github.com/projectdiscovery/nuclei/releases/download/v${NUCLEI_VER}/nuclei_${NUCLEI_VER}_linux_${NUCLEI_ARCH}.zip" \
     && unzip -j -o /tmp/nuclei.zip '*nuclei' -d /usr/local/bin/ \
     && rm /tmp/nuclei.zip \
     && nuclei -version 2>/dev/null | head -1 \
