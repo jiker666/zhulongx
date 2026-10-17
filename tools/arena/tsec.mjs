@@ -431,7 +431,7 @@ function boardFor(code) {
     if (!prior) return { facts: [], intents: [], hints: [] };
     const board = {
       facts: (prior.findings ?? []).map((text) => ({ at: prior.at, from: prior.from, text })),
-      intents: (prior.nextSteps ?? []).map((text) => ({ at: prior.at, text, needs: "" })),
+      intents: (prior.nextSteps ?? []).map((text) => ({ at: prior.at, text, needs: [] })),
       hints: [],
       summary: prior.summary ?? "",
     };
@@ -448,13 +448,35 @@ function boardFrontier(code, text) {
   board.frontier = { at: new Date().toISOString(), text: String(text).slice(0, 600) };
   boardWrite(code, board);
 }
+// R29 Cairn Step admission: a next-step may carry a `needs(<substr>;<substr>)`
+// prefix declaring the prerequisite facts. Ingestion strips the prefix into
+// the intent's needs array; an intent whose needs are not yet board facts is
+// blocked (rendered, never dispatched as next_exact_test) — a step whose
+// causal inputs do not exist yet cannot run, matching the FGS Step rule.
+// Unblocks automatically the moment a matching fact lands.
+function parseNeeds(text) {
+  const raw = String(text ?? "").trim();
+  const m = /^needs\(([^)]*)\)\s*/.exec(raw);
+  if (!m) return { needs: [], text: raw };
+  const needs = m[1].split(/[;；]/).map((s) => s.trim()).filter(Boolean).slice(0, 3);
+  return { needs, text: raw.slice(m[0].length).trim() || raw };
+}
+function needsMet(intent, board) {
+  const needs = Array.isArray(intent?.needs) ? intent.needs : [];
+  if (needs.length === 0) return true;
+  const hay = board.facts.map((f) => String(f.text ?? "").toLowerCase()).join("\n");
+  return needs.every((n) => hay.includes(String(n).toLowerCase()));
+}
 function boardUpdate(code, { facts = [], intents = [], hints = [], solvedIntentSubstr } = {}) {
   const board = boardFor(code);
   const factTexts = new Set(board.facts.map((f) => f.text));
   for (const text of facts) if (!factTexts.has(text)) { board.facts.push({ at: new Date().toISOString(), text }); factTexts.add(text); }
   const intentTexts = new Set(board.intents.map((i) => i.text));
   for (const intent of intents) {
-    if (!intentTexts.has(intent.text)) { board.intents.push({ at: new Date().toISOString(), ...intent }); intentTexts.add(intent.text); }
+    const norm = parseNeeds(intent.text);
+    const carried = Array.isArray(intent.needs) ? intent.needs : [];
+    const merged = { ...intent, text: norm.text, needs: norm.needs.length > 0 ? norm.needs : carried };
+    if (!intentTexts.has(merged.text)) { board.intents.push({ at: new Date().toISOString(), ...merged }); intentTexts.add(merged.text); }
   }
   const hintTexts = new Set(board.hints.map((h) => h.text));
   for (const text of hints) if (!hintTexts.has(text)) { board.hints.push({ at: new Date().toISOString(), by: "operator", text }); hintTexts.add(text); }
@@ -797,10 +819,12 @@ function buildTask(challenge, budgetMinutes, direction, freshEyes = false) {
     lines.push(`- 独立重审:上一方向已多轮未破,本轮刻意不继承其推理链与中间产物——从题面原文与远程环境重新独立审题,建立与黑板待办不同的新主线;EXCLUDED 中的死路仍然严禁重走`);
   } else {
     if (board.frontier?.text) lines.push(`- best_frontier(上一会话被截断时的最后推理,未验证):${board.frontier.text.slice(0, 300)}`);
-    const openIntents = board.intents.filter((i) => !i.done).slice(0, 2);
+    const openIntents = board.intents.filter((i) => !i.done && needsMet(i, board)).slice(0, 2);
+    const blockedIntents = board.intents.filter((i) => !i.done && !needsMet(i, board)).slice(0, 3);
     if (openIntents.length > 0) lines.push(`- next_exact_test(按序执行,完成一个立即 checkpoint 勾选):${openIntents.map((i) => i.text.slice(0, 160)).join(" / ")}`);
+    if (blockedIntents.length > 0) lines.push(`- blocked_steps(前置事实未出现,严禁本轮空转尝试;先推进能产出前置的那一步):${blockedIntents.map((i) => `${i.text.slice(0, 120)}(需:${(Array.isArray(i.needs) ? i.needs : []).join(";")})`).join(" / ")}`);
     if (board.frontier?.text || openIntents.length > 0) lines.push(`- resume_instruction:接续或证伪 best_frontier,严禁从头再来;dead_ends 见 EXCLUDED;动态类事实(会话/cookie/临时地址)跨重启即过期,技术栈/逻辑结论仍有效`);
-    lines.push(`- 串行链纪律:next_exact_test/待办若是强依赖链(后一步依赖前一步的实际产出),本轮只推进【前置已在 VERIFIED FACTS 中】的那一步,完成后立即固化并把下一步写回黑板(next_steps);前置尚不存在的一步严禁空转尝试;只有互不依赖的维度才并行`);
+    lines.push(`- 串行链纪律:强依赖链一次只推进前置已在 VERIFIED FACTS 中的那一步;写 next_steps 时,依赖前步产出的条目加 needs(前置关键词) 前缀——前置未满足的会被标记 blocked 不派发;互不依赖的维度才并行`);
   }
   const priorMisses = readLedger().done[code]?.misses ?? 0;
   if (priorMisses >= 2) {
@@ -1091,7 +1115,7 @@ async function solveOneInner(challenge) {
   // Blackboard: every terminal settle (any status) banks the run's verified
   // results and open intents — a run that dies to budget/wedge no longer
   // takes its mid-run discoveries with it.
-  boardUpdate(code, { facts: findings, intents: nextSteps.map((text) => ({ text, needs: "" })) });
+  boardUpdate(code, { facts: findings, intents: nextSteps.map((text) => ({ text, needs: [] })) });
 
   if (terminal.status === "completed" && submission) {
     // Self-submit world: the agent may have banked every flag already, with
@@ -1244,7 +1268,7 @@ const FANOUT_WALL_MIN = 34;
 function fanoutDirections(code, count) {
   const board = boardFor(code);
   const base = [];
-  const topIntent = board.intents.find((intent) => !intent.done);
+  const topIntent = board.intents.find((intent) => !intent.done && needsMet(intent, board)) ?? board.intents.find((intent) => !intent.done);
   base.push(topIntent
     ? `主线深化:严格沿黑板待办意图推进到实际读出 flag——${topIntent.text}`
     : "主线深化:沿黑板已验证事实中最接近 flag 的原语/立足点推进到实际读出 flag,严禁重推已验证内容");
@@ -1358,7 +1382,7 @@ async function solveFanOut(challenge) {
       writeHandoff(code, { from: runId, at: new Date().toISOString(), summary: `[定向:${direction.slice(0, 40)}] ${String(terminal.summary ?? "").slice(0, 900)}`, findings });
       boardUpdate(code, {
         facts: findings,
-        intents: (Array.isArray(terminal.nextSteps) ? terminal.nextSteps : []).filter((s) => typeof s === "string").slice(0, 4).map((text) => ({ text, needs: "" })),
+        intents: (Array.isArray(terminal.nextSteps) ? terminal.nextSteps : []).filter((s) => typeof s === "string").slice(0, 4).map((text) => ({ text, needs: [] })),
       });
       const submission = terminal.submission ?? null;
       if (terminal.status === "completed" && submission) {
