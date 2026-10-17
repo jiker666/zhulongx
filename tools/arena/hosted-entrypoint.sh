@@ -63,13 +63,16 @@ DPSK_MIN_MS="${DEEPSEEK_MIN_INTERVAL_MS:-500}"
 DPSK_RPM="${DEEPSEEK_RPM:-180}"
 DPSK_TPM="${DEEPSEEK_TPM:-4000000}"
 
-# R30: panel-settable reasoning budget. The SDK session is created with this
+# R30/R32: panel-settable reasoning budget. The SDK session is created with this
 # level once (per-turn downgrade is impossible), so it must be right at boot:
 # max = 61,440-token thinking budget (agent-driver THINKING_BUDGET_TOKENS).
+# R32 ruling (2026-10-17): default MAX — quality per call beats call count on
+# the slow single-key channel; the panel can dial it back with
+# TSEC_THINKING_LEVEL=high if speed becomes the binding constraint.
 # Applied before container-fast.yaml is generated, so both servers inherit it.
-case "${TSEC_THINKING_LEVEL:-high}" in
-  off|minimal|low|medium|high|xhigh|max) THINKING_LEVEL="${TSEC_THINKING_LEVEL:-high}" ;;
-  *) THINKING_LEVEL="high" ;;
+case "${TSEC_THINKING_LEVEL:-max}" in
+  off|minimal|low|medium|high|xhigh|max) THINKING_LEVEL="${TSEC_THINKING_LEVEL:-max}" ;;
+  *) THINKING_LEVEL="max" ;;
 esac
 sed -i "s|^  thinkingLevel: high|  thinkingLevel: ${THINKING_LEVEL}|" config/container.yaml
 

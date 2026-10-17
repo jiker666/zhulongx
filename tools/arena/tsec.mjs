@@ -258,6 +258,12 @@ async function watchRun(runId, deadlineMs, code, baseUrl = XUANSHU_BASE) {
   // under three heavy web grinds that load is what pushed settle-path stops
   // past their budget in 29896. Old servers without /lite fall back once.
   let liteMissing = false;
+  // R32 slot-turnover: every third cycle also poll the PLATFORM's completion
+  // state for this challenge. A run that self-submits its last flag keeps
+  // grinding to budget while the 3-instance cap starves every other lane
+  // (live-run 34998: bctf2026-10 completed 22:08:47, slot freed ~22:20 —
+  // 12 lane-minutes burned after the flag was already banked).
+  let completionChecks = 0;
   while (Date.now() < deadline) {
     await sleep(20_000);
     let poll;
@@ -282,6 +288,16 @@ async function watchRun(runId, deadlineMs, code, baseUrl = XUANSHU_BASE) {
     const status = poll.json?.status ?? poll.json?.state?.status;
     if (poll.status !== 200 || !status) continue;
     console.log(`[xuanshu] ${runId.slice(0, 8)} status=${status}`);
+    if (code && ++completionChecks % 3 === 0) {
+      try {
+        const fresh = (await listChallenges()).find((item) => item.unique_code === code);
+        if (fresh?.is_completed) {
+          console.log(`[tsec] ${code} already complete on the platform — stopping ${runId.slice(0, 8)} early and freeing the slot`);
+          try { await stopRun(runId, baseUrl); } catch { /* already finished */ }
+          return { __platformCompleted: true, progress: fresh.correct_flag_count };
+        }
+      } catch { /* platform hiccup: keep watching the run */ }
+    }
     // Watcher-lite (Cruiser lesson 2026-10-10): record_finding persists into
     // the run state IMMEDIATELY, so mirror new findings onto the board as
     // they land instead of waiting for settle — a wedged or budget-killed
@@ -787,7 +803,7 @@ function buildTask(challenge, budgetMinutes, direction, freshEyes = false) {
     lines.push(`# VERIFIED FACTS(前轮实际验证,直接采信,禁止重推)`);
     if (priorHandoff?.summary && !freshEyes) lines.push(`- 前轮总结:${String(priorHandoff.summary).replace(/\s+/g, " ").slice(0, 240)}`);
     for (const fact of board.facts.filter((f) => !/^已排除假设:/.test(f.text)).slice(-12)) lines.push(`- ${fact.text.slice(0, 260)}`);
-    if (accepted.length > 0) lines.push(`- 已正确提交:${accepted.map((v) => `"${v}"`).join("、")}`);
+    if (accepted.length > 0) lines.push(`- 已正确提交(平台已入账,严禁再交任何值——包括大小写/去包装变体;本轮只为【尚未确认的 flag 槽位】取值并提交):${accepted.map((v) => `"${v}"`).join("、")}`);
     lines.push("");
   }
   // ---- EXCLUDED:已判错值 + 死端 + 跨题教训,结论式一行一条 ----
@@ -1060,6 +1076,17 @@ async function solveOneInner(challenge) {
   console.log(`[tsec] xuanshu run ${runId} queued${parentRunId ? ` (scratch inherited from ${parentRunId.slice(0, 8)})` : ""}`);
 
   const terminal = await watchRun(runId, budgetMs, code);
+  // R32: the platform confirmed completion mid-run (watchRun early stop) —
+  // settle as solved immediately instead of grinding to budget.
+  if (terminal?.__platformCompleted) {
+    try { await bankKnowledge(code, runId); } catch { /* best effort */ }
+    ledgerMark(code, "solved", { progress: terminal.progress ?? challenge.flag_count });
+    ledgerNoteProgress(code, terminal.progress ?? challenge.flag_count);
+    boardClear(code);
+    await closeChallenge(code);
+    await record({ challenge: code, runId, outcome: "platform-completed-early", submission: "self-submitted" });
+    return true;
+  }
   await bankKnowledge(code, runId); // R10: bank lessons + ruled-out hypotheses before settling
   if (!terminal) {
     console.warn(`[tsec] driver budget exhausted; stopping run ${runId}`);
@@ -1240,6 +1267,25 @@ async function solveOneInner(challenge) {
     }
     if (fastFails >= 3) throw Object.assign(new Error("suspected infra wall (quota/model)"), { infraWall: true });
     return false;
+  }
+  // R32: a no-submission settle on a challenge the platform already counts as
+  // complete is a SOLVE mislabeled as a miss (observed in 34998: the run hit
+  // budget after self-submitting; the miss parked a solved challenge and kept
+  // its slot occupied to the close pass). Verify before parking.
+  try {
+    const freshBlocked = (await listChallenges()).find((item) => item.unique_code === code);
+    if (freshBlocked?.is_completed) {
+      console.log(`[tsec] ${code} completed on the platform despite the blocked settle — recording solved`);
+      ledgerMark(code, "solved", { progress: freshBlocked.correct_flag_count });
+      ledgerNoteProgress(code, freshBlocked.correct_flag_count);
+      boardClear(code);
+      await closeChallenge(code);
+      await record({ challenge: code, runId, outcome: "blocked-but-complete", submission: "self-submitted" });
+      return true;
+    }
+  } catch (error) {
+    if (isTaskEnded(error)) throw error;
+    // list hiccup: fall through to the miss path
   }
   ledgerMark(code, "miss");
   await settleMiss(code, challenge); // R9: pay the hint now; release or keep-warm the slot
@@ -1463,7 +1509,11 @@ const byPriority = (a, b) =>
   || ((DIFFICULTY_RANK[String(a.difficulty ?? "").toLowerCase()] ?? 3) - (DIFFICULTY_RANK[String(b.difficulty ?? "").toLowerCase()] ?? 3))
   || (remainingOf(a) - remainingOf(b))
   || ((b.total_score ?? 0) - (a.total_score ?? 0))
-  || ((a.level ?? 0) - (b.level ?? 0));
+  || ((a.level ?? 0) - (b.level ?? 0))
+  // R32: with the 3-instance cap, slot turnover IS the score rate — a
+  // challenge whose container is already up starts instantly; a cold start
+  // costs 1-3 provisioning minutes inside the budget.
+  || ((b.container_status === "available" ? 1 : 0) - (a.container_status === "available" ? 1 : 0));
 
 // Fallback submissions: values the agent verified but could not self-submit
 // (endpoint hiccup, missed turn) surface as VERIFIED_FLAG findings. They are
@@ -1602,7 +1652,8 @@ function pickNext(items, role = "mixed", forceFresh = false, lastResort = false)
     .sort((a, b) =>
         ((DIFFICULTY_RANK[String(a.difficulty ?? "").toLowerCase()] ?? 3) - (DIFFICULTY_RANK[String(b.difficulty ?? "").toLowerCase()] ?? 3))
         || ((chainOf(b) ? 1 : 0) - (chainOf(a) ? 1 : 0))
-        || ((b.total_score ?? 0) - (a.total_score ?? 0)));
+        || ((b.total_score ?? 0) - (a.total_score ?? 0))
+        || ((b.container_status === "available" ? 1 : 0) - (a.container_status === "available" ? 1 : 0)));
   // Truncated-attempt rescue (R6): the 28506 tail was a conveyor of half-
   // attempts — single-flag challenges whose ONLY run banked a rich board
   // (>=3 facts) and then hit the clock mid-attack (27 was still planning its
@@ -1968,12 +2019,12 @@ async function cmdLoop() {
           console.warn("[tsec] solveOne crashed: already_claimed; re-picking in 15s");
           await sleep(15_000);
         } else if (error.slotsBusy) {
-          // R13: a lane that cannot win a container slot stops idling —
-          // every second consecutive hold spends 25 minutes as an extra
-          // directed worker on the strongest already-live challenge (its
-          // container is running; no new slot is claimed).
+          // R13/R32 (50-challenge finals, unlimited quota): a lane that cannot
+          // win a container slot joins the strongest live challenge as a
+          // directed worker on the FIRST hold — under the 3-instance cap the
+          // join pressure IS the multi-agent throughput.
           slotHoldStreak += 1;
-          if (slotHoldStreak >= 2) {
+          if (slotHoldStreak >= 1) {
             try {
               await joinActiveWorker(items);
             } catch (joinError) {
