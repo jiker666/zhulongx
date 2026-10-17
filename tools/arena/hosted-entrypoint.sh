@@ -4,7 +4,7 @@
 #   1. ctf-sandbox executor (CTF toolchain, external network)
 #   2. xuanshu agent server (127.0.0.1:7318; + a DeepSeek fast server on
 #      :7319 when both model keys are configured — R8 dual-model routing)
-#   3. arena driver lanes: 3 deep + 1 prospector + 2 sweep (round-7 lane plan)
+#   3. arena driver lanes: 4 deep + 2 prospector + 2 sweep (R31 8-lane plan)
 #      - 3 deep lanes: hard singles + chains (scratch inheritance, long budgets)
 #      - 1 prospector lane: fresh opens only — compressed probes on any
 #        difficulty to surface quick wins, or map boards for deep lanes.
@@ -55,6 +55,13 @@ DPSK_BASE="${DEEPSEEK_ANTHROPIC_BASE:-http://api.deepseek.com.tsecbench.gw/anthr
 # R30: deepseek-flash (2026-10-17) carries a 1M window; 400000 keeps parity
 # with the GLM-shaped flows and stays far under the real ceiling.
 DPSK_CTX="${DEEPSEEK_CONTEXT_WINDOW:-400000}"
+# R31 user ruling 2026-10-17 (unlimited-quota deepseek-flash key): the R28
+# conservative reasoner gates open up. Flash is fast and unmetered, so the
+# DPSK servers run GLM-class concurrency gates; TPM is raised above 1M so
+# max-thinking runs (400K ctx in + 61K budget) never queue behind the gate.
+DPSK_MIN_MS="${DEEPSEEK_MIN_INTERVAL_MS:-500}"
+DPSK_RPM="${DEEPSEEK_RPM:-180}"
+DPSK_TPM="${DEEPSEEK_TPM:-4000000}"
 
 # R30: panel-settable reasoning budget. The SDK session is created with this
 # level once (per-turn downgrade is impossible), so it must be right at boot:
@@ -86,6 +93,8 @@ elif [ -n "${DEEPSEEK_API_KEY:-}" ]; then
          -e "s|^  name: GLM 5.3|  name: DeepSeek|" \
          -e "s|^  baseUrl: https://open.bigmodel.cn/api/anthropic|  baseUrl: ${DPSK_BASE}|" \
          -e "s|^  contextWindow: 400000|  contextWindow: ${DPSK_CTX}|" \
+         -e "s|^  modelRequestsPerMinute: 120$|  modelRequestsPerMinute: ${DPSK_RPM}|" \
+         -e "s|^  modelTokensPerMinute: 1000000$|  modelTokensPerMinute: ${DPSK_TPM}|" \
          config/container.yaml
 else
   echo "[hosted] FATAL: configure BIGMODEL_API_KEY (GLM) and/or DEEPSEEK_API_KEY in the runtime env panel" >&2
@@ -110,7 +119,12 @@ export CLAUDE_CODE_MAX_OUTPUT_TOKENS=64000
 # bctf top-6 post-mortem showed token throughput tracks rank — #1 burned
 # ~1.4B tokens across 4 models while our 4-lane single-stream runs used a
 # fraction of the quota).
-export ARENA_PARALLEL="${ARENA_PARALLEL:-8}"
+export ARENA_PARALLEL="${ARENA_PARALLEL:-16}"
+# R31 unlimited-quota ruling: raise the per-server run gate from the default
+# 8 to the SDK session ceiling (16) so 8 lanes × fan-out swarms never queue.
+# Each xuanshu server (/v1/runs) gates active runs on this env; two servers
+# in dual-key mode carry up to 32 concurrent runs.
+export XUANSHU_MAX_CONCURRENT_RUNS="${XUANSHU_MAX_CONCURRENT_RUNS:-16}"
 
 mkdir -p /workspace/input /workspace/work /data/runs /run/xuanshu /app/workspace/tsec /workspace/tools
 # Generic capability seeded into the sandbox-shared workspace (R5): a rogue
@@ -164,10 +178,10 @@ if [ "$DUAL_KEYS" = "1" ] && [ "$DPSK_MODE" = "main" ]; then
   export XUANSHU_FAST_FALLBACK_API_KEY="$DEEPSEEK_API_KEY"
   export XUANSHU_DPSK_MAIN_API_KEY="$DEEPSEEK_API_KEY"
   export XUANSHU_FALLBACK_API_KEY="$BIGMODEL_API_KEY"
-  sed -i -e "s|^  id: glm-5.3|  id: ${DPSK_ID}|"          -e "s|^  name: GLM 5.3|  name: DeepSeek Main|"          -e "s|^  baseUrl: https://open.bigmodel.cn/api/anthropic|  baseUrl: ${DPSK_BASE}|"          -e "s|^  apiKeyEnv: XUANSHU_MODEL_API_KEY|  apiKeyEnv: XUANSHU_DPSK_MAIN_API_KEY|"          -e "s|^  apiKeyPoolEnv: XUANSHU_MODEL_API_KEYS|  apiKeyPoolEnv: XUANSHU_DPSK_MAIN_POOL|"          -e "s|^  contextWindow: 400000|  contextWindow: ${DPSK_CTX}|"          -e "s|^  modelMinIntervalMs: 500$|  modelMinIntervalMs: 5000|"          -e "s|^  modelRequestsPerMinute: 120$|  modelRequestsPerMinute: 54|"          -e "s|^  modelTokensPerMinute: 1000000$|  modelTokensPerMinute: 540000|"          -e "s|^    id: ${DPSK_ID}|    id: glm-5.3|"          -e "s|^    name: DeepSeek Rescue|    name: GLM Auxiliary|"          -e "s|^    baseUrl: ${DPSK_BASE}|    baseUrl: https://open.bigmodel.cn/api/anthropic|"          -e "s|^    contextWindow: 128000|    contextWindow: 400000|"          config/container.yaml
+  sed -i -e "s|^  id: glm-5.3|  id: ${DPSK_ID}|"          -e "s|^  name: GLM 5.3|  name: DeepSeek Main|"          -e "s|^  baseUrl: https://open.bigmodel.cn/api/anthropic|  baseUrl: ${DPSK_BASE}|"          -e "s|^  apiKeyEnv: XUANSHU_MODEL_API_KEY|  apiKeyEnv: XUANSHU_DPSK_MAIN_API_KEY|"          -e "s|^  apiKeyPoolEnv: XUANSHU_MODEL_API_KEYS|  apiKeyPoolEnv: XUANSHU_DPSK_MAIN_POOL|"          -e "s|^  contextWindow: 400000|  contextWindow: ${DPSK_CTX}|"          -e "s|^  modelMinIntervalMs: 500$|  modelMinIntervalMs: ${DPSK_MIN_MS}|"          -e "s|^  modelRequestsPerMinute: 120$|  modelRequestsPerMinute: ${DPSK_RPM}|"          -e "s|^  modelTokensPerMinute: 1000000$|  modelTokensPerMinute: ${DPSK_TPM}|"          -e "s|^    id: ${DPSK_ID}|    id: glm-5.3|"          -e "s|^    name: DeepSeek Rescue|    name: GLM Auxiliary|"          -e "s|^    baseUrl: ${DPSK_BASE}|    baseUrl: https://open.bigmodel.cn/api/anthropic|"          -e "s|^    contextWindow: 128000|    contextWindow: 400000|"          config/container.yaml
   FAST_SERVER_DESC="GLM key pool (auxiliary bulk)"
 elif [ "$DUAL_KEYS" = "1" ] && [ "$DPSK_MODE" = "lanes" ]; then
-  sed -e "s|^  port: 7318|  port: 7319|"       -e "s|^  apiKeyPoolEnv: XUANSHU_MODEL_API_KEYS|  apiKeyPoolEnv: XUANSHU_FAST_MODEL_API_KEYS|"       -e "s|^  id: glm-5.3|  id: ${DPSK_ID}|"       -e "s|^  name: GLM 5.3|  name: DeepSeek Fast|"       -e "s|^  baseUrl: https://open.bigmodel.cn/api/anthropic|  baseUrl: ${DPSK_BASE}|"       -e "s|^  apiKeyEnv: XUANSHU_MODEL_API_KEY|  apiKeyEnv: XUANSHU_FAST_MODEL_API_KEY|"       -e "s|^  contextWindow: 400000|  contextWindow: ${DPSK_CTX}|"       -e "s|^  modelMinIntervalMs: 500$|  modelMinIntervalMs: 5000|"       -e "s|^  modelRequestsPerMinute: 120$|  modelRequestsPerMinute: 54|"       -e "s|^  modelTokensPerMinute: 1000000$|  modelTokensPerMinute: 540000|"       config/container.yaml > config/container-fast.yaml
+  sed -e "s|^  port: 7318|  port: 7319|"       -e "s|^  apiKeyPoolEnv: XUANSHU_MODEL_API_KEYS|  apiKeyPoolEnv: XUANSHU_FAST_MODEL_API_KEYS|"       -e "s|^  id: glm-5.3|  id: ${DPSK_ID}|"       -e "s|^  name: GLM 5.3|  name: DeepSeek Fast|"       -e "s|^  baseUrl: https://open.bigmodel.cn/api/anthropic|  baseUrl: ${DPSK_BASE}|"       -e "s|^  apiKeyEnv: XUANSHU_MODEL_API_KEY|  apiKeyEnv: XUANSHU_FAST_MODEL_API_KEY|"       -e "s|^  contextWindow: 400000|  contextWindow: ${DPSK_CTX}|"       -e "s|^  modelMinIntervalMs: 500$|  modelMinIntervalMs: ${DPSK_MIN_MS}|"       -e "s|^  modelRequestsPerMinute: 120$|  modelRequestsPerMinute: ${DPSK_RPM}|"       -e "s|^  modelTokensPerMinute: 1000000$|  modelTokensPerMinute: ${DPSK_TPM}|"       config/container.yaml > config/container-fast.yaml
   FAST_SERVER_DESC="${DPSK_ID} (fast bulk)"
 fi
 if [ -f config/container-fast.yaml ]; then
@@ -192,14 +206,18 @@ if [ "$DUAL_KEYS" = "1" ] && [ "$DPSK_MODE" = "main" ]; then
   export XUANSHU_FANOUT_BASE="${XUANSHU_FANOUT_BASE:-$FAST_BASE}"
 fi
 
-echo "[hosted] launching driver lanes: 3 deep + 1 prospector + 2 sweep (6-lane R7 strategy)"
+echo "[hosted] launching driver lanes: 4 deep + 2 prospector + 2 sweep (8-lane R31 strategy)"
 # R7 lane plan (bctf top-6 post-mortem): the 6-lane shape keeps the R4 deep
 # grinders and prospector, and adds two sweep lanes for singles coverage —
-# rich-retry picks on any lane fan out into 3 directed workers. 6 lanes keep
-# the worst case (3 fan-outs + 3 singles = 12 concurrent runs) under the
-# server's 16-session gate and the gateway's 60 RPM soft limit. R8: in
-# dual-key mode the prospector + sweep lanes run against the :7319 DeepSeek
-# server (fast bulk model) while the deep lanes grind on GLM at :7318.
+# rich-retry picks on any lane fan out into directed workers. R8: in
+# dual-key mode the prospector + sweep lanes run against the :7319 fast
+# server while the deep lanes grind on the main model at :7318.
+# R31 (50-challenge/100-flag finals, unlimited-quota ruling): 8 lanes — the
+# extra deep lane widens the hard grind and the second prospector doubles
+# fresh-opening throughput for the operator's easy-first directive. The
+# per-server run gate is raised to the 16-session SDK ceiling
+# (XUANSHU_MAX_CONCURRENT_RUNS), so the worst case (4 fan-outs + 4 singles
+# = 16 concurrent per server) no longer queues.
 # R28 8h one-shot: a crashed lane must not silently vanish for hours — each
 # lane runs under a supervisor that restarts it after 30s. A CLEAN exit (rc=0)
 # means the benchmark task ended or every challenge is solved; that stops the
@@ -221,9 +239,11 @@ lane_loop() {
 lane_loop lane-a deep "" &
 lane_loop lane-b deep "" &
 lane_loop lane-c deep "" &
-lane_loop lane-d prospector "$FAST_BASE" &
-lane_loop lane-e sweep "$FAST_BASE" &
-lane_loop lane-f sweep "$FAST_BASE" &
+lane_loop lane-d deep "" &
+lane_loop lane-e prospector "$FAST_BASE" &
+lane_loop lane-f prospector "$FAST_BASE" &
+lane_loop lane-g sweep "$FAST_BASE" &
+lane_loop lane-h sweep "$FAST_BASE" &
 
 # The lanes exit themselves when the benchmark task ends (invalid_state);
 # the platform tears the container down at the task time limit regardless.

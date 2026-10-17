@@ -1260,10 +1260,10 @@ async function solveOneInner(challenge) {
 // TSEC_FANOUT_WORKERS widens a fan-out round (competition-tier GLM gateway
 // accepts ~100 concurrent connections — operator info 2026-10-16; more
 // directed workers per wall-minute is the champion's endgame shape).
-// The endgame auto-swarms to at least 5 regardless of the knob: the #1
+// The endgame auto-swarms to at least 6 regardless of the knob: the #1
 // bctf agent threw 25-30 concurrent workers at its unsolved set in the
 // final minutes; with 100-connection headroom 5 is a conservative floor.
-const FANOUT_WORKERS = Number(process.env.TSEC_FANOUT_WORKERS ?? "") || 3;
+const FANOUT_WORKERS = Number(process.env.TSEC_FANOUT_WORKERS ?? "") || 4;
 const FANOUT_WALL_MIN = 34;
 function fanoutDirections(code, count) {
   const board = boardFor(code);
@@ -1310,7 +1310,7 @@ async function solveFanOut(challenge) {
     if (!reachable) { await sleep(10_000); reachable = await probeVpn(addrs); }
     if (!reachable) throw Object.assign(new Error("vpn_unreachable"), { vpnDown: true });
 
-    const workers = Math.max(FANOUT_WORKERS, currentPhase === "endgame" ? 5 : 0);
+    const workers = Math.max(FANOUT_WORKERS, currentPhase === "endgame" ? 6 : 0);
     const dirs = fanoutDirections(code, workers);
     if (workers > 3) console.log(`[tsec] fan-out ${code}: ${workers} directed workers (${currentPhase}${FANOUT_WORKERS > 3 ? `, TSEC_FANOUT_WORKERS=${FANOUT_WORKERS}` : ""})`);
     const deadline = Date.now() + FANOUT_WALL_MIN * 60_000;
@@ -1568,18 +1568,24 @@ function pickNext(items, role = "mixed", forceFresh = false, lastResort = false)
   const wantFresh = (role === "prospector" || forceFresh) && fresh.length > 0;
   const deepPool = eligible.filter((c) => (c.flag_count ?? 1) > 1
     || (DIFFICULTY_RANK[String(c.difficulty ?? "").toLowerCase()] ?? 3) >= 2);
-  // Prospector priority: hard fresh first (high value quick wins), then medium,
-  // then easy. This ensures the prospector doesn't waste time on easy re-probes
-  // while hard fresh challenges sit untouched.
+  // Prospector priority. R31 operator directive (50-challenge/100-flag finals,
+  // 2026-10-17): during the breadth phase open the shallow end FIRST — easy,
+  // then medium — so the whole pool is drained fast before the hard grind;
+  // after breadth, hard chains first (high value quick wins) as before.
+  const breadthNow = phaseOf(items, Date.now()) === "breadth";
   const prospectorPool = wantFresh
     ? fresh.sort((a, b) =>
-        // Hard chains first, then hard singles, then medium, then easy
-        ((chainOf(b) ? 1 : 0) - (chainOf(a) ? 1 : 0))
-        || ((DIFFICULTY_RANK[String(b.difficulty ?? "").toLowerCase()] ?? 3) - (DIFFICULTY_RANK[String(a.difficulty ?? "").toLowerCase()] ?? 3))
-        || ((b.total_score ?? 0) - (a.total_score ?? 0)))
+        breadthNow
+          // easy → medium; score breaks ties within a difficulty
+          ? (((DIFFICULTY_RANK[String(a.difficulty ?? "").toLowerCase()] ?? 3) - (DIFFICULTY_RANK[String(b.difficulty ?? "").toLowerCase()] ?? 3))
+            || ((b.total_score ?? 0) - (a.total_score ?? 0)))
+          // Hard chains first, then hard singles, then medium, then easy
+          : (((chainOf(b) ? 1 : 0) - (chainOf(a) ? 1 : 0))
+            || ((DIFFICULTY_RANK[String(b.difficulty ?? "").toLowerCase()] ?? 3) - (DIFFICULTY_RANK[String(a.difficulty ?? "").toLowerCase()] ?? 3))
+            || ((b.total_score ?? 0) - (a.total_score ?? 0))))
     : null;
   // Early-run harvest sweep (R5, live-run 28506 lesson): while ≥4 fresh
-  // easy/medium singles sit unopened, EVERY lane takes them first — fast-track
+  // shallow challenges sit unopened, EVERY lane takes them first — fast-track
   // conversions run 3-5 min at 200-500pts (04/07/20: 950pts in 9 lane-minutes)
   // while two lanes pinned on two hard singles produced zero for 100+ minutes.
   // Once the shallow pool is drained below the threshold, normal role logic
@@ -1587,9 +1593,16 @@ function pickNext(items, role = "mixed", forceFresh = false, lastResort = false)
   // R27: the ≥4 fresh threshold is restored — R23's unconditional gate
   // (retries included, every phase, every role) kept all lanes out of the
   // deep pool while any shallow re-probe remained.
+  // R31: the pool now includes easy/medium CHAINS too (100 flags across 50
+  // challenges means half the set is multi-flag, and an easy chain's first
+  // flags convert as fast as an easy single). Easy before medium, chains
+  // before singles, then score.
   const sweepPool = fresh
-    .filter((c) => (c.flag_count ?? 1) === 1 && (DIFFICULTY_RANK[String(c.difficulty ?? "").toLowerCase()] ?? 3) <= 1)
-    .sort((a, b) => (b.total_score ?? 0) - (a.total_score ?? 0));
+    .filter((c) => (DIFFICULTY_RANK[String(c.difficulty ?? "").toLowerCase()] ?? 3) <= 1)
+    .sort((a, b) =>
+        ((DIFFICULTY_RANK[String(a.difficulty ?? "").toLowerCase()] ?? 3) - (DIFFICULTY_RANK[String(b.difficulty ?? "").toLowerCase()] ?? 3))
+        || ((chainOf(b) ? 1 : 0) - (chainOf(a) ? 1 : 0))
+        || ((b.total_score ?? 0) - (a.total_score ?? 0)));
   // Truncated-attempt rescue (R6): the 28506 tail was a conveyor of half-
   // attempts — single-flag challenges whose ONLY run banked a rich board
   // (>=3 facts) and then hit the clock mid-attack (27 was still planning its
