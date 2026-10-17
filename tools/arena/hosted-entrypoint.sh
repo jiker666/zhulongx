@@ -227,13 +227,18 @@ echo "[hosted] launching driver lanes: 4 deep + 2 prospector + 2 sweep (8-lane R
 # supervisor too. Ledger/claims/watches all expire safely across restarts.
 lane_loop() {
   lane="$1"; role="$2"; base="$3"
+  # R33: `set -eu` kills this subshell on the first non-zero foreground exit —
+  # a crashed lane took its supervisor with it and silently vanished for the
+  # rest of the run. The restart loop must be errexit-immune: set +e locally,
+  # and rc is captured inside if/else (an errexit-exempt context) so both
+  # paths reach the restart decision.
+  set +e
   while true; do
     if [ -n "$base" ]; then
-      TSEC_LANE="$lane" TSEC_ROLE="$role" XUANSHU_BASE="$base" node tools/arena/tsec.mjs loop
+      if TSEC_LANE="$lane" TSEC_ROLE="$role" XUANSHU_BASE="$base" node tools/arena/tsec.mjs loop; then rc=0; else rc=$?; fi
     else
-      TSEC_LANE="$lane" TSEC_ROLE="$role" node tools/arena/tsec.mjs loop
+      if TSEC_LANE="$lane" TSEC_ROLE="$role" node tools/arena/tsec.mjs loop; then rc=0; else rc=$?; fi
     fi
-    rc=$?
     [ "$rc" -eq 0 ] && break
     echo "[hosted] lane $lane exited rc=$rc — restarting in 30s" >&2
     sleep 30
