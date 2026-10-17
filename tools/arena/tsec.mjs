@@ -171,7 +171,7 @@ async function submitFlag(code, flag) {
 
 // ---------------------------------------------------------------- xuanshu API
 
-async function xuanshu(path, options = {}, timeoutMs = 45_000, retries = 1) {
+async function xuanshu(path, options = {}, timeoutMs = 45_000, retries = 1, baseUrl = XUANSHU_BASE) {
   // R20: idempotent xuanshu calls (polls, stops, handoff reads) retry once on
   // transient failure — 29896's slot leak was a settle path whose single-shot
   // stop/poll aborted against a busy server and skipped the instance close.
@@ -180,7 +180,7 @@ async function xuanshu(path, options = {}, timeoutMs = 45_000, retries = 1) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await fetch(`${XUANSHU_BASE}${path}`, {
+      const response = await fetch(`${options.baseUrl ?? baseUrl}${path}`, {
         ...options,
         signal: controller.signal,
         ...(options.body ? { headers: { "content-type": "application/json", authorization: `Bearer ${SERVER_TOKEN}`, ...(options.headers ?? {}) } } : { headers: { authorization: `Bearer ${SERVER_TOKEN}` } }),
@@ -224,13 +224,13 @@ async function apiHealthy() {
   }
 }
 
-async function stopRun(runId) {
+async function stopRun(runId, baseUrl = XUANSHU_BASE) {
   // R20: never single-shot. A budget stop that times out against a busy
   // server used to throw into the settle path and skip the instance close —
   // three of those leaked every slot and froze the whole fleet (29896).
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      const result = await xuanshu(`/v1/runs/${runId}/stop`, { method: "POST", body: "{}" }, 120_000, 0);
+      const result = await xuanshu(`/v1/runs/${runId}/stop`, { method: "POST", body: "{}" }, 120_000, 0, baseUrl);
       if (result.status < 300) return;
       console.warn(`[tsec] stop run ${runId} -> ${result.status} (attempt ${attempt}/3)`);
     } catch (error) {
@@ -249,7 +249,7 @@ function findingsTexts(findings) {
     .filter(Boolean);
 }
 
-async function watchRun(runId, deadlineMs, code) {
+async function watchRun(runId, deadlineMs, code, baseUrl = XUANSHU_BASE) {
   const deadline = Date.now() + deadlineMs;
   const banked = new Set(); // finding texts already mirrored to the board
   let bankedFrontier = ""; // last frontier note mirrored for this run
@@ -263,7 +263,7 @@ async function watchRun(runId, deadlineMs, code) {
     let poll;
     if (!liteMissing) {
       try {
-        poll = await xuanshu(`/v1/runs/${runId}/lite`);
+        poll = await xuanshu(`/v1/runs/${runId}/lite`, {}, 45_000, 1, baseUrl);
       } catch (error) {
         console.warn(`[tsec] poll ${runId} failed (${error?.message ?? error}); continuing`);
         continue;
@@ -272,7 +272,7 @@ async function watchRun(runId, deadlineMs, code) {
     }
     if (liteMissing) {
       try {
-        const full = await xuanshu(`/v1/runs/${runId}`);
+        const full = await xuanshu(`/v1/runs/${runId}`, {}, 45_000, 1, baseUrl);
         poll = { status: full.status, json: { status: full.json?.status ?? full.json?.state?.status, ...(full.json?.state ?? {}) } };
       } catch (error) {
         console.warn(`[tsec] poll ${runId} failed (${error?.message ?? error}); continuing`);
@@ -308,7 +308,7 @@ async function watchRun(runId, deadlineMs, code) {
       // The settle path needs the full terminal state (submission, nextSteps,
       // summary) — one final full fetch, never the poll shape.
       try {
-        const full = await xuanshu(`/v1/runs/${runId}`);
+        const full = await xuanshu(`/v1/runs/${runId}`, {}, 45_000, 1, baseUrl);
         return full.json?.state ?? full.json ?? poll.json ?? {};
       } catch {
         return poll.json ?? {}; // degraded transport: settle with what we have
@@ -375,11 +375,21 @@ function rejectedValues(code) {
 // Last run id per challenge — survives the handoff deletion a banked flag
 // triggers, so retries always have a lineage parent for scratch inheritance.
 function lastrunPath(code) { return resolve(WORK_DIR, `lastrun-${code}.json`); }
-function writeLastrun(code, runId) {
-  try { writeFileSync(lastrunPath(code), JSON.stringify({ code, runId, at: new Date().toISOString() })); } catch { /* best effort */ }
+function writeLastrun(code, runId, baseUrl = XUANSHU_BASE) {
+  try { writeFileSync(lastrunPath(code), JSON.stringify({ code, runId, baseUrl, at: new Date().toISOString() })); } catch { /* best effort */ }
 }
 function lastrunFor(code) {
   try { return JSON.parse(readFileSync(lastrunPath(code), "utf8")).runId; } catch { return undefined; }
+}
+// R28: scratch inheritance is server-local — a parent recorded on the fanout
+// server must not feed a lane-server create (the run create would 404 the
+// lineage and burn the slot). lastrunIdFor only returns same-server parents.
+function lastrunMetaFor(code) {
+  try { return JSON.parse(readFileSync(lastrunPath(code), "utf8")); } catch { return undefined; }
+}
+function lastrunIdFor(code, baseUrl) {
+  const last = lastrunMetaFor(code);
+  return last && (last.baseUrl ?? XUANSHU_BASE) === baseUrl ? last.runId : undefined;
 }
 function recordRejected(code, value) {
   const values = [...rejectedValues(code), value].slice(-8);
@@ -489,9 +499,9 @@ function recordArenaLessons(code, state) {
     writeFileSync(lessonsPath(), JSON.stringify(lessons.slice(-40), null, 2));
   } catch { /* best effort */ }
 }
-async function bankKnowledge(code, runId) {
+async function bankKnowledge(code, runId, baseUrl = XUANSHU_BASE) {
   try {
-    const state = (await xuanshu(`/v1/runs/${runId}`)).json?.state ?? {};
+    const state = (await xuanshu(`/v1/runs/${runId}`, {}, 45_000, 1, baseUrl)).json?.state ?? {};
     const deadEnds = (state.hypotheses ?? [])
       .filter((h) => h?.status === "contradicted" && typeof h.statement === "string")
       .map((h) => `已排除假设:${h.statement.slice(0, 200)}${Array.isArray(h.evidence) && h.evidence[0] ? `(证据:${String(h.evidence[0]).slice(0, 100)})` : ""}`);
@@ -631,7 +641,9 @@ function phaseOf(items, now) {
   const elapsedMin = (now - taskStartedAt) / 60_000;
   const unsolved = items.filter((item) => !item.is_completed).length;
   if (elapsedMin < 45) return "breadth";
-  if (unsolved <= 8 || (elapsedMin >= 240 && unsolved <= 14)) return "endgame";
+  // R28 8h one-shot finals: also engage tail mode with 2h left on a
+  // manageable tail (the 4h/14 gate was tuned for 6h rounds).
+  if (unsolved <= 8 || (elapsedMin >= 240 && unsolved <= 14) || (elapsedMin >= 360 && unsolved <= 24)) return "endgame";
   return "value";
 }
 // Evidence buckets grade "how close is this challenge to a flag" from the
@@ -788,6 +800,7 @@ function buildTask(challenge, budgetMinutes, direction, freshEyes = false) {
     const openIntents = board.intents.filter((i) => !i.done).slice(0, 2);
     if (openIntents.length > 0) lines.push(`- next_exact_test(按序执行,完成一个立即 checkpoint 勾选):${openIntents.map((i) => i.text.slice(0, 160)).join(" / ")}`);
     if (board.frontier?.text || openIntents.length > 0) lines.push(`- resume_instruction:接续或证伪 best_frontier,严禁从头再来;dead_ends 见 EXCLUDED;动态类事实(会话/cookie/临时地址)跨重启即过期,技术栈/逻辑结论仍有效`);
+    lines.push(`- 串行链纪律:next_exact_test/待办若是强依赖链(后一步依赖前一步的实际产出),本轮只推进【前置已在 VERIFIED FACTS 中】的那一步,完成后立即固化并把下一步写回黑板(next_steps);前置尚不存在的一步严禁空转尝试;只有互不依赖的维度才并行`);
   }
   const priorMisses = readLedger().done[code]?.misses ?? 0;
   if (priorMisses >= 2) {
@@ -997,7 +1010,7 @@ async function solveOneInner(challenge) {
   // Scratch inheritance (round-3 lesson): retries rebuilt whole toolchains
   // because each run's scratch namespace is wiped. lineage.parentRunId makes
   // the runtime copy the parent's scratch in and tell the agent to reuse it.
-  const parentRunId = freshEyes ? null : lastrunFor(code);
+  const parentRunId = freshEyes ? null : lastrunIdFor(code, XUANSHU_BASE);
   // No-hint finals: stuck challenges (misses past the old hint-arming point)
   // get the fallback model's lens on alternating attempts.
   const rescueRole = rescueModelRole(effMisses);
@@ -1248,6 +1261,11 @@ function fanoutDirections(code, count) {
 async function solveFanOut(challenge) {
   const code = challenge.unique_code;
   const lane = process.env.TSEC_LANE ?? "main";
+  // R28: directed workers ride the fast/GLM-pool server when told to — the
+  // endgame swarm (up to 18 concurrent runs) cannot be fed from a 54 RPM
+  // deep-lane gate. Sibling evidence sharing is server-local and all workers
+  // of one fan-out share WORKER_BASE, so the live board still holds.
+  const WORKER_BASE = process.env.XUANSHU_FANOUT_BASE || XUANSHU_BASE;
   if (!claimCode(code, lane)) {
     console.warn(`[tsec] ${code} is claimed by lane ${claimFor(code)?.lane ?? "?"}; skipping`);
     throw Object.assign(new Error("already_claimed"), { claimed: true });
@@ -1272,14 +1290,14 @@ async function solveFanOut(challenge) {
     const dirs = fanoutDirections(code, workers);
     if (workers > 3) console.log(`[tsec] fan-out ${code}: ${workers} directed workers (${currentPhase}${FANOUT_WORKERS > 3 ? `, TSEC_FANOUT_WORKERS=${FANOUT_WORKERS}` : ""})`);
     const deadline = Date.now() + FANOUT_WALL_MIN * 60_000;
-    const parentRunId = freshEyes ? null : lastrunFor(code);
+    const parentRunId = freshEyes ? null : lastrunIdFor(code, WORKER_BASE);
     const runIds = [];
     let solvedFlag = false;
     let stopped = false;
     const stopAll = async () => {
       if (stopped) return;
       stopped = true;
-      for (const id of runIds) await stopRun(id);
+      for (const id of runIds) await stopRun(id, WORKER_BASE);
     };
 
     // Completion poller: any worker's self-submit banks the flag platform-side
@@ -1312,6 +1330,7 @@ async function solveFanOut(challenge) {
       const task = buildTask(ready, budgetMin, `${direction}。(同题并行协作纪律:同一题还有兄弟会话在跑,共享黑板互通;开工第一步先 read_shared_evidence 看兄弟已发布的事实与死端,严禁重走已排除的路径;自己每排除一条路径或验证一个关键事实,立即用 checkpoint 记录假设状态——证伪的假设会实时广播给兄弟会话,也可直接 publish_shared_evidence;并发连接≤2、只读优先,严禁重启或破坏性操作)`);
       const created = await xuanshu("/v1/runs", {
         method: "POST",
+        baseUrl: WORKER_BASE,
         body: JSON.stringify({
           task,
           metadata: { source: "question-bank", questionId: `tsec-${code}-fan${index}`, ...(categoryOf(code) ? { category: categoryOf(code) } : {}) },
@@ -1327,10 +1346,10 @@ async function solveFanOut(challenge) {
       if (created.status !== 202) throw new Error(`fan-out run create failed: ${created.status}`);
       const runId = created.json.id;
       runIds.push(runId);
-      writeLastrun(code, runId);
+      writeLastrun(code, runId, WORKER_BASE);
       console.log(`[tsec] fan-out worker ${index + 1}/${dirs.length} run ${runId.slice(0, 8)}${inheritScratch ? "" : " (context-free)"}: ${direction.slice(0, 70)}`);
-      const terminal = await watchRun(runId, Math.max(60_000, deadline - Date.now()), code);
-      await bankKnowledge(code, runId); // R10: per-worker lessons also reach the shared ledger
+      const terminal = await watchRun(runId, Math.max(60_000, deadline - Date.now()), code, WORKER_BASE);
+      await bankKnowledge(code, runId, WORKER_BASE); // R10: per-worker lessons also reach the shared ledger
       if (!terminal) {
         await record({ challenge: code, runId, outcome: "fanout-worker-timeout" });
         return false;
@@ -1476,7 +1495,7 @@ async function harvestFlags(code, terminal) {
 // caps, the R6 hard-single lane-minute cap, and the R5 ≥4-fresh sweep gate
 // eligibility again (R17's removal let revive/hint cycles reset miss budgets
 // indefinitely; 30661's hard metronomes burned ~44 slots that way).
-function pickNext(items, role = "mixed", forceFresh = false) {
+function pickNext(items, role = "mixed", forceFresh = false, lastResort = false) {
   const ledger = readLedger();
   const eligible = items
     .filter((item) => {
@@ -1500,14 +1519,14 @@ function pickNext(items, role = "mixed", forceFresh = false) {
       const cap = (item.flag_count ?? 1) > 1
         ? (hinted ? 4 : (handoffFor(item.unique_code) || existsSync(boardPath(item.unique_code)) || done?.status === "partial" ? 2 : 1))
         : (handoffFor(item.unique_code) || existsSync(boardPath(item.unique_code)) ? singleCap : 1);
-      if ((done?.misses ?? 0) >= cap) return false;
+      if (!lastResort && (done?.misses ?? 0) >= cap) return false;
       // Hard-single lane-minute cap (R6): attempts alone never stopped the
       // 2026-10-12 hards — revive/hint cycles kept resetting the miss budget
       // while 438 lane-minutes went to zero flags. A hard single that already
       // consumed HARD_SPENT_CAP minutes of this host's lanes is done for good.
       const hardSingle = (item.flag_count ?? 1) === 1
         && (DIFFICULTY_RANK[String(item.difficulty ?? "").toLowerCase()] ?? 3) >= 2;
-      if (hardSingle && (done?.spentMin ?? 0) >= HARD_SPENT_CAP) return false;
+      if (!lastResort && hardSingle && (done?.spentMin ?? 0) >= HARD_SPENT_CAP) return false;
       return true;
     });
   // Lane roles (R4: 3 deep + 1 prospector):
@@ -1762,15 +1781,19 @@ function reviveParked(items) {
   for (const item of items) {
     const done = ledger.done[item.unique_code];
     if (!done || done.status === "solved" || (done.misses ?? 0) < 1) continue;
-    // R16: the endgame revives faster — a 30-min cooldown on the last eight
-    // challenges is 1/12th of the remaining clock spent waiting.
-    const cooldown = currentPhase === "endgame" ? 10 * 60_000 : REVIVE_COOLDOWN_MS;
-    if (now - Date.parse(done.revivedAt ?? 0) < cooldown) continue; // NaN (never revived) passes
-    // R27: a hard single that already burned its HARD_SPENT_CAP lane-minutes
-    // is done for good — reviving it is how 30661's metronomes burned ~44 slots.
+    // R16/R28: the endgame revives faster — a 30-min cooldown on the last eight
+    // challenges is 1/12th of the remaining clock spent waiting. A hard single
+    // past HARD_SPENT_CAP (R27: fast revive cycles burned ~44 slots in 30661)
+    // now revives on a slow 45-min metronome instead of never — reviveParked
+    // runs ONLY when the eligible pool is empty, and an idle lane in an 8h
+    // one-shot final has zero EV while a fresh probe has positive EV.
     const hardSingle = (item.flag_count ?? 1) === 1
       && (DIFFICULTY_RANK[String(item.difficulty ?? "").toLowerCase()] ?? 3) >= 2;
-    if (hardSingle && (done.spentMin ?? 0) >= HARD_SPENT_CAP) continue;
+    const spentCapped = hardSingle && (done.spentMin ?? 0) >= HARD_SPENT_CAP;
+    const cooldown = spentCapped
+      ? 45 * 60_000
+      : currentPhase === "endgame" ? 10 * 60_000 : REVIVE_COOLDOWN_MS;
+    if (now - Date.parse(done.revivedAt ?? 0) < cooldown) continue; // NaN (never revived) passes
     ledger.done[item.unique_code] = { ...done, misses: 0, revivedAt: new Date().toISOString() };
     revived.push(item.unique_code);
   }
@@ -1855,13 +1878,22 @@ async function cmdLoop() {
         console.warn(`[tsec] phase shift: ${currentPhase} -> ${phase} (unsolved=${items.filter((item) => !item.is_completed).length})`);
         currentPhase = phase;
       }
-      const candidate = pickNext(items, role, retryMisses >= 2);
+      let candidate = pickNext(items, role, retryMisses >= 2);
       if (!candidate) {
         const remaining = items.filter((item) => !item.is_completed);
         if (remaining.length === 0) { console.log("[tsec] all challenges completed — loop exiting"); return 0; }
-        if (reviveParked(remaining)) continue;
-        console.log(`[tsec] all ${remaining.length} remaining challenges parked within revive cooldown — waiting 5 minutes`);
-        await sleep(300_000);
+        // R28 8h one-shot rule: an idle lane has zero EV. When the normal
+        // pool is empty, revive parked challenges (spent-capped hard singles
+        // included, on their slow metronome) and take a last-resort pick
+        // that bypasses miss/spent caps — never sit out the clock.
+        if (reviveParked(remaining)) {
+          candidate = pickNext(items, role, false, true);
+          if (candidate) console.log(`[tsec] last-resort pick ${candidate.unique_code}: caps bypassed, pool was empty`);
+        }
+      }
+      if (!candidate) {
+        console.log(`[tsec] all ${items.filter((item) => !item.is_completed).length} remaining challenges parked within revive cooldown — waiting 2 minutes`);
+        await sleep(120_000);
         continue;
       }
       const wasFresh = !readLedger().done[candidate.unique_code];

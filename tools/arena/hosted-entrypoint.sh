@@ -137,21 +137,28 @@ node -e "fetch('http://127.0.0.1:7318/health').then(r=>process.exit(r.ok?0:1)).c
 # DeepSeek key is self-funded, so this split is OPT-IN — TSEC_DPSK_MODE=lanes.
 # Default reserve mode keeps every lane on the GLM key pool at :7318; DPSK
 # answers only through gateway failover (R19) and rescue dispatch.
-DPSK_MODE="${TSEC_DPSK_MODE:-reserve}"
+DPSK_MODE="${TSEC_DPSK_MODE:-main}"
 FAST_BASE="http://127.0.0.1:7318"
-if [ "$DUAL_KEYS" = "1" ] && [ "$DPSK_MODE" = "lanes" ]; then
-  sed -e "s|^  port: 7318|  port: 7319|" \
-      -e "s|^  apiKeyPoolEnv: XUANSHU_MODEL_API_KEYS|  apiKeyPoolEnv: XUANSHU_FAST_MODEL_API_KEYS|" \
-      -e "s|^  id: glm-5.3|  id: ${DPSK_ID}|" \
-      -e "s|^  name: GLM 5.3|  name: DeepSeek Fast|" \
-      -e "s|^  baseUrl: https://open.bigmodel.cn/api/anthropic|  baseUrl: ${DPSK_BASE}|" \
-      -e "s|^  apiKeyEnv: XUANSHU_MODEL_API_KEY|  apiKeyEnv: XUANSHU_FAST_MODEL_API_KEY|" \
-      -e "s|^  contextWindow: 400000|  contextWindow: 128000|" \
-      -e "s|^  modelMinIntervalMs: 500$|  modelMinIntervalMs: 5000|" \
-      -e "s|^  modelRequestsPerMinute: 120$|  modelRequestsPerMinute: 54|" \
-      -e "s|^  modelTokensPerMinute: 1000000$|  modelTokensPerMinute: 540000|" \
-      config/container.yaml > config/container-fast.yaml
-  echo "[hosted] dual-key mode: fast-lane xuanshu server (${DPSK_ID}) on :7319"
+FAST_SERVER_DESC=""
+if [ "$DUAL_KEYS" = "1" ] && [ "$DPSK_MODE" = "main" ]; then
+  # R28 user ruling 2026-10-17 (dpsk 主力 / glm 辅助): mirror of the R8 split.
+  # :7318 = DeepSeek main (3 deep grinders, proven conservative DPSK gates,
+  # GLM auxiliary rescue fallback); :7319 = GLM key pool (prospector + sweep
+  # bulk, aggressive GLM gates, DPSK rescue fallback). The fast config is
+  # generated FIRST from the still-GLM container.yaml, then container.yaml
+  # itself is flipped to DeepSeek-main so the two seds never fight.
+  sed -e "s|^  port: 7318|  port: 7319|"       -e "s|^    apiKeyEnv: XUANSHU_FALLBACK_API_KEY|    apiKeyEnv: XUANSHU_FAST_FALLBACK_API_KEY|"       config/container.yaml > config/container-fast.yaml
+  export XUANSHU_FAST_FALLBACK_API_KEY="$DEEPSEEK_API_KEY"
+  export XUANSHU_DPSK_MAIN_API_KEY="$DEEPSEEK_API_KEY"
+  export XUANSHU_FALLBACK_API_KEY="$BIGMODEL_API_KEY"
+  sed -i -e "s|^  id: glm-5.3|  id: ${DPSK_ID}|"          -e "s|^  name: GLM 5.3|  name: DeepSeek Main|"          -e "s|^  baseUrl: https://open.bigmodel.cn/api/anthropic|  baseUrl: ${DPSK_BASE}|"          -e "s|^  apiKeyEnv: XUANSHU_MODEL_API_KEY|  apiKeyEnv: XUANSHU_DPSK_MAIN_API_KEY|"          -e "s|^  apiKeyPoolEnv: XUANSHU_MODEL_API_KEYS|  apiKeyPoolEnv: XUANSHU_DPSK_MAIN_POOL|"          -e "s|^  contextWindow: 400000|  contextWindow: 128000|"          -e "s|^  modelMinIntervalMs: 500$|  modelMinIntervalMs: 5000|"          -e "s|^  modelRequestsPerMinute: 120$|  modelRequestsPerMinute: 54|"          -e "s|^  modelTokensPerMinute: 1000000$|  modelTokensPerMinute: 540000|"          -e "s|^    id: ${DPSK_ID}|    id: glm-5.3|"          -e "s|^    name: DeepSeek Rescue|    name: GLM Auxiliary|"          -e "s|^    baseUrl: ${DPSK_BASE}|    baseUrl: https://open.bigmodel.cn/api/anthropic|"          -e "s|^    contextWindow: 128000|    contextWindow: 400000|"          config/container.yaml
+  FAST_SERVER_DESC="GLM key pool (auxiliary bulk)"
+elif [ "$DUAL_KEYS" = "1" ] && [ "$DPSK_MODE" = "lanes" ]; then
+  sed -e "s|^  port: 7318|  port: 7319|"       -e "s|^  apiKeyPoolEnv: XUANSHU_MODEL_API_KEYS|  apiKeyPoolEnv: XUANSHU_FAST_MODEL_API_KEYS|"       -e "s|^  id: glm-5.3|  id: ${DPSK_ID}|"       -e "s|^  name: GLM 5.3|  name: DeepSeek Fast|"       -e "s|^  baseUrl: https://open.bigmodel.cn/api/anthropic|  baseUrl: ${DPSK_BASE}|"       -e "s|^  apiKeyEnv: XUANSHU_MODEL_API_KEY|  apiKeyEnv: XUANSHU_FAST_MODEL_API_KEY|"       -e "s|^  contextWindow: 400000|  contextWindow: 128000|"       -e "s|^  modelMinIntervalMs: 500$|  modelMinIntervalMs: 5000|"       -e "s|^  modelRequestsPerMinute: 120$|  modelRequestsPerMinute: 54|"       -e "s|^  modelTokensPerMinute: 1000000$|  modelTokensPerMinute: 540000|"       config/container.yaml > config/container-fast.yaml
+  FAST_SERVER_DESC="${DPSK_ID} (fast bulk)"
+fi
+if [ -f config/container-fast.yaml ]; then
+  echo "[hosted] dual-key ${DPSK_MODE} mode: fast-lane xuanshu server (${FAST_SERVER_DESC}) on :7319"
   node dist/cli.js serve --config config/container-fast.yaml &
   for i in $(seq 1 60); do
     node -e "fetch('http://127.0.0.1:7319/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" && break
@@ -164,6 +171,14 @@ if [ "$DUAL_KEYS" = "1" ] && [ "$DPSK_MODE" = "lanes" ]; then
   fi
 fi
 
+# R28: endgame/rich-retry fan-out workers ride the GLM pool server (120 RPM)
+# while the deep lanes keep grinding on DeepSeek — a 54 RPM deep gate cannot
+# feed an 18-run endgame swarm. Unset (reserve/lanes modes) keeps fan-outs on
+# the lane's own server, exactly the pre-R28 behaviour.
+if [ "$DUAL_KEYS" = "1" ] && [ "$DPSK_MODE" = "main" ]; then
+  export XUANSHU_FANOUT_BASE="${XUANSHU_FANOUT_BASE:-$FAST_BASE}"
+fi
+
 echo "[hosted] launching driver lanes: 3 deep + 1 prospector + 2 sweep (6-lane R7 strategy)"
 # R7 lane plan (bctf top-6 post-mortem): the 6-lane shape keeps the R4 deep
 # grinders and prospector, and adds two sweep lanes for singles coverage —
@@ -172,12 +187,30 @@ echo "[hosted] launching driver lanes: 3 deep + 1 prospector + 2 sweep (6-lane R
 # server's 16-session gate and the gateway's 60 RPM soft limit. R8: in
 # dual-key mode the prospector + sweep lanes run against the :7319 DeepSeek
 # server (fast bulk model) while the deep lanes grind on GLM at :7318.
-TSEC_LANE=lane-a TSEC_ROLE=deep                     node tools/arena/tsec.mjs loop &
-TSEC_LANE=lane-b TSEC_ROLE=deep                     node tools/arena/tsec.mjs loop &
-TSEC_LANE=lane-c TSEC_ROLE=deep                     node tools/arena/tsec.mjs loop &
-TSEC_LANE=lane-d TSEC_ROLE=prospector XUANSHU_BASE="$FAST_BASE" node tools/arena/tsec.mjs loop &
-TSEC_LANE=lane-e TSEC_ROLE=sweep      XUANSHU_BASE="$FAST_BASE" node tools/arena/tsec.mjs loop &
-TSEC_LANE=lane-f TSEC_ROLE=sweep      XUANSHU_BASE="$FAST_BASE" node tools/arena/tsec.mjs loop &
+# R28 8h one-shot: a crashed lane must not silently vanish for hours — each
+# lane runs under a supervisor that restarts it after 30s. A CLEAN exit (rc=0)
+# means the benchmark task ended or every challenge is solved; that stops the
+# supervisor too. Ledger/claims/watches all expire safely across restarts.
+lane_loop() {
+  lane="$1"; role="$2"; base="$3"
+  while true; do
+    if [ -n "$base" ]; then
+      TSEC_LANE="$lane" TSEC_ROLE="$role" XUANSHU_BASE="$base" node tools/arena/tsec.mjs loop
+    else
+      TSEC_LANE="$lane" TSEC_ROLE="$role" node tools/arena/tsec.mjs loop
+    fi
+    rc=$?
+    [ "$rc" -eq 0 ] && break
+    echo "[hosted] lane $lane exited rc=$rc — restarting in 30s" >&2
+    sleep 30
+  done
+}
+lane_loop lane-a deep "" &
+lane_loop lane-b deep "" &
+lane_loop lane-c deep "" &
+lane_loop lane-d prospector "$FAST_BASE" &
+lane_loop lane-e sweep "$FAST_BASE" &
+lane_loop lane-f sweep "$FAST_BASE" &
 
 # The lanes exit themselves when the benchmark task ends (invalid_state);
 # the platform tears the container down at the task time limit regardless.
