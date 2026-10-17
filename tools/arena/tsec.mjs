@@ -142,7 +142,18 @@ const isDuplicate = (error) => error.status === 409 && error.code === "duplicate
 
 async function listChallenges() {
   const items = await api("/openapi/v1/challenges");
-  return Array.isArray(items) ? items : (items?.items ?? items?.challenges ?? []);
+  const list = Array.isArray(items) ? items : (items?.items ?? items?.challenges ?? []);
+  // R34: cache name/description/category metadata per code — categoryOf needs
+  // it and prefix matching alone never fires on bctf2026-* codes (the whole
+  // 34998 run ran without a single category playbook).
+  for (const item of list) {
+    categoryHints.set(item.unique_code, {
+      category: item.category ?? item.tag ?? item.category_name ?? item.type,
+      name: String(item.challenge_name ?? item.name ?? item.title ?? ""),
+      desc: String(item.description ?? ""),
+    });
+  }
+  return list;
 }
 
 async function closeChallenge(code) {
@@ -401,40 +412,71 @@ function atomicWriteJson(file, obj) {
     try { if (existsSync(tmp)) rmSync(tmp, { force: true }); } catch { /* renamed or gone */ }
   }
 }
-function readJsonRetry(file, fallback, tries = 4) {
-  let last;
-  for (let i = 0; i < tries; i++) {
-    try { return JSON.parse(readFileSync(file, "utf8")); } catch (e) { last = e; }
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 40);
-  }
-  return fallback;
-}
 function withLock(name, fn) {
   const lock = resolve(WORK_DIR, `.lock-${name}`);
-  const stamp = () => JSON.stringify({ pid: process.pid, lane: process.env.TSEC_LANE ?? "main", at: Date.now() });
+  // R34 hardening (external review): every acquire carries a unique owner
+  // token; the stale-steal re-verifies the inode before deleting (a lock
+  // released-and-reclaimed between our stat and rm has a NEW inode and must
+  // survive); release deletes only on token match — never on parse failure;
+  // and lock exhaustion FORCE-STEALS instead of running the mutation
+  // unlocked (an unlocked read-modify-write reintroduces the lost-update
+  // class the lock exists to prevent).
+  const token = `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const write = () => writeFileSync(lock, JSON.stringify({ pid: process.pid, token, lane: process.env.TSEC_LANE ?? "main", at: Date.now() }), { flag: "wx" });
   let held = false;
-  for (let spin = 0; spin < 60 && !held; spin++) {
-    try { writeFileSync(lock, stamp(), { flag: "wx" }); held = true; }
+  for (let spin = 0; spin < 90 && !held; spin++) {
+    try { write(); held = true; }
     catch {
       try {
-        if (Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS) {
-          rmSync(lock, { force: true }); // owner died mid-update — steal
-          continue;
+        const st = statSync(lock);
+        if (Date.now() - st.mtimeMs > LOCK_STALE_MS) {
+          try {
+            if (statSync(lock).ino === st.ino) { // still the SAME stale file
+              rmSync(lock, { force: true });
+              console.warn(`[tsec] lock ${name}: stole abandoned lock (age ${Math.round((Date.now() - st.mtimeMs) / 1000)}s)`);
+              continue;
+            }
+          } catch { /* vanished: retry wx */ }
         }
-      } catch { /* lock vanished between stat and rm: retry wx */ }
+      } catch { /* vanished between write-fail and stat: retry wx */ }
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
     }
   }
-  if (!held) return fn(); // 3s of contention: proceed unlocked (still atomic)
+  if (!held) {
+    // ~4.5s of live contention with a fresh lock: the owner is wedged
+    // mid-transaction (fn bodies are sync and sub-ms). Steal it — running
+    // unlocked is not an option; failing the lane is worse than the
+    // vanishingly rare double-entry after a steal.
+    console.warn(`[tsec] lock ${name}: contended beyond spin budget — force-stealing`);
+    try { rmSync(lock, { force: true }); } catch { /* gone */ }
+    try { write(); held = true; } catch { /* lost the steal race too */ }
+  }
+  if (!held) throw new Error(`withLock(${name}): acquisition failed`);
   try { return fn(); } finally {
     try {
-      if (JSON.parse(readFileSync(lock, "utf8")).pid === process.pid) rmSync(lock, { force: true });
-    } catch { try { rmSync(lock, { force: true }); } catch { /* gone */ } }
+      if (JSON.parse(readFileSync(lock, "utf8")).token === token) rmSync(lock, { force: true });
+      // parse failure or a foreign token: LEAVE the file — the stale-steal
+      // path owns cleanup; deleting an unverifiable lock could kill a live
+      // owner's exclusion.
+    } catch { /* leave for staleness */ }
   }
 }
 function ledgerPath() { return resolve(WORK_DIR, "ledger.json"); }
+// R34: a persistently unparseable state file is DAMAGE, not absence. The
+// old fallback returned the empty default and the next write PERSISTED the
+// wipe. Quarantine moves the wreck aside for forensics and starts clean.
+function quarantineState(file) {
+  const q = `${file}.corrupt-${Date.now()}`;
+  try { renameSync(file, q); console.error(`[tsec] state file persistently unparseable — quarantined to ${q}`); } catch { /* unwritable */ }
+}
 function readLedger() {
-  return readJsonRetry(ledgerPath(), { done: {}, accepted: {} });
+  const p = ledgerPath();
+  for (let i = 0; i < 4; i++) {
+    try { return JSON.parse(readFileSync(p, "utf8")); } catch { /* torn or absent */ }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 40);
+  }
+  if (existsSync(p)) quarantineState(p);
+  return { done: {}, accepted: {} };
 }
 function writeLedger(ledger) { atomicWriteJson(ledgerPath(), ledger); }
 // Every ledger mutation runs read→mutate→write INSIDE the lock — a mutation
@@ -491,7 +533,7 @@ function rejectedValues(code) {
 // triggers, so retries always have a lineage parent for scratch inheritance.
 function lastrunPath(code) { return resolve(WORK_DIR, `lastrun-${code}.json`); }
 function writeLastrun(code, runId, baseUrl = XUANSHU_BASE) {
-  try { atomicWriteJson(lastrunPath(code), { code, runId, baseUrl, at: new Date().toISOString() }); } catch { /* best effort */ }
+  try { withLock(`lastrun-${code}`, () => { atomicWriteJson(lastrunPath(code), { code, runId, baseUrl, at: new Date().toISOString() }); }); } catch { /* best effort */ }
 }
 function lastrunFor(code) {
   try { return JSON.parse(readFileSync(lastrunPath(code), "utf8")).runId; } catch { return undefined; }
@@ -543,7 +585,9 @@ function boardPath(code) { return resolve(WORK_DIR, `board-${code}.json`); }
 function boardFor(code) {
   try {
     return JSON.parse(readFileSync(boardPath(code), "utf8"));
-  } catch {
+  } catch (parseError) {
+    // distinguish damage from absence before reseeding (R34)
+    if (existsSync(boardPath(code))) quarantineState(boardPath(code)); // present-but-unparseable = damage
     // Lazy one-time migration: round-1 handoffs become board seed facts so
     // warm-start knowledge survives the format change.
     const prior = handoffFor(code);
@@ -614,7 +658,11 @@ function boardUpdate(code, { facts = [], intents = [], hints = [], solvedIntentS
   });
 }
 function boardClear(code) {
-  try { rmSync(boardPath(code), { force: true }); } catch { /* best effort */ }
+  // R34: same lock as boardUpdate — an unlocked clear races a sibling worker
+  // banking facts and the board comes back from the dead.
+  withLock(`board-${code}`, () => {
+    try { rmSync(boardPath(code), { force: true }); } catch { /* best effort */ }
+  });
 }
 
 // ── arena-wide lesson ledger (R10, user directive: 不要重做错误的事) ──────────
@@ -766,13 +814,12 @@ async function reconcileSlots(items) {
     if (!w && claimFor(code)) continue; // live lane mid-launch, watch not yet written
     console.warn(`[tsec] watchdog reclaiming orphan slot ${code} (watch=${w ? "stale" : "none"}, owner=${w ? `pid ${w.pid} alive=${pidAlive(w.pid)}` : "unclaimed"})`);
     if (w?.runId) await stopRun(w.runId);
-    try {
-      await closeChallenge(code);
-    } catch (error) {
-      if (isTaskEnded(error)) throw error;
-      console.warn(`[tsec] watchdog close ${code} failed: ${error?.message ?? error}`);
-    }
-    clearWatch(code);
+    // R34: a failed close keeps the watch so the next cycle retries it —
+    // clearing the marker on failure made the leak look reclaimed. The 5min
+    // closeFailedAt window (set by closeWithRetry) throttles retry storms.
+    if (readLedger().done[code]?.closeFailedAt && Date.now() - readLedger().done[code].closeFailedAt < 5 * 60_000) continue;
+    if (await closeWithRetry(code)) clearWatch(code);
+    else console.warn(`[tsec] watchdog: ${code} close still failing — watch kept for the next cycle`);
   }
 }
 
@@ -844,10 +891,16 @@ function evidenceBucket(item) {
 // Coarse expected score rate: value x remaining-flag share x bucket weight.
 // Deliberately not time-normalized (user: 不需要真的精确计算) — it only has
 // to beat easy-before-hard ordering at picking time.
+// R34: time-normalized — expected score over expected remaining effort.
+// Effort = difficulty cost + cold-instance startup penalty (provisioning is
+// 1-3 real minutes inside the budget under the 3-slot cap).
+const DIFFICULTY_COST = { easy: 1, medium: 2, hard: 4 };
 function expectedScoreRate(item) {
   const remaining = remainingOf(item);
   if (remaining <= 0) return 0;
-  return (item.total_score ?? 0) * (remaining / Math.max(item.flag_count ?? 1, 1)) * BUCKET_WEIGHT[evidenceBucket(item)];
+  const cost = (DIFFICULTY_COST[String(item.difficulty ?? "").toLowerCase()] ?? 3)
+    + (item.container_status === "available" ? 0 : 1.5);
+  return (item.total_score ?? 0) * (remaining / Math.max(item.flag_count ?? 1, 1)) * BUCKET_WEIGHT[evidenceBucket(item)] / cost;
 }
 // Instance lifecycle (AePis container_bound facts): remember which container
 // instance the board's facts came from; a restart downgrades session/cookie/
@@ -919,15 +972,179 @@ async function startSubmitProxy() {
   });
 }
 
+// ── egress gateway v1 (R34) ─────────────────────────────────────────────────
+// 34998 forensics: one session hit visible 429s then ran a python loop that
+// fired ~900 requests in 162s; another kept probing a WAF that had already
+// rate-limited it. Prompt-level "serial, ≤2 connections" never binds scripts
+// spawned through run_command. The gateway is a real boundary for the script
+// class: the entrypoint exports HTTP(S)_PROXY, src/sandbox.ts passes those
+// vars into run_command children (python requests/urllib and curl honor
+// them), and this in-driver proxy enforces per-target concurrency, pacing,
+// 429 circuit-breaking and an audit trail. Documented gap: raw sockets and
+// proxy-ignoring binaries still bypass — v2 moves to nftables REDIRECT for
+// full coverage. If egress-audit.jsonl stays empty while challenges are
+// probed, the passthrough broke: escalate to v2.
+const EGRESS_PORT = Number(process.env.TSEC_EGRESS_PORT ?? 7321);
+let egressStarted = false;
+async function startEgressGateway() {
+  if (egressStarted) return;
+  egressStarted = true;
+  if (String(process.env.TSEC_EGRESS ?? "on") !== "on") { console.log("[tsec] egress gateway disabled (TSEC_EGRESS=off)"); return; }
+  const { createServer, connect } = await import("node:net");
+  const { appendFile } = await import("node:fs/promises");
+  const auditPath = resolve(WORK_DIR, "egress-audit.jsonl");
+  const audit = (entry) => { appendFile(auditPath, `${JSON.stringify({ ts: new Date().toISOString(), ...entry })}\n`).catch(() => {}); };
+  // VPN challenge instances are fragile singletons: strict caps. The public
+  // internet (OSINT sources, downloads) only needs light shaping.
+  const isPrivateHost = (host) => /^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host);
+  const policyFor = (host) => isPrivateHost(host)
+    ? { maxConc: 2, minGapMs: 250, cooldownMs: 30_000 }
+    : { maxConc: 8, minGapMs: 0, cooldownMs: 5_000 };
+  const targets = new Map();
+  const stateOf = (key) => {
+    let s = targets.get(key);
+    if (!s) { s = { conc: 0, lastConn: 0, cooldownUntil: 0, fails: 0 }; targets.set(key, s); }
+    return s;
+  };
+  const hostOf = (dst) => String(dst).split(":")[0];
+  const acquire = (dst, socket) => new Promise((resolve) => {
+    const s = stateOf(dst);
+    const policy = policyFor(hostOf(dst));
+    let done = false;
+    const tryTake = () => {
+      if (done) return;
+      const now = Date.now();
+      if (now < s.cooldownUntil || s.conc >= policy.maxConc || now - s.lastConn < policy.minGapMs) return;
+      done = true; s.conc += 1; s.lastConn = now;
+      clearInterval(timer); resolve(true);
+    };
+    const timer = setInterval(tryTake, 100);
+    tryTake();
+    const bail = () => { if (!done) { done = true; clearInterval(timer); resolve(false); } };
+    socket.once("close", bail);
+    setTimeout(bail, 30_000).unref?.();
+  });
+  const release = (dst) => { const s = stateOf(dst); s.conc = Math.max(0, s.conc - 1); };
+  const failTally = (dst) => {
+    const s = stateOf(dst);
+    s.fails += 1;
+    if (s.fails >= 3) { s.cooldownUntil = Date.now() + 60_000; s.fails = 0; audit({ dst, action: "circuit-open", cooldownMs: 60_000 }); }
+  };
+  const note429 = (dst) => {
+    const cooldownMs = policyFor(hostOf(dst)).cooldownMs;
+    const s = stateOf(dst);
+    s.cooldownUntil = Date.now() + cooldownMs;
+    s.fails = 0;
+    audit({ dst, action: "429-circuit-open", cooldownMs });
+  };
+  const dial = (dst, port, socket, onConnected) => {
+    const origin = connect({ host: hostOf(dst), port });
+    origin.setTimeout(15_000, () => origin.destroy(new Error("origin connect timeout")));
+    origin.once("error", (error) => {
+      failTally(dst);
+      audit({ dst, action: "origin-error", error: String(error.message) });
+      release(dst);
+      try { socket.end("HTTP/1.1 502 Egress origin error\r\ncontent-length: 0\r\n\r\n"); } catch { /* gone */ }
+    });
+    origin.once("connect", () => onConnected(origin));
+    socket.once("error", () => { try { origin.destroy(); } catch { /* gone */ } });
+    return origin;
+  };
+  const trackBytes = (dst, socket, origin) => {
+    let bytes = 0;
+    let finished = false;
+    const finish = () => { if (finished) return; finished = true; release(dst); audit({ dst, action: "closed", bytes }); };
+    socket.on("data", (c) => { bytes += c.length; });
+    origin.on("data", (c) => { bytes += c.length; });
+    socket.once("close", finish);
+    origin.once("close", finish);
+  };
+  // HTTPS: CONNECT host:port — blind tunnel after admission (no SNI peek in v1).
+  const handleConnect = async (socket, dst) => {
+    if (!dst) { socket.end("HTTP/1.1 400 Bad Request\r\n\r\n"); return; }
+    if (!(await acquire(dst, socket))) { audit({ dst, action: "denied-timeout" }); socket.end("HTTP/1.1 503 Egress throttled\r\ncontent-length: 0\r\n\r\n"); return; }
+    const port = Number(dst.split(":")[1]) || 443;
+    dial(dst, port, socket, (origin) => {
+      socket.write("HTTP/1.1 200 Connection established\r\n\r\n");
+      trackBytes(dst, socket, origin);
+      socket.pipe(origin);
+      origin.pipe(socket);
+    });
+  };
+  // Plain HTTP: absolute-form proxy request; rewrite to origin-form, forward,
+  // and peek the origin's first line for a 429 to trip the circuit.
+  const handlePlain = async (socket, firstLine, head) => {
+    let url;
+    try { url = new URL(firstLine.split(" ")[1] ?? ""); } catch { socket.end("HTTP/1.1 400 Bad Request\r\n\r\n"); return; }
+    const dst = `${url.hostname}:${url.port || 80}`;
+    if (!(await acquire(dst, socket))) { audit({ dst, action: "denied-timeout" }); socket.end("HTTP/1.1 503 Egress throttled\r\ncontent-length: 0\r\n\r\n"); return; }
+    const nl = head.indexOf("\r\n");
+    const originForm = `${url.pathname}${url.search}`;
+    const rewritten = Buffer.concat([Buffer.from(`${firstLine.split(" ")[0]} ${originForm} HTTP/1.1\r\n`, "latin1"), head.subarray(nl + 2)]);
+    dial(dst, Number(dst.split(":")[1]) || 80, socket, (origin) => {
+      origin.write(rewritten);
+      trackBytes(dst, socket, origin);
+      origin.once("data", (first) => {
+        if (/^HTTP\/[\d.]+\s+429\b/.test(first.toString("latin1").slice(0, 32))) note429(dst);
+        if (!socket.destroyed) socket.write(first);
+        origin.pipe(socket);
+      });
+      socket.pipe(origin);
+    });
+  };
+  const server = createServer((socket) => {
+    socket.once("error", () => {});
+    socket.setTimeout(120_000, () => socket.destroy());
+    let head = Buffer.alloc(0);
+    const onData = (chunk) => {
+      head = Buffer.concat([head, chunk]);
+      if (!head.includes("\r\n\r\n") && head.length < 16_384) return;
+      socket.removeListener("data", onData);
+      const firstLine = head.toString("latin1").split("\r\n")[0] ?? "";
+      if (/^CONNECT\s+/i.test(firstLine)) { void handleConnect(socket, firstLine.split(/\s+/)[1]?.trim()); }
+      else if (/^(GET|POST|PUT|DELETE|HEAD|OPTIONS|PATCH)\s+/i.test(firstLine)) { void handlePlain(socket, firstLine, head); }
+      else socket.end("HTTP/1.1 400 Bad Request\r\n\r\n");
+    };
+    socket.on("data", onData);
+  });
+  server.on("error", (error) => {
+    if (error?.code === "EADDRINUSE") console.log(`[tsec] egress gateway already owned by another lane (127.0.0.1:${EGRESS_PORT})`);
+    else console.warn(`[tsec] egress gateway unavailable (${error?.message ?? error}) — script traffic runs ungated`);
+  });
+  server.listen(EGRESS_PORT, "127.0.0.1", () => {
+    console.log(`[tsec] egress gateway listening on 127.0.0.1:${EGRESS_PORT} (private targets: 2 conc / 250ms gap / 429 cooldown; lane ${process.env.TSEC_LANE ?? "main"})`);
+  });
+}
+
 // ---------------------------------------------------------------- task build
 
 const DIFFICULTY_RANK = { easy: 0, medium: 1, hard: 2 };
 const remainingOf = (c) => Math.max((c.flag_count ?? 1) - (c.correct_flag_count ?? 0), 0);
 
+// R34: category resolution ladder — platform metadata first (authoritative
+// when the event provides it), legacy code prefixes second (NSSCTF-style
+// sets), then a keyword classifier over name+description. Unknown categories
+// are logged once per code instead of silently dropping the playbook.
+let categoryHints = new Map();
+const CATEGORY_KEYWORDS = [
+  ["reverse", /逆向|反编译|apk|android|\belf\b|脱壳|\bupx\b|crackme|算法还原|\.so文件|jadx|加固/],
+  ["pwn", /栈溢出|堆溢出|格式化字符串|shellcode|\brop\b|\blibc\b|getshell|保护机制|\bnx\b|canary|seccomp|one_gadget|远程二进制/],
+  ["crypto", /\brsa\b|\baes\b|\bdes\b|\bsm[234]\b|lattice|公钥|密文|密码学|加密算法|随机数|padding oracle|离散对数|哈希长度/],
+  ["misc", /隐写|steghide|音频|频谱|\bpng\b|取证|内存镜像|磁盘|流量|pcap|wireshark|二维码|压缩包|压缩文件|附件/],
+  ["osint", /osint|开源情报|社交媒体|情报收集|人肉/],
+  ["web", /ssti|\bsql\b|注入|\bwaf\b|登录|门户|ssrf|反序列化|session|\bjwt\b|\bcms\b|后台|上传|\bxss\b|\bxxe\b|cors|越权|bypass|网站|管理面板|api服务/],
+];
+const CATEGORY_ALIASES = { re: "reverse", stego: "misc", forensics: "misc", web: "web", crypto: "crypto", pwn: "pwn", reverse: "reverse", misc: "misc", osint: "osint" };
 function categoryOf(code) {
-  const match = String(code).toLowerCase().match(/^(web|crypto|pwn|re|reverse|misc|forensics|osint|stego)/);
-  if (!match) return undefined;
-  return { re: "reverse", stego: "misc" }[match[1]] ?? match[1];
+  const legacy = String(code).toLowerCase().match(/^(web|crypto|pwn|re|reverse|misc|forensics|osint|stego)/);
+  if (legacy) return CATEGORY_ALIASES[legacy[1]] ?? legacy[1];
+  const hint = categoryHints.get(code);
+  const meta = CATEGORY_ALIASES[String(hint?.category ?? "").toLowerCase().trim()];
+  if (meta) return meta;
+  const hay = `${hint?.name ?? ""} ${hint?.desc ?? ""}`.toLowerCase();
+  if (!hay.trim()) return undefined;
+  for (const [cat, re] of CATEGORY_KEYWORDS) if (re.test(hay)) return cat;
+  return undefined;
 }
 
 // ------------------------------------------------ arena discipline (R15)
@@ -963,8 +1180,14 @@ const CATEGORY_PACKS = {
   misc: "Misc:先 file/strings/exif/010 结构识别再动手;媒体文件注意隐写字段与附加数据;取证题先时间线与元数据,再内容层分析。",
   osint: "OSINT:先从题面提取可检索实体并交叉验证;公开来源优先,结论必须至少两个独立来源一致。",
 };
+const unknownCategoryLogged = new Set();
 function disciplineFor(code) {
-  const pack = CATEGORY_PACKS[categoryOf(code) ?? ""];
+  const cat = categoryOf(code);
+  if (!cat && !unknownCategoryLogged.has(code)) {
+    unknownCategoryLogged.add(code);
+    console.warn(`[tsec] ${code}: no category detected (no platform metadata, no keyword hit) — generic discipline only`);
+  }
+  const pack = CATEGORY_PACKS[cat ?? ""];
   return pack ? ARENA_DISCIPLINE + "\n【本类题打法】\n" + pack : ARENA_DISCIPLINE;
 }
 
@@ -987,6 +1210,7 @@ function buildTask(challenge, budgetMinutes, direction, freshEyes = false) {
   lines.push(`# HARD CONSTRAINTS`);
   if (addrs.length > 0) lines.push(`- 远程是脆弱单实例:串行请求、最多 2 个并发连接,严禁扫描器式并发;续跑开局先轻探一次确认存活,死亡立即以 blocked 结束`);
   if (addrs.length > 0) lines.push(`- 本题可能有多个并行 worker 共享同一实例:你只是其中之一,按全局串行执行——每个请求等完整响应后再发下一个,严禁多脚本/多循环同时压同一目标`);
+  lines.push(`- 出网纪律:沙箱脚本的 HTTP(S) 流量强制经限流网关,出现排队等待属正常限流不是故障;收到 429/WAF 拦截=该路线立即停止并换方法,严禁脚本批量轰炸——任何单脚本超过 30 个请求必须分批并加 1 秒以上间隔`);
   lines.push(`- 严禁重做/重推下方 VERIFIED FACTS 与 EXCLUDED 中的任何内容,开局即增量实验`);
   lines.push(`- flag 只认远程实际读取且复读一致,严禁提交猜测值;每个 flag 确认后立即自交,不要攒到最后`);
   lines.push(`- 平台付费提示严禁自行查看(题内已附 HINT 除外)`);
@@ -1697,22 +1921,42 @@ async function solveFanOut(challenge) {
 // challenge before the task ended. Within chains: more remaining flags then higher score.
 // Singles keep the old shape: easier first, higher score first.
 const chainOf = (c) => (c.flag_count ?? 1) > 1 && remainingOf(c) > 0;
-const byPriority = (a, b) =>
-  ((chainOf(b) ? 1 : 0) - (chainOf(a) ? 1 : 0))
-  || (chainOf(a) && chainOf(b)
-    ? ((remainingOf(b) - remainingOf(a)) || ((b.total_score ?? 0) - (a.total_score ?? 0)))
-    : 0)
-  || ((DIFFICULTY_RANK[String(a.difficulty ?? "").toLowerCase()] ?? 3) - (DIFFICULTY_RANK[String(b.difficulty ?? "").toLowerCase()] ?? 3))
-  // R33: within a difficulty tier, value-density first — remaining score
-  // share weighted by evidence proximity beats the flat fewer-flags rule.
-  || (expectedScoreRate(b) - expectedScoreRate(a))
-  || (remainingOf(a) - remainingOf(b))
-  || ((b.total_score ?? 0) - (a.total_score ?? 0))
-  || ((a.level ?? 0) - (b.level ?? 0))
-  // R32: with the 3-instance cap, slot turnover IS the score rate — a
-  // challenge whose container is already up starts instantly; a cold start
-  // costs 1-3 provisioning minutes inside the budget.
-  || ((b.container_status === "available" ? 1 : 0) - (a.container_status === "available" ? 1 : 0));
+// R34: comparators must not read shared files mid-sort (unstable ordering
+// when another lane writes between two comparisons). Everything a comparison
+// needs is computed ONCE per item object via a WeakMap snapshot.
+const prioritySnapshots = new WeakMap();
+function snapOf(item) {
+  let s = prioritySnapshots.get(item);
+  if (!s) {
+    s = {
+      chain: chainOf(item) ? 1 : 0,
+      remaining: remainingOf(item),
+      score: item.total_score ?? 0,
+      rank: DIFFICULTY_RANK[String(item.difficulty ?? "").toLowerCase()] ?? 3,
+      rate: expectedScoreRate(item),
+      level: item.level ?? 0,
+      avail: item.container_status === "available" ? 1 : 0,
+    };
+    prioritySnapshots.set(item, s);
+  }
+  return s;
+}
+const byPriority = (a, b) => {
+  const A = snapOf(a), B = snapOf(b);
+  return (B.chain - A.chain)
+    || (A.chain && B.chain ? ((B.remaining - A.remaining) || (B.score - A.score)) : 0)
+    || (A.rank - B.rank)
+    // R33: within a difficulty tier, value-density first — expected remaining
+    // score over expected effort (R34: time-normalized), evidence-weighted.
+    || (B.rate - A.rate)
+    || (A.remaining - B.remaining)
+    || (B.score - A.score)
+    || (A.level - B.level)
+    // R32: with the 3-instance cap, slot turnover IS the score rate — a
+    // challenge whose container is already up starts instantly; a cold start
+    // costs 1-3 provisioning minutes inside the budget.
+    || (B.avail - A.avail);
+};
 
 // Fallback submissions: values the agent verified but could not self-submit
 // (endpoint hiccup, missed turn) surface as VERIFIED_FLAG findings. They are
@@ -2097,6 +2341,7 @@ async function cmdLoop() {
   const role = process.env.TSEC_ROLE ?? "mixed";
   if (role !== "mixed") console.log(`[tsec] lane role: ${role}`);
   await startSubmitProxy(); // R33: first lane up owns the loopback submit proxy
+  await startEgressGateway(); // R34: script-traffic rate limiting + 429 circuits
   let consecutiveMisses = 0;
   // R13 slot-hold join: consecutive slot-full holds per lane, and the codes
   // already joined this hold episode (reset once the lane wins a slot again).

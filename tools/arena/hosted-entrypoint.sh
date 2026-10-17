@@ -209,6 +209,20 @@ if [ "$DUAL_KEYS" = "1" ] && [ "$DPSK_MODE" = "main" ]; then
   export XUANSHU_FANOUT_BASE="${XUANSHU_FANOUT_BASE:-$FAST_BASE}"
 fi
 
+# R34 egress gateway: script traffic (python/curl — src/sandbox.ts passes
+# these into run_command children) flows through the in-driver rate-limiting
+# proxy on :7321; challenge VPN targets get strict per-instance caps and 429
+# circuit-breaking, public internet light shaping. Loopback/model/platform
+# stay direct. TSEC_EGRESS=off disables both this export and the driver side.
+if [ "${TSEC_EGRESS:-on}" = "on" ]; then
+  export HTTP_PROXY="http://127.0.0.1:${TSEC_EGRESS_PORT:-7321}"
+  export HTTPS_PROXY="$HTTP_PROXY"
+  export http_proxy="$HTTP_PROXY"
+  export https_proxy="$HTTP_PROXY"
+  export NO_PROXY="127.0.0.1,localhost,::1,.tsecbench.gw,.zc.tencent.com,.bigmodel.cn,.deepseek.com,api.deepseek.com,169.254.169.254"
+  export no_proxy="$NO_PROXY"
+fi
+
 echo "[hosted] launching driver lanes: 4 deep + 2 prospector + 2 sweep (8-lane R31 strategy)"
 # R7 lane plan (bctf top-6 post-mortem): the 6-lane shape keeps the R4 deep
 # grinders and prospector, and adds two sweep lanes for singles coverage —

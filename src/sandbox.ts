@@ -275,6 +275,15 @@ async function executeCommand(
         XUANSHU_RUN_NAMESPACE: input.namespace ?? "shared",
         LC_ALL: "C.UTF-8",
         LANG: "C.UTF-8",
+        // R14 egress passthrough: when the host exports proxy vars (hosted
+        // egress gateway), scripts honor them (python requests/urllib, curl).
+        // Absent here = absent for the child: no behavior change otherwise.
+        ...(process.env.HTTP_PROXY ? { HTTP_PROXY: process.env.HTTP_PROXY } : {}),
+        ...(process.env.HTTPS_PROXY ? { HTTPS_PROXY: process.env.HTTPS_PROXY } : {}),
+        ...(process.env.http_proxy ? { http_proxy: process.env.http_proxy } : {}),
+        ...(process.env.https_proxy ? { https_proxy: process.env.https_proxy } : {}),
+        ...(process.env.NO_PROXY ? { NO_PROXY: process.env.NO_PROXY } : {}),
+        ...(process.env.no_proxy ? { no_proxy: process.env.no_proxy } : {}),
       },
     });
 
