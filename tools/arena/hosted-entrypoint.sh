@@ -50,8 +50,21 @@ if [ -n "$GLM_POOL" ]; then
   export XUANSHU_MODEL_API_KEYS="$GLM_POOL"
 fi
 
-DPSK_ID="${DEEPSEEK_MODEL_ID:-deepseek-reasoner}"
+DPSK_ID="${DEEPSEEK_MODEL_ID:-deepseek-flash}"
 DPSK_BASE="${DEEPSEEK_ANTHROPIC_BASE:-http://api.deepseek.com.tsecbench.gw/anthropic}"
+# R30: deepseek-flash (2026-10-17) carries a 1M window; 400000 keeps parity
+# with the GLM-shaped flows and stays far under the real ceiling.
+DPSK_CTX="${DEEPSEEK_CONTEXT_WINDOW:-400000}"
+
+# R30: panel-settable reasoning budget. The SDK session is created with this
+# level once (per-turn downgrade is impossible), so it must be right at boot:
+# max = 61,440-token thinking budget (agent-driver THINKING_BUDGET_TOKENS).
+# Applied before container-fast.yaml is generated, so both servers inherit it.
+case "${TSEC_THINKING_LEVEL:-high}" in
+  off|minimal|low|medium|high|xhigh|max) THINKING_LEVEL="${TSEC_THINKING_LEVEL:-high}" ;;
+  *) THINKING_LEVEL="high" ;;
+esac
+sed -i "s|^  thinkingLevel: high|  thinkingLevel: ${THINKING_LEVEL}|" config/container.yaml
 
 if [ "$DUAL_KEYS" = "1" ]; then
   export XUANSHU_MODEL_API_KEY="${XUANSHU_MODEL_API_KEY:-$BIGMODEL_API_KEY}"
@@ -72,7 +85,7 @@ elif [ -n "${DEEPSEEK_API_KEY:-}" ]; then
   sed -i -e "s|^  id: glm-5.3|  id: ${DPSK_ID}|" \
          -e "s|^  name: GLM 5.3|  name: DeepSeek|" \
          -e "s|^  baseUrl: https://open.bigmodel.cn/api/anthropic|  baseUrl: ${DPSK_BASE}|" \
-         -e "s|^  contextWindow: 400000|  contextWindow: 128000|" \
+         -e "s|^  contextWindow: 400000|  contextWindow: ${DPSK_CTX}|" \
          config/container.yaml
 else
   echo "[hosted] FATAL: configure BIGMODEL_API_KEY (GLM) and/or DEEPSEEK_API_KEY in the runtime env panel" >&2
@@ -83,7 +96,7 @@ fi
 # server does not).
 if [ "$DUAL_KEYS" = "0" ] && [ -n "${DEEPSEEK_API_KEY:-}" ]; then
   export BIGMODEL_BASE_URL="${BIGMODEL_BASE_URL:-http://api.deepseek.com.tsecbench.gw/v1}"
-  export ARENA_MODEL_ID="${ARENA_MODEL_ID:-deepseek-reasoner}"
+  export ARENA_MODEL_ID="${ARENA_MODEL_ID:-${DPSK_ID}}"
 else
   export BIGMODEL_BASE_URL="${BIGMODEL_BASE_URL:-http://open.bigmodel.cn.tsecbench.gw/api/anthropic}"
   export ARENA_MODEL_ID="${ARENA_MODEL_ID:-glm-5.3}"
@@ -151,10 +164,10 @@ if [ "$DUAL_KEYS" = "1" ] && [ "$DPSK_MODE" = "main" ]; then
   export XUANSHU_FAST_FALLBACK_API_KEY="$DEEPSEEK_API_KEY"
   export XUANSHU_DPSK_MAIN_API_KEY="$DEEPSEEK_API_KEY"
   export XUANSHU_FALLBACK_API_KEY="$BIGMODEL_API_KEY"
-  sed -i -e "s|^  id: glm-5.3|  id: ${DPSK_ID}|"          -e "s|^  name: GLM 5.3|  name: DeepSeek Main|"          -e "s|^  baseUrl: https://open.bigmodel.cn/api/anthropic|  baseUrl: ${DPSK_BASE}|"          -e "s|^  apiKeyEnv: XUANSHU_MODEL_API_KEY|  apiKeyEnv: XUANSHU_DPSK_MAIN_API_KEY|"          -e "s|^  apiKeyPoolEnv: XUANSHU_MODEL_API_KEYS|  apiKeyPoolEnv: XUANSHU_DPSK_MAIN_POOL|"          -e "s|^  contextWindow: 400000|  contextWindow: 128000|"          -e "s|^  modelMinIntervalMs: 500$|  modelMinIntervalMs: 5000|"          -e "s|^  modelRequestsPerMinute: 120$|  modelRequestsPerMinute: 54|"          -e "s|^  modelTokensPerMinute: 1000000$|  modelTokensPerMinute: 540000|"          -e "s|^    id: ${DPSK_ID}|    id: glm-5.3|"          -e "s|^    name: DeepSeek Rescue|    name: GLM Auxiliary|"          -e "s|^    baseUrl: ${DPSK_BASE}|    baseUrl: https://open.bigmodel.cn/api/anthropic|"          -e "s|^    contextWindow: 128000|    contextWindow: 400000|"          config/container.yaml
+  sed -i -e "s|^  id: glm-5.3|  id: ${DPSK_ID}|"          -e "s|^  name: GLM 5.3|  name: DeepSeek Main|"          -e "s|^  baseUrl: https://open.bigmodel.cn/api/anthropic|  baseUrl: ${DPSK_BASE}|"          -e "s|^  apiKeyEnv: XUANSHU_MODEL_API_KEY|  apiKeyEnv: XUANSHU_DPSK_MAIN_API_KEY|"          -e "s|^  apiKeyPoolEnv: XUANSHU_MODEL_API_KEYS|  apiKeyPoolEnv: XUANSHU_DPSK_MAIN_POOL|"          -e "s|^  contextWindow: 400000|  contextWindow: ${DPSK_CTX}|"          -e "s|^  modelMinIntervalMs: 500$|  modelMinIntervalMs: 5000|"          -e "s|^  modelRequestsPerMinute: 120$|  modelRequestsPerMinute: 54|"          -e "s|^  modelTokensPerMinute: 1000000$|  modelTokensPerMinute: 540000|"          -e "s|^    id: ${DPSK_ID}|    id: glm-5.3|"          -e "s|^    name: DeepSeek Rescue|    name: GLM Auxiliary|"          -e "s|^    baseUrl: ${DPSK_BASE}|    baseUrl: https://open.bigmodel.cn/api/anthropic|"          -e "s|^    contextWindow: 128000|    contextWindow: 400000|"          config/container.yaml
   FAST_SERVER_DESC="GLM key pool (auxiliary bulk)"
 elif [ "$DUAL_KEYS" = "1" ] && [ "$DPSK_MODE" = "lanes" ]; then
-  sed -e "s|^  port: 7318|  port: 7319|"       -e "s|^  apiKeyPoolEnv: XUANSHU_MODEL_API_KEYS|  apiKeyPoolEnv: XUANSHU_FAST_MODEL_API_KEYS|"       -e "s|^  id: glm-5.3|  id: ${DPSK_ID}|"       -e "s|^  name: GLM 5.3|  name: DeepSeek Fast|"       -e "s|^  baseUrl: https://open.bigmodel.cn/api/anthropic|  baseUrl: ${DPSK_BASE}|"       -e "s|^  apiKeyEnv: XUANSHU_MODEL_API_KEY|  apiKeyEnv: XUANSHU_FAST_MODEL_API_KEY|"       -e "s|^  contextWindow: 400000|  contextWindow: 128000|"       -e "s|^  modelMinIntervalMs: 500$|  modelMinIntervalMs: 5000|"       -e "s|^  modelRequestsPerMinute: 120$|  modelRequestsPerMinute: 54|"       -e "s|^  modelTokensPerMinute: 1000000$|  modelTokensPerMinute: 540000|"       config/container.yaml > config/container-fast.yaml
+  sed -e "s|^  port: 7318|  port: 7319|"       -e "s|^  apiKeyPoolEnv: XUANSHU_MODEL_API_KEYS|  apiKeyPoolEnv: XUANSHU_FAST_MODEL_API_KEYS|"       -e "s|^  id: glm-5.3|  id: ${DPSK_ID}|"       -e "s|^  name: GLM 5.3|  name: DeepSeek Fast|"       -e "s|^  baseUrl: https://open.bigmodel.cn/api/anthropic|  baseUrl: ${DPSK_BASE}|"       -e "s|^  apiKeyEnv: XUANSHU_MODEL_API_KEY|  apiKeyEnv: XUANSHU_FAST_MODEL_API_KEY|"       -e "s|^  contextWindow: 400000|  contextWindow: ${DPSK_CTX}|"       -e "s|^  modelMinIntervalMs: 500$|  modelMinIntervalMs: 5000|"       -e "s|^  modelRequestsPerMinute: 120$|  modelRequestsPerMinute: 54|"       -e "s|^  modelTokensPerMinute: 1000000$|  modelTokensPerMinute: 540000|"       config/container.yaml > config/container-fast.yaml
   FAST_SERVER_DESC="${DPSK_ID} (fast bulk)"
 fi
 if [ -f config/container-fast.yaml ]; then
