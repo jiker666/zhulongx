@@ -2108,6 +2108,10 @@ async function solveOneInner(challenge) {
 // R36: 4 -> 6 — with per-server run gates at 32 the swarms no longer queue
 // behind the gate; wider directed fan-out is the cheapest token-to-flag trade.
 const FANOUT_WORKERS = Number(process.env.TSEC_FANOUT_WORKERS ?? "") || 6;
+// R40 (run 36655): the endgame floor gets its own knob — a single GLM key
+// cannot feed a 6-wide swarm (the single-key profile sets 2). Wide endgame
+// auto-swarms assume key-pool/fallback headroom that one key does not have.
+const ENDGAME_FANOUT_WORKERS = Number(process.env.TSEC_ENDGAME_FANOUT_WORKERS ?? "") || 6;
 const FANOUT_WALL_MIN = 34;
 function fanoutDirections(code, count) {
   const board = boardFor(code);
@@ -2161,7 +2165,7 @@ async function solveFanOut(challenge) {
       throw Object.assign(new Error("vpn_unreachable"), { vpnDown: true });
     }
 
-    const workers = Math.max(FANOUT_WORKERS, currentPhase === "endgame" ? 6 : 0);
+    const workers = Math.max(FANOUT_WORKERS, currentPhase === "endgame" ? ENDGAME_FANOUT_WORKERS : 0);
     const dirs = fanoutDirections(code, workers);
     if (workers > 3) console.log(`[tsec] fan-out ${code}: ${workers} directed workers (${currentPhase}${FANOUT_WORKERS > 3 ? `, TSEC_FANOUT_WORKERS=${FANOUT_WORKERS}` : ""})`);
     const deadline = Date.now() + FANOUT_WALL_MIN * 60_000;

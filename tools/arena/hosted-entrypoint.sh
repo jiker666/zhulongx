@@ -99,6 +99,19 @@ if [ "$DUAL_KEYS" = "1" ]; then
          config/container.yaml
 elif [ -n "${BIGMODEL_API_KEY:-}" ]; then
   export XUANSHU_MODEL_API_KEY="${XUANSHU_MODEL_API_KEY:-$BIGMODEL_API_KEY}"
+  # R40 single-key profile (run 36655 post-mortem): one GLM account cannot
+  # carry 8 lanes at unlimited pacing — after ~50 min the provider throttled
+  # the whole account (1-token latency 1.6s -> 8.3s), stalled runs piled up
+  # on the 32-run gate, lanes tripped infraWall pauses, and the fleet sat
+  # idle with the score frozen. Size everything to one key: conservative
+  # request pacing, a run gate the key can actually feed, capped fan-out,
+  # and a 4-lane fleet (2 deep + 1 prospector + 1 sweep). All knobs are
+  # env-overridable from the runtime panel.
+  sed -i -e "s|^  modelMinIntervalMs: 100$|  modelMinIntervalMs: ${GLM_SINGLE_MIN_INTERVAL_MS:-1500}|"          -e "s|^  modelRequestsPerMinute: 600$|  modelRequestsPerMinute: ${GLM_SINGLE_RPM:-40}|"          -e "s|^  modelTokensPerMinute: 10000000$|  modelTokensPerMinute: ${GLM_SINGLE_TPM:-500000}|"          config/container.yaml
+  export XUANSHU_MAX_CONCURRENT_RUNS="${XUANSHU_MAX_CONCURRENT_RUNS:-6}"
+  export TSEC_FANOUT_WORKERS="${TSEC_FANOUT_WORKERS:-2}"
+  export TSEC_ENDGAME_FANOUT_WORKERS="${TSEC_ENDGAME_FANOUT_WORKERS:-2}"
+  SINGLE_KEY_PROFILE=1
 elif [ -n "${DEEPSEEK_API_KEY:-}" ]; then
   export XUANSHU_MODEL_API_KEY="${XUANSHU_MODEL_API_KEY:-$DEEPSEEK_API_KEY}"
   sed -i -e "s|^  id: glm-5.3|  id: ${DPSK_ID}|" \
@@ -278,14 +291,24 @@ lane_loop() {
     sleep 30
   done
 }
-lane_loop lane-a deep "" &
-lane_loop lane-b deep "" &
-lane_loop lane-c deep "" &
-lane_loop lane-d deep "" &
-lane_loop lane-e prospector "$FAST_BASE" &
-lane_loop lane-f prospector "$FAST_BASE" &
-lane_loop lane-g sweep "$FAST_BASE" &
-lane_loop lane-h sweep "$FAST_BASE" &
+# R40: single-key mode runs a 4-lane fleet (2 deep grinders + 1 prospector
+# + 1 sweep, all on the one :7318 GLM server, paced per the profile above).
+# 8 lanes over one key is what starved run 36655.
+if [ "${SINGLE_KEY_PROFILE:-0}" = "1" ]; then
+  lane_loop lane-a deep "" &
+  lane_loop lane-b deep "" &
+  lane_loop lane-e prospector "" &
+  lane_loop lane-g sweep "" &
+else
+  lane_loop lane-a deep "" &
+  lane_loop lane-b deep "" &
+  lane_loop lane-c deep "" &
+  lane_loop lane-d deep "" &
+  lane_loop lane-e prospector "$FAST_BASE" &
+  lane_loop lane-f prospector "$FAST_BASE" &
+  lane_loop lane-g sweep "$FAST_BASE" &
+  lane_loop lane-h sweep "$FAST_BASE" &
+fi
 
 # The lanes exit themselves when the benchmark task ends (invalid_state);
 # the platform tears the container down at the task time limit regardless.

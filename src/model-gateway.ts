@@ -579,7 +579,12 @@ export class ModelGateway {
     if (!upstreamResponse) {
       if (!failoverActive && primaryFailed) {
         route.consecutiveFailures += 1;
-        if (route.consecutiveFailures >= this.failureThreshold) route.fallbackUntil = Date.now() + this.cooldownMs;
+        // R40 (run 36655): failover dead-time only means something when a
+        // fallback upstream exists — with fallbackUpstream unset and a
+        // single-key pool, arming fallbackUntil just paints every request
+        // "failing over" into a wall while the same key is the only
+        // candidate. Single-key mode backoff-retries the key instead.
+        if (route.consecutiveFailures >= this.failureThreshold && this.fallbackUpstream !== undefined) route.fallbackUntil = Date.now() + this.cooldownMs;
         void route.options.emit?.({
           type: "model.failover",
           data: {
