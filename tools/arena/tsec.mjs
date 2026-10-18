@@ -1867,7 +1867,16 @@ async function solveOneInner(challenge) {
       ...(parentRunId ? { lineage: { parentRunId } } : {}),
     }),
   }, 45_000, 0);
-  if (created.status !== 202) die(`xuanshu run creation failed: ${created.status} ${JSON.stringify(created.json).slice(0, 300)}`);
+  if (created.status !== 202) {
+    // R41 (run 36655 churn): creation failing (run gate jammed by stalled
+    // runs / model key dead) used to die() the lane — the supervisor
+    // restarted it in 30s, it re-picked the same last-resort code, and the
+    // fleet churned /start-/close every ~40s for hours. Self-close, mark the
+    // attempt, and arm the infra wall instead of exiting.
+    try { await closeWithRetry(code); } catch { /* best-effort deterministic cleanup */ }
+    ledgerMark(code, "miss");
+    throw Object.assign(new Error(`xuanshu run creation failed: ${created.status} ${JSON.stringify(created.json ?? {}).slice(0, 300)}`), { infraWall: true });
+  }
   const runId = created.json.id;
   registerWatch(code, runId, budgetMs + 30 * 60_000); // now with the runId for watchdog stops
   writeLastrun(code, runId);
@@ -2112,6 +2121,10 @@ const FANOUT_WORKERS = Number(process.env.TSEC_FANOUT_WORKERS ?? "") || 6;
 // cannot feed a 6-wide swarm (the single-key profile sets 2). Wide endgame
 // auto-swarms assume key-pool/fallback headroom that one key does not have.
 const ENDGAME_FANOUT_WORKERS = Number(process.env.TSEC_ENDGAME_FANOUT_WORKERS ?? "") || 6;
+// R41: minutes a last-resort re-pick must wait after a code's latest
+// attempt (any settle or abort marks it). Caps endless single-code churn
+// once every other gate has fired.
+const LAST_RESORT_COOLDOWN_MS = (Number(process.env.TSEC_LAST_RESORT_COOLDOWN_MIN ?? "") || 15) * 60_000;
 const FANOUT_WALL_MIN = 34;
 function fanoutDirections(code, count) {
   const board = boardFor(code);
@@ -2439,6 +2452,14 @@ function pickNext(items, role = "mixed", forceFresh = false, lastResort = false)
       // clears — even for lastResort picks (re-offering them is the 36062
       // death loop).
       if ((done?.probeQuarantinedUntil ?? 0) > Date.now()) return false;
+      // R41: last-resort re-picks respect a per-code cooldown — when the
+      // pool collapses to one code an idle lane must not re-open it every
+      // wall-minute (36655 churned a single code for hours). Codes that
+      // last attempted recently wait out LAST_RESORT_COOLDOWN_MS.
+      if (lastResort) {
+        const lastAt = Date.parse(done?.at ?? "") || 0;
+        if (lastAt && Date.now() - lastAt < LAST_RESORT_COOLDOWN_MS) return false;
+      }
       return true;
     });
   // Lane roles (R4: 3 deep + 1 prospector):
