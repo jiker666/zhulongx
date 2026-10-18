@@ -1606,6 +1606,72 @@ async function probeVpn(addrs) {
   return null;
 }
 
+// ---- R39: container-readiness wait + probe-failure escalation ----------------
+// Run 36062 post-mortem: the readiness check allowed one 2.5s connect plus a
+// single 10s-later retry. When platform provisioning slowed past that window
+// (containers listening >15s after addr assignment), every retry-code episode
+// false-positived as vpnDown: no miss recorded, watch+claim released, the
+// watchdog closed the "orphan", and the next lane re-picked the same code —
+// 3h of 20-40s start/close cycles burning the 3-slot budget while scoring
+// zero. Fix: poll for real; on persistent failure escalate per-code (miss +
+// quarantine) and fleet-wide (breaker) instead of silently re-offering it.
+const PROBE_READY_MS = Number(process.env.TSEC_PROBE_READY_MS ?? 120_000);
+const PROBE_POLL_MS = Number(process.env.TSEC_PROBE_POLL_MS ?? 3_000);
+const PROBE_QUARANTINE_FIRST_MS = 10 * 60_000;
+const PROBE_QUARANTINE_REPEAT_MS = 30 * 60_000;
+const PROBE_BREAKER_CODES = 3; // distinct codes failing inside the window trips the breaker
+const PROBE_BREAKER_WINDOW = 5 * 60_000;
+const PROBE_BREAKER_HOLD = 10 * 60_000;
+
+async function waitForContainerReady(addrs, code) {
+  const deadline = Date.now() + PROBE_READY_MS;
+  const t0 = Date.now();
+  let lastLog = 0;
+  for (;;) {
+    const hit = await probeVpn(addrs);
+    if (hit) return hit;
+    if (Date.now() >= deadline) return null;
+    if (Date.now() - lastLog >= 15_000) {
+      lastLog = Date.now();
+      console.log(`[tsec] ${code}: container not listening yet (${Math.round((Date.now() - t0) / 1000)}s/${Math.round(PROBE_READY_MS / 1000)}s) — ${addrs.join(", ")}`);
+    }
+    await sleep(PROBE_POLL_MS);
+  }
+}
+
+// Per-code escalation + fleet breaker. probeFails>=2 also marks a miss (hint
+// arming, budget ladder); a single transient failure costs only the short
+// quarantine, so a brief provisioning blip cannot poison good challenges.
+function noteProbeFailure(code) {
+  try {
+    ledgerUpdate((ledger) => {
+      const prior = ledger.done[code] ?? { misses: 0 };
+      const probeFails = (prior.probeFails ?? 0) + 1;
+      ledger.done[code] = { ...prior,
+        ...(probeFails >= 2 ? { misses: (prior.misses ?? 0) + 1 } : {}),
+        probeFails,
+        probeQuarantinedUntil: Date.now() + (probeFails >= 2 ? PROBE_QUARANTINE_REPEAT_MS : PROBE_QUARANTINE_FIRST_MS) };
+    });
+  } catch { /* ledger races are tolerated elsewhere; same here */ }
+  try {
+    const b = stateRead("vpnbreak", { fails: [], until: 0 });
+    const fails = [...(b.fails ?? []), { code, at: Date.now() }]
+      .filter((f) => Date.now() - f.at < PROBE_BREAKER_WINDOW);
+    const distinct = new Set(fails.map((f) => f.code)).size;
+    stateWrite("vpnbreak", distinct >= PROBE_BREAKER_CODES
+      ? { fails: [], until: Date.now() + PROBE_BREAKER_HOLD }
+      : { fails, until: b.until ?? 0 });
+  } catch { /* breaker is best-effort */ }
+}
+
+function probeBreakerActive() {
+  try {
+    return (stateRead("vpnbreak", { until: 0 }).until ?? 0) > Date.now();
+  } catch {
+    return false;
+  }
+}
+
 async function ensureContainer(challenge) {
   const code = challenge.unique_code;
   if (challenge.container_status === "available" && (challenge.container_addr ?? []).length > 0) return challenge;
@@ -1698,7 +1764,10 @@ async function solveOne(challenge) {
   } finally {
     clearWatch(code); // episode over: the watchdog must not see a stale owner
     releaseClaim(code);
-    ledgerAddSpent(code, Math.round((Date.now() - claimedAt) / 60_000));
+    // R39: ceil, not round — a 25s episode rounds to 0 minutes, so sub-minute
+    // failure loops never accumulated and HARD_SPENT_CAP could never trip
+    // during the 36062 churn.
+    ledgerAddSpent(code, Math.ceil((Date.now() - claimedAt) / 60_000));
   }
 }
 
@@ -1721,17 +1790,16 @@ async function solveOneInner(challenge) {
   }
   const priorAddr = boardContainer(code, addrs); // R16 instance lifecycle
   if (priorAddr && priorAddr !== addrs[0]) console.log(`[tsec] ${code} container restarted ${priorAddr} -> ${addrs[0]}`);
-  let reachable = await probeVpn(addrs);
+  // R39: real readiness wait (see waitForContainerReady). The old 15s window
+  // false-positived as vpnDown the moment provisioning slowed, and the
+  // throw-then-release path fed the 36062 start/close churn. Persistent
+  // failure now closes OUR OWN instance, escalates (miss + quarantine +
+  // fleet breaker), and only then throws.
+  const reachable = await waitForContainerReady(addrs, code);
   if (!reachable) {
-    // A just-started container often needs seconds before it listens (observed once:
-    // a 5-minute hold for one early probe); retry once before declaring
-    // the VPN down.
-    await sleep(10_000);
-    reachable = await probeVpn(addrs);
-  }
-  if (!reachable) {
-    // Do NOT mark a miss: the challenge is fine, the network is not.
-    console.warn(`[tsec] VPN unreachable for ${addrs.join(", ")} — connect the task's SSLVPN on this host; holding challenge`);
+    console.warn(`[tsec] ${code}: container never listened on ${addrs.join(", ")} after ${Math.round(PROBE_READY_MS / 1000)}s — closing instance, probe-fail escalation`);
+    try { await closeWithRetry(code); } catch { /* best-effort deterministic cleanup */ }
+    noteProbeFailure(code);
     throw Object.assign(new Error("vpn_unreachable"), { vpnDown: true });
   }
 
@@ -2082,9 +2150,16 @@ async function solveFanOut(challenge) {
       return false;
     }
     boardContainer(code, addrs); // R16 instance lifecycle
-    let reachable = await probeVpn(addrs);
-    if (!reachable) { await sleep(10_000); reachable = await probeVpn(addrs); }
-    if (!reachable) throw Object.assign(new Error("vpn_unreachable"), { vpnDown: true });
+    // R39: same readiness-wait + escalation as solveOneInner (the fan-out
+    // finally clears watch/claim but does not close the instance — leaving
+    // that to the watchdog is what fed the 36062 orphan-slot churn).
+    const reachable = await waitForContainerReady(addrs, code);
+    if (!reachable) {
+      console.warn(`[tsec] fan-out ${code}: container never listened after ${Math.round(PROBE_READY_MS / 1000)}s — closing instance, probe-fail escalation`);
+      try { await closeWithRetry(code); } catch { /* best-effort deterministic cleanup */ }
+      noteProbeFailure(code);
+      throw Object.assign(new Error("vpn_unreachable"), { vpnDown: true });
+    }
 
     const workers = Math.max(FANOUT_WORKERS, currentPhase === "endgame" ? 6 : 0);
     const dirs = fanoutDirections(code, workers);
@@ -2356,6 +2431,10 @@ function pickNext(items, role = "mixed", forceFresh = false, lastResort = false)
       const hardSingle = (item.flag_count ?? 1) === 1
         && (DIFFICULTY_RANK[String(item.difficulty ?? "").toLowerCase()] ?? 3) >= 2;
       if (!lastResort && hardSingle && (done?.spentMin ?? 0) >= HARD_SPENT_CAP) return false;
+      // R39: probe-quarantined codes are unpickable until the quarantine
+      // clears — even for lastResort picks (re-offering them is the 36062
+      // death loop).
+      if ((done?.probeQuarantinedUntil ?? 0) > Date.now()) return false;
       return true;
     });
   // Lane roles (R4: 3 deep + 1 prospector):
@@ -2727,6 +2806,14 @@ async function cmdLoop() {
         console.warn(`[tsec] phase shift: ${currentPhase} -> ${phase} (unsolved=${items.filter((item) => !item.is_completed).length})`);
         currentPhase = phase;
       }
+      // R39 fleet breaker: >=3 distinct codes failing readiness probes inside
+      // 5min means provisioning/the target network is down for everyone —
+      // hold this lane (no /start, no slot churn) until it clears.
+      while (probeBreakerActive()) {
+        const until = stateRead("vpnbreak", { until: 0 }).until ?? Date.now();
+        console.warn(`[tsec] probe-failure circuit breaker active — holding ~${Math.max(1, Math.ceil((until - Date.now()) / 60_000))}min (no /start)`);
+        await sleep(Math.min(60_000, Math.max(5_000, until - Date.now())));
+      }
       let candidate = pickNext(items, role, retryMisses >= 2);
       if (!candidate) {
         const remaining = items.filter((item) => !item.is_completed);
@@ -2762,8 +2849,11 @@ async function cmdLoop() {
           return 0;
         }
         if (error.vpnDown) {
-          console.warn("[tsec] waiting 5 minutes for the SSLVPN to come up");
-          await sleep(300_000);
+          // R39: the failing code is quarantined and the fleet breaker bounds
+          // a network-wide outage — 5min of lane sleep on top just idled
+          // healthy lanes for nothing.
+          console.warn("[tsec] vpn_unreachable episode closed (instance closed, code quarantined) — brief pause, then re-pick");
+          await sleep(60_000);
         } else if (error.infraWall) {
           // Three fast no-submission settles in a row = quota/model wall
           // (2026-10-09 20:15-20:24 burned six short runs against one).
