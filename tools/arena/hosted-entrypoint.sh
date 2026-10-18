@@ -137,34 +137,14 @@ cp /app/tools/arena/rogue-ldaps.py /workspace/tools/rogue-ldaps.py
 # process) — 30661's captcha challenge died to interactive-loop staleness.
 cp /app/tools/arena/captcha-ocr.py /workspace/tools/captcha-ocr.py
 
-echo "[hosted] starting ctf-sandbox executor"
-node dist/cli.js sandbox --config config/container.yaml &
-for i in $(seq 1 60); do
-  node dist/cli.js sandbox-health --config config/container.yaml >/dev/null 2>&1 && break
-  sleep 1
-done
-node dist/cli.js sandbox-health --config config/container.yaml >/dev/null 2>&1 \
-  || { echo "[hosted] FATAL: ctf-sandbox failed to become healthy"; exit 1; }
-
-echo "[hosted] starting xuanshu server"
-node dist/cli.js serve --config config/container.yaml &
-for i in $(seq 1 60); do
-  node -e "fetch('http://127.0.0.1:7318/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" && break
-  sleep 1
-done
-node -e "fetch('http://127.0.0.1:7318/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" \
-  || { echo "[hosted] FATAL: xuanshu server failed to become healthy"; exit 1; }
-
-# Dual-model routing (R8, bctf top-6 post-mortem): the #1 agent ran a model
-# ensemble (cheap/fast model for the bulk of calls, a stronger reasoner for
-# hard chains). When both keys are configured, a second xuanshu server on
-# :7319 carries the fast lanes (sweep/prospector) on DeepSeek while the deep
-# grinders stay on the proven GLM. Each server has its own rate gate and its
-# own upstream key, so the per-key gateway quota holds. Falls back to the
-# single server if :7319 fails to come up. NOTE (user ruling 2026-10-16): the
-# DeepSeek key is self-funded, so this split is OPT-IN — TSEC_DPSK_MODE=lanes.
-# Default reserve mode keeps every lane on the GLM key pool at :7318; DPSK
-# answers only through gateway failover (R19) and rescue dispatch.
+# Dual-model routing (R8/R28). DPSK_MODE=main (R28 ruling 2026-10-17, dpsk
+# 主力 / glm 辅助): :7318 is flipped to DeepSeek-main for the 4 deep grinders
+# while :7319 carries the GLM key pool for prospector + sweep + fan-outs.
+# DPSK_MODE=lanes keeps :7318 GLM and makes :7319 a DeepSeek fast server.
+# R37 (run 35842 post-mortem): this block MUST run before any server boots.
+# `serve` reads its config once at startup, and the main-mode flip used to
+# land AFTER :7318 was already up with the GLM config — so DPSK was never
+# called in any hosted run (34998: 128/128 sessions glm-5.3; 35842: same).
 DPSK_MODE="${TSEC_DPSK_MODE:-main}"
 FAST_BASE="http://127.0.0.1:7318"
 FAST_SERVER_DESC=""
@@ -185,6 +165,39 @@ elif [ "$DUAL_KEYS" = "1" ] && [ "$DPSK_MODE" = "lanes" ]; then
   sed -e "s|^  port: 7318|  port: 7319|"       -e "s|^  apiKeyPoolEnv: XUANSHU_MODEL_API_KEYS|  apiKeyPoolEnv: XUANSHU_FAST_MODEL_API_KEYS|"       -e "s|^  id: glm-5.3|  id: ${DPSK_ID}|"       -e "s|^  name: GLM 5.3|  name: DeepSeek Fast|"       -e "s|^  baseUrl: https://open.bigmodel.cn/api/anthropic|  baseUrl: ${DPSK_BASE}|"       -e "s|^  apiKeyEnv: XUANSHU_MODEL_API_KEY|  apiKeyEnv: XUANSHU_FAST_MODEL_API_KEY|"       -e "s|^  contextWindow: 400000|  contextWindow: ${DPSK_CTX}|"       -e "s|^  modelMinIntervalMs: 100$|  modelMinIntervalMs: ${DPSK_MIN_MS}|"       -e "s|^  modelRequestsPerMinute: 600$|  modelRequestsPerMinute: ${DPSK_RPM}|"       -e "s|^  modelTokensPerMinute: 10000000$|  modelTokensPerMinute: ${DPSK_TPM}|"       config/container.yaml > config/container-fast.yaml
   FAST_SERVER_DESC="${DPSK_ID} (fast bulk)"
 fi
+
+# R37 guard: verify the files say what this mode promises before anything
+# boots on them — a silent no-op sed here IS the 35842 failure mode (all
+# lanes on GLM, DPSK never called for the whole 8h run).
+if [ "$DUAL_KEYS" = "1" ]; then
+  case "$DPSK_MODE" in
+    main)
+      grep -q "^  id: ${DPSK_ID}" config/container.yaml         || echo "[hosted] WARN: DPSK main flip did not apply — :7318 stays GLM" >&2
+      grep -q "^  port: 7319" config/container-fast.yaml         || echo "[hosted] WARN: fast-server port sed did not apply" >&2 ;;
+    lanes)
+      grep -q "^  id: ${DPSK_ID}" config/container-fast.yaml         || echo "[hosted] WARN: fast-server DPSK sed did not apply" >&2 ;;
+  esac
+  echo "[hosted] model wiring: :7318=$(grep -m1 '^  id:' config/container.yaml | awk '{print $2}') fallback=$(grep -m1 '^    id:' config/container.yaml | awk '{print $2}')"
+fi
+
+echo "[hosted] starting ctf-sandbox executor"
+node dist/cli.js sandbox --config config/container.yaml &
+for i in $(seq 1 60); do
+  node dist/cli.js sandbox-health --config config/container.yaml >/dev/null 2>&1 && break
+  sleep 1
+done
+node dist/cli.js sandbox-health --config config/container.yaml >/dev/null 2>&1 \
+  || { echo "[hosted] FATAL: ctf-sandbox failed to become healthy"; exit 1; }
+
+echo "[hosted] starting xuanshu server"
+node dist/cli.js serve --config config/container.yaml &
+for i in $(seq 1 60); do
+  node -e "fetch('http://127.0.0.1:7318/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" && break
+  sleep 1
+done
+node -e "fetch('http://127.0.0.1:7318/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" \
+  || { echo "[hosted] FATAL: xuanshu server failed to become healthy"; exit 1; }
+
 if [ -f config/container-fast.yaml ]; then
   echo "[hosted] dual-key ${DPSK_MODE} mode: fast-lane xuanshu server (${FAST_SERVER_DESC}) on :7319"
   node dist/cli.js serve --config config/container-fast.yaml &
