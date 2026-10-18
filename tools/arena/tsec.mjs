@@ -59,6 +59,8 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, s
 import net from "node:net";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
+const nodeRequire = createRequire(import.meta.url);
 
 const ROOT = resolve(fileURLToPath(import.meta.url), "../../..");
 const WORK_DIR = resolve(ROOT, "workspace/tsec");
@@ -424,7 +426,11 @@ function withLock(name, fn) {
   const token = `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const write = () => writeFileSync(lock, JSON.stringify({ pid: process.pid, token, lane: process.env.TSEC_LANE ?? "main", at: Date.now() }), { flag: "wx" });
   let held = false;
-  for (let spin = 0; spin < 90 && !held; spin++) {
+  // R35: 8-way sustained contention can legitimately queue a waiter for tens
+  // of seconds (the R35 test: 8 lanes x 200 locked updates produced steals at
+  // 4.5s). Waiting is always safe here — fn bodies are sub-ms — so the budget
+  // is 45s before any steal, with jitter to break the thundering herd.
+  for (let spin = 0; spin < 900 && !held; spin++) {
     try { write(); held = true; }
     catch {
       try {
@@ -439,7 +445,7 @@ function withLock(name, fn) {
           } catch { /* vanished: retry wx */ }
         }
       } catch { /* vanished between write-fail and stat: retry wx */ }
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50 + (spin % 7) * 5);
     }
   }
   if (!held) {
@@ -461,7 +467,238 @@ function withLock(name, fn) {
     } catch { /* leave for staleness */ }
   }
 }
-function ledgerPath() { return resolve(WORK_DIR, "ledger.json"); }
+// ── R35 SQLite state layer ──────────────────────────────────────────────────
+// External review round 2: the lockfile+JSON layer (R33/R34) cannot make a
+// mutation atomic against a crash mid-sequence, and its correctness rests on
+// steal heuristics (stale age, inode recheck, force-steal). SQLite gives the
+// real thing: every mutation runs inside BEGIN IMMEDIATE, cross-process
+// contention resolves through busy_timeout inside the database, and a crash
+// mid-transaction rolls back to the last committed state. The runtime is
+// node:22 (node:sqlite unflagged since 22.13); if the import ever fails the
+// R34 file+lock layer below stays as a fully functional fallback — same
+// function names, same semantics, backend chosen once per process at first
+// use. Schema is deliberately generic (kv(k, v) with JSON values, keys
+// namespaced "ledger" / "board:<code>" / "claim:<code>" / ...) — the
+// transaction IS the fix; a relational shape would add schema-drift risk for
+// zero behavioral gain at this volume. Legacy JSON files import once, inside
+// the same transaction that marks the migration done, then rename to
+// .migrated-<ts> (originals kept for forensics).
+const STATE_DB = resolve(WORK_DIR, "state.db");
+let stateDb = null;
+let stateBooted = false;
+function stateInit() {
+  if (stateBooted) return;
+  stateBooted = true;
+  try {
+    const { DatabaseSync } = nodeRequire("node:sqlite");
+    stateDb = new DatabaseSync(STATE_DB);
+    try { stateDb.exec("PRAGMA journal_mode=WAL;"); } catch { /* fs without WAL support: default journal is still correct */ }
+    stateDb.exec("PRAGMA busy_timeout=5000; PRAGMA synchronous=NORMAL;");
+    stateDb.exec("CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL)");
+    stateTx(migrateLegacyState);
+  } catch (error) {
+    stateDb = null;
+    console.warn(`[tsec] node:sqlite unavailable (${error?.message ?? error}) — using the R34 file+lock state layer`);
+  }
+}
+function kvGet(key) {
+  const row = stateDb.prepare("SELECT v FROM kv WHERE k = ?").get(key);
+  return row === undefined ? undefined : row.v;
+}
+function kvPut(key, value) {
+  stateDb.prepare("INSERT OR REPLACE INTO kv (k, v) VALUES (?, ?)").run(key, JSON.stringify(value));
+}
+function kvDel(key) {
+  stateDb.prepare("DELETE FROM kv WHERE k = ?").run(key);
+}
+// BEGIN IMMEDIATE takes the write lock up front, so concurrent mutators
+// serialize INSIDE the database (busy_timeout waits) instead of racing. The
+// handle is synchronous: fn must not await.
+function stateTx(fn) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      stateDb.exec("BEGIN IMMEDIATE");
+      break;
+    } catch (error) {
+      if (attempt < 40 && /busy|locked/i.test(String(error?.message ?? error))) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50); continue; }
+      throw error;
+    }
+  }
+  try {
+    const out = fn();
+    stateDb.exec("COMMIT");
+    return out;
+  } catch (error) {
+    try { stateDb.exec("ROLLBACK"); } catch { /* already rolled back */ }
+    throw error;
+  }
+}
+const LEGACY_FILE_RE = /^(ledger|lessons|task-start|board-|claim-|watch-|handoff-|wrong-|hint-|lastrun-)([\w.-]*?)\.json$/;
+function keyOfLegacyFile(name) {
+  const m = LEGACY_FILE_RE.exec(name);
+  if (!m) return null;
+  const ns = m[1].replace(/-$/, "");
+  return m[2] ? `${ns}:${m[2]}` : ns;
+}
+function fileOfKey(key) {
+  const sep = key.indexOf(":");
+  return sep < 0 ? resolve(WORK_DIR, `${key}.json`) : resolve(WORK_DIR, `${key.slice(0, sep)}-${key.slice(sep + 1)}.json`);
+}
+function migrateLegacyState() {
+  if (kvGet("meta:migrated") !== undefined) return;
+  const stamp = Date.now();
+  let names = [];
+  try { names = readdirSync(WORK_DIR).map((f) => keyOfLegacyFile(f) ? f : null).filter(Boolean); } catch { /* unreadable: nothing to import */ }
+  for (const name of names) {
+    const file = resolve(WORK_DIR, name);
+    const key = keyOfLegacyFile(name);
+    try {
+      kvPut(key, JSON.parse(readFileSync(file, "utf8")));
+    } catch {
+      try { renameSync(file, `${file}.corrupt-${stamp}`); console.error(`[tsec] legacy state ${name} unparseable — quarantined`); } catch { /* unwritable */ }
+      continue;
+    }
+    try { renameSync(file, `${file}.migrated-${stamp}`); } catch { /* row is written and re-import is idempotent */ }
+  }
+  kvPut("meta:migrated", { at: new Date().toISOString(), files: names.length });
+  if (names.length > 0) console.log(`[tsec] migrated ${names.length} legacy state file(s) into state.db (originals kept as .migrated-*)`);
+}
+function stateRead(key, fallback) {
+  stateInit();
+  const seed = () => (typeof fallback === "function" ? fallback() : structuredClone(fallback));
+  if (stateDb) {
+    try {
+      const raw = kvGet(key);
+      if (raw === undefined) return seed();
+      try {
+        return JSON.parse(raw);
+      } catch (parseError) {
+        // a row holding non-JSON is damage (bug or tampering), not absence —
+        // quarantine the payload and reseed, never silently treat as empty.
+        console.error(`[tsec] state row ${key} unparseable — quarantined, reseeding`);
+        try { kvPut(`quarantine:${key}:${Date.now()}`, raw); kvDel(key); } catch { /* best effort */ }
+        return seed();
+      }
+    } catch (error) {
+      console.warn(`[tsec] state read ${key} failed: ${error?.message ?? error}`);
+      return seed();
+    }
+  }
+  // file backend: R34 semantics — retry torn reads, quarantine damage.
+  const file = fileOfKey(key);
+  for (let i = 0; i < 4; i++) {
+    try { return JSON.parse(readFileSync(file, "utf8")); } catch { /* torn or absent */ }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 40);
+  }
+  if (existsSync(file)) quarantineState(file);
+  return seed();
+}
+function stateWrite(key, value) {
+  stateInit();
+  if (stateDb) { stateTx(() => kvPut(key, value)); return; }
+  withLock(key.replace(":", "-"), () => atomicWriteJson(fileOfKey(key), value));
+}
+function stateDelete(key) {
+  stateInit();
+  if (stateDb) { stateTx(() => kvDel(key)); return; }
+  withLock(key.replace(":", "-"), () => { try { rmSync(fileOfKey(key), { force: true }); } catch { /* best effort */ } });
+}
+function stateHas(key) {
+  stateInit();
+  if (stateDb) { try { return kvGet(key) !== undefined; } catch { return false; } }
+  return existsSync(fileOfKey(key));
+}
+function stateKeys(prefix) {
+  stateInit();
+  if (stateDb) {
+    try { return stateDb.prepare("SELECT k FROM kv WHERE k LIKE ?").all(`${prefix}%`).map((r) => r.k); } catch { return []; }
+  }
+  try {
+    const filePrefix = prefix.replace(":", "-");
+    return readdirSync(WORK_DIR)
+      .filter((f) => f.startsWith(filePrefix) && f.endsWith(".json"))
+      .map((f) => `${prefix}${f.slice(filePrefix.length, -".json".length)}`);
+  } catch { return []; }
+}
+// THE read-modify-write: everything a comparison needs happens inside one
+// transaction, so no two processes can interleave a read between another's
+// read and write. mutate may return a value; stateUpdate returns it (or the
+// mutated object). Runs on the synchronous handle — mutate must not await,
+// but it MAY stateRead (plain SELECTs join the open transaction safely).
+function stateUpdate(key, fallback, mutate) {
+  stateInit();
+  if (stateDb) {
+    return stateTx(() => {
+      const raw = kvGet(key);
+      let value;
+      if (raw === undefined) value = typeof fallback === "function" ? fallback() : structuredClone(fallback);
+      else {
+        try { value = JSON.parse(raw); }
+        catch (parseError) {
+          console.error(`[tsec] state row ${key} unparseable in update — quarantined, reseeding`);
+          try { kvPut(`quarantine:${key}:${Date.now()}`, raw); kvDel(key); } catch { /* best effort */ }
+          value = typeof fallback === "function" ? fallback() : structuredClone(fallback);
+        }
+      }
+      const out = mutate(value);
+      kvPut(key, value);
+      return out === undefined ? value : out;
+    });
+  }
+  return withLock(key.replace(":", "-"), () => {
+    const value = stateRead(key, fallback);
+    const out = mutate(value);
+    atomicWriteJson(fileOfKey(key), value);
+    return out === undefined ? value : out;
+  });
+}
+// Shared token with staleness + pid-liveness: the only cross-process mutex
+// primitive that can span an await (acquire tx -> async work -> release tx).
+function stateAcquire(key, staleMs) {
+  stateInit();
+  if (stateDb) {
+    return stateTx(() => {
+      const raw = kvGet(key);
+      let cur = null;
+      if (raw !== undefined) { try { cur = JSON.parse(raw); } catch { cur = null; } }
+      if (cur && Date.now() - Date.parse(cur.at) < staleMs) {
+        try { process.kill(cur.pid, 0); } catch (probe) { if (probe.code !== "ESRCH") return false; cur = null; }
+        if (cur) return false;
+      }
+      kvPut(key, { pid: process.pid, lane: process.env.TSEC_LANE ?? "main", at: new Date().toISOString() });
+      return true;
+    });
+  }
+  const file = fileOfKey(key);
+  const stamp = JSON.stringify({ pid: process.pid, at: new Date().toISOString() });
+  try { writeFileSync(file, stamp, { flag: "wx" }); return true; } catch { /* held, or stale below */ }
+  try {
+    if (Date.now() - statSync(file).mtimeMs > staleMs) {
+      rmSync(file, { force: true });
+      try { writeFileSync(file, stamp, { flag: "wx" }); return true; } catch { return false; }
+    }
+  } catch { /* vanished: the next call retries */ }
+  return false;
+}
+function stateReleaseIfMine(key) {
+  stateInit();
+  if (stateDb) {
+    try {
+      stateTx(() => {
+        const raw = kvGet(key);
+        if (raw === undefined) return;
+        try { if (JSON.parse(raw).pid !== process.pid) return; } catch { return; }
+        kvDel(key);
+      });
+    } catch { /* best effort */ }
+    return;
+  }
+  try {
+    const parsed = JSON.parse(readFileSync(fileOfKey(key), "utf8"));
+    if (parsed.pid === process.pid) rmSync(fileOfKey(key), { force: true });
+  } catch { /* absent or unreadable */ }
+}
+function ledgerPath() { return fileOfKey("ledger"); }
 // R34: a persistently unparseable state file is DAMAGE, not absence. The
 // old fallback returned the empty default and the next write PERSISTED the
 // wipe. Quarantine moves the wreck aside for forensics and starts clean.
@@ -469,24 +706,13 @@ function quarantineState(file) {
   const q = `${file}.corrupt-${Date.now()}`;
   try { renameSync(file, q); console.error(`[tsec] state file persistently unparseable — quarantined to ${q}`); } catch { /* unwritable */ }
 }
-function readLedger() {
-  const p = ledgerPath();
-  for (let i = 0; i < 4; i++) {
-    try { return JSON.parse(readFileSync(p, "utf8")); } catch { /* torn or absent */ }
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 40);
-  }
-  if (existsSync(p)) quarantineState(p);
-  return { done: {}, accepted: {} };
-}
-function writeLedger(ledger) { atomicWriteJson(ledgerPath(), ledger); }
-// Every ledger mutation runs read→mutate→write INSIDE the lock — a mutation
-// that reads outside it still races another lane's write.
+function readLedger() { return stateRead("ledger", { done: {}, accepted: {} }); }
+function writeLedger(ledger) { stateWrite("ledger", ledger); }
+// Every ledger mutation is one transaction (R35: SQLite BEGIN IMMEDIATE, or
+// the locked read→mutate→write on the file backend) — a mutation that reads
+// outside it still races another lane's write.
 function ledgerUpdate(mutate) {
-  return withLock("ledger", () => {
-    const ledger = readLedger();
-    mutate(ledger);
-    writeLedger(ledger);
-  });
+  return stateUpdate("ledger", { done: {}, accepted: {} }, mutate);
 }
 function ledgerEntry(code) { return readLedger().done[code] ?? { misses: 0 }; }
 function ledgerMark(code, status, { progress } = {}) {
@@ -512,60 +738,66 @@ function recordAccepted(code, value) {
 }
 
 // Handoff carry across retries of the same challenge (arena/ctf2-proven).
-function handoffPath(code) { return resolve(WORK_DIR, `handoff-${code}.json`); }
-function handoffFor(code) {
-  try { return JSON.parse(readFileSync(handoffPath(code), "utf8")); } catch { return null; }
-}
-function wrongPath(code) { return resolve(WORK_DIR, `wrong-${code}.json`); }
+function handoffPath(code) { return fileOfKey(`handoff:${code}`); }
+function handoffFor(code) { return stateRead(`handoff:${code}`, null); }
+function wrongPath(code) { return fileOfKey(`wrong:${code}`); }
 // Pulled platform hint (charged once, cached forever — a second view may
 // re-charge and buys nothing new). Empty string = challenge has no hint.
-function hintPath(code) { return resolve(WORK_DIR, `hint-${code}.json`); }
-function hintFor(code) {
-  try { return JSON.parse(readFileSync(hintPath(code), "utf8")); } catch { return null; }
-}
+function hintPath(code) { return fileOfKey(`hint:${code}`); }
+function hintFor(code) { return stateRead(`hint:${code}`, null); }
 function rejectedValues(code) {
-  try {
-    const raw = JSON.parse(readFileSync(wrongPath(code), "utf8"));
-    return Array.isArray(raw.values) ? raw.values.filter((v) => typeof v === "string") : [];
-  } catch { return []; }
+  const raw = stateRead(`wrong:${code}`, { values: [] });
+  return Array.isArray(raw?.values) ? raw.values.filter((v) => typeof v === "string") : [];
 }
 // Last run id per challenge — survives the handoff deletion a banked flag
 // triggers, so retries always have a lineage parent for scratch inheritance.
-function lastrunPath(code) { return resolve(WORK_DIR, `lastrun-${code}.json`); }
+function lastrunPath(code) { return fileOfKey(`lastrun:${code}`); }
+// R35 lineage (external review): lanes and fanout workers BOTH record runs —
+// a single overwritten slot lost every writer but the last. The row now holds
+// the last 4 runs; same-server resolution walks it newest-first.
 function writeLastrun(code, runId, baseUrl = XUANSHU_BASE) {
-  try { withLock(`lastrun-${code}`, () => { atomicWriteJson(lastrunPath(code), { code, runId, baseUrl, at: new Date().toISOString() }); }); } catch { /* best effort */ }
+  try {
+    stateUpdate(`lastrun:${code}`, [], (runs) => {
+      if (!Array.isArray(runs)) return;
+      runs.push({ code, runId, baseUrl, lane: process.env.TSEC_LANE ?? "main", at: new Date().toISOString() });
+      while (runs.length > 4) runs.shift();
+    });
+  } catch { /* best effort */ }
 }
-function lastrunFor(code) {
-  try { return JSON.parse(readFileSync(lastrunPath(code), "utf8")).runId; } catch { return undefined; }
+function lastrunRuns(code) {
+  const runs = stateRead(`lastrun:${code}`, []);
+  return Array.isArray(runs) ? runs : [];
 }
+function lastrunFor(code) { return lastrunRuns(code).at(-1)?.runId; }
 // R28: scratch inheritance is server-local — a parent recorded on the fanout
 // server must not feed a lane-server create (the run create would 404 the
 // lineage and burn the slot). lastrunIdFor only returns same-server parents.
-function lastrunMetaFor(code) {
-  try { return JSON.parse(readFileSync(lastrunPath(code), "utf8")); } catch { return undefined; }
-}
+function lastrunMetaFor(code) { return lastrunRuns(code).at(-1); }
 function lastrunIdFor(code, baseUrl) {
-  const last = lastrunMetaFor(code);
-  return last && (last.baseUrl ?? XUANSHU_BASE) === baseUrl ? last.runId : undefined;
+  const runs = lastrunRuns(code);
+  for (let i = runs.length - 1; i >= 0; i--) {
+    if ((runs[i].baseUrl ?? XUANSHU_BASE) === baseUrl) return runs[i].runId;
+  }
+  return undefined;
 }
 function recordRejected(code, value) {
-  withLock(`wrong-${code}`, () => {
-    const values = [...rejectedValues(code), value].slice(-8);
-    atomicWriteJson(wrongPath(code), { code, values, last: value, rejectedAt: new Date().toISOString() });
+  stateUpdate(`wrong:${code}`, { values: [] }, (wrong) => {
+    if (typeof wrong !== "object" || wrong === null) return;
+    wrong.values = [...(wrong.values ?? []), value].slice(-8);
+    wrong.last = value;
+    wrong.rejectedAt = new Date().toISOString();
   });
 }
 function writeHandoff(code, payload) {
-  withLock(`handoff-${code}`, () => {
+  stateUpdate(`handoff:${code}`, {}, (merged) => {
     const prior = handoffFor(code);
     const dedupe = (items) => [...new Set(items)];
-    const merged = {
-      ...payload,
+    Object.assign(merged, payload, {
       findings: dedupe([...(prior?.findings ?? []), ...(payload.findings ?? [])]).slice(0, 8),
       nextSteps: dedupe([...(prior?.nextSteps ?? []), ...(payload.nextSteps ?? [])]).slice(0, 6),
       summary: payload.summary?.trim() ? payload.summary : (prior?.summary ?? ""),
       handoffText: payload.handoffText ?? prior?.handoffText,
-    };
-    atomicWriteJson(handoffPath(code), merged);
+    });
   });
 }
 
@@ -581,36 +813,33 @@ function writeHandoff(code, payload) {
 //             precondition unmet completes it first instead of redoing work)
 //   hints   — operator-supplied steer notes (Cairn Hint; formalizes the
 //             人工介入 loop: steer -> next run carries the correction)
-function boardPath(code) { return resolve(WORK_DIR, `board-${code}.json`); }
-function boardFor(code) {
-  try {
-    return JSON.parse(readFileSync(boardPath(code), "utf8"));
-  } catch (parseError) {
-    // distinguish damage from absence before reseeding (R34)
-    if (existsSync(boardPath(code))) quarantineState(boardPath(code)); // present-but-unparseable = damage
-    // Lazy one-time migration: round-1 handoffs become board seed facts so
-    // warm-start knowledge survives the format change.
-    const prior = handoffFor(code);
-    if (!prior) return { facts: [], intents: [], hints: [] };
-    const board = {
-      facts: (prior.findings ?? []).map((text) => ({ at: prior.at, from: prior.from, text })),
-      intents: (prior.nextSteps ?? []).map((text) => ({ at: prior.at, text, needs: [] })),
-      hints: [],
-      summary: prior.summary ?? "",
-    };
-    try { atomicWriteJson(boardPath(code), board); } catch { /* read-only fs */ }
-    return board;
-  }
+function boardPath(code) { return fileOfKey(`board:${code}`); }
+// Round-1 handoffs seed board facts (warm-start knowledge survives the format
+// change). Computed, never persisted on the read path — persisting inside a
+// read would nest a transaction; the next real boardUpdate persists anyway.
+function boardSeedFor(code) {
+  const prior = handoffFor(code);
+  if (!prior) return { facts: [], intents: [], hints: [] };
+  return {
+    facts: (prior.findings ?? []).map((text) => ({ at: prior.at, from: prior.from, text })),
+    intents: (prior.nextSteps ?? []).map((text) => ({ at: prior.at, text, needs: [] })),
+    hints: [],
+    summary: prior.summary ?? "",
+  };
 }
-function boardWrite(code, board) { atomicWriteJson(boardPath(code), board); }
+function boardFor(code) {
+  const board = stateRead(`board:${code}`, null);
+  return board ?? boardSeedFor(code);
+}
+function boardWrite(code, board) { stateWrite(`board:${code}`, board); }
+function boardExists(code) { return stateHas(`board:${code}`); }
 // R14 frontier slot: ONE record per challenge holding the last assistant
 // reasoning of the newest killed run (single slot, overwritten — unlike
 // intents it never pushes real next-steps out of the bounded board).
 function boardFrontier(code, text) {
-  withLock(`board-${code}`, () => {
-    const board = boardFor(code);
+  stateUpdate(`board:${code}`, boardSeedFor, (board) => {
+    if (typeof board !== "object" || board === null) return;
     board.frontier = { at: new Date().toISOString(), text: String(text).slice(0, 600) };
-    boardWrite(code, board);
   });
 }
 // R29 Cairn Step admission: a next-step may carry a `needs(<substr>;<substr>)`
@@ -633,10 +862,21 @@ function needsMet(intent, board) {
   return needs.every((n) => hay.includes(String(n).toLowerCase()));
 }
 function boardUpdate(code, { facts = [], intents = [], hints = [], solvedIntentSubstr } = {}) {
-  return withLock(`board-${code}`, () => {
-    const board = boardFor(code);
+  return stateUpdate(`board:${code}`, boardSeedFor, (board) => {
+    if (typeof board !== "object" || board === null) return;
     const factTexts = new Set(board.facts.map((f) => f.text));
-    for (const text of facts) if (!factTexts.has(text)) { board.facts.push({ at: new Date().toISOString(), text }); factTexts.add(text); }
+    // R35 evidence grading (external review): every fact carries its class —
+    // observation (agent-reported, may be wrong) vs verified (platform-
+    // confirmed flag, or a hypothesis the run CONTRADICTED with evidence).
+    // The render marks the class so the next run knows what it may build on
+    // blind and what it must re-verify before leaning on it.
+    for (const fact of facts) {
+      const entry = typeof fact === "string" ? { text: fact } : (fact ?? {});
+      const text = String(entry.text ?? "").trim();
+      if (!text || factTexts.has(text)) continue;
+      board.facts.push({ at: new Date().toISOString(), grade: entry.grade ?? "observation", ...(entry.source ? { source: entry.source } : {}), text });
+      factTexts.add(text);
+    }
     const intentTexts = new Set(board.intents.map((i) => i.text));
     for (const intent of intents) {
       const norm = parseNeeds(intent.text);
@@ -653,16 +893,14 @@ function boardUpdate(code, { facts = [], intents = [], hints = [], solvedIntentS
     board.facts = board.facts.slice(-24);
     board.intents = board.intents.filter((i) => !i.done).slice(-8);
     board.hints = board.hints.slice(-8);
-    boardWrite(code, board);
     return board;
   });
 }
 function boardClear(code) {
-  // R34: same lock as boardUpdate — an unlocked clear races a sibling worker
-  // banking facts and the board comes back from the dead.
-  withLock(`board-${code}`, () => {
-    try { rmSync(boardPath(code), { force: true }); } catch { /* best effort */ }
-  });
+  // R35: DELETE through the state layer — same atomicity class as
+  // boardUpdate, so a clear racing a sibling banking facts cannot resurrect
+  // the board (the R34 bug) and cannot tear (delete-then-crash).
+  stateDelete(`board:${code}`);
 }
 
 // ── arena-wide lesson ledger (R10, user directive: 不要重做错误的事) ──────────
@@ -671,12 +909,12 @@ function boardClear(code) {
 // later task builds — other challenges included — start with the negative
 // knowledge instead of repeating it. The per-challenge board already carries
 // rejected flags and verified facts; this adds cross-challenge methodology.
-function lessonsPath() { return resolve(WORK_DIR, "lessons.json"); }
-function readArenaLessons() { try { return JSON.parse(readFileSync(lessonsPath(), "utf8")); } catch { return []; } }
+function lessonsPath() { return fileOfKey("lessons"); }
+function readArenaLessons() { return stateRead("lessons", []); }
 function recordArenaLessons(code, state) {
   try {
-    withLock("lessons", () => {
-      const lessons = readArenaLessons();
+    stateUpdate("lessons", [], (lessons) => {
+      if (!Array.isArray(lessons)) return;
       const seen = new Set(lessons.map((l) => l.text));
       for (const lesson of state?.lessons ?? []) {
         const parts = [];
@@ -688,9 +926,14 @@ function recordArenaLessons(code, state) {
         const text = parts.join(" | ");
         if (!text || seen.has(text)) continue;
         seen.add(text);
-        lessons.push({ at: new Date().toISOString(), code, text: text.slice(0, 320) });
+        // R35 provenance (external review): a lesson is a model SELF-report
+        // until a later outcome confirms it — grade it so the render can mark
+        // what is safe to lean on blind. `code` is the originating run.
+        lessons.push({ at: new Date().toISOString(), code, grade: "observation", text: text.slice(0, 320) });
       }
-      atomicWriteJson(lessonsPath(), lessons.slice(-40));
+      const kept = lessons.slice(-40);
+      lessons.length = 0;
+      lessons.push(...kept);
     });
   } catch { /* best effort */ }
 }
@@ -701,7 +944,7 @@ async function bankKnowledge(code, runId, baseUrl = XUANSHU_BASE) {
     const deadEnds = (state.hypotheses ?? [])
       .filter((h) => h?.status === "contradicted" && typeof h.statement === "string")
       .map((h) => `已排除假设:${h.statement.slice(0, 200)}${Array.isArray(h.evidence) && h.evidence[0] ? `(证据:${String(h.evidence[0]).slice(0, 100)})` : ""}`);
-    if (deadEnds.length > 0) boardUpdate(code, { facts: deadEnds.slice(0, 6) });
+    if (deadEnds.length > 0) boardUpdate(code, { facts: deadEnds.slice(0, 6).map((text) => ({ text, grade: "verified", source: "contradicted-hypothesis" })) });
     recordArenaLessons(code, state);
   } catch { /* state cold; the live mirror already covered findings */ }
 }
@@ -715,22 +958,48 @@ const CLAIM_STALE_MS = 55 * 60_000;
 // R6/R27: cumulative lane-minutes a hard single may burn before it is done
 // for good — gated in pickNext AND reviveParked (double gate).
 const HARD_SPENT_CAP = 90;
-function claimPath(code) { return resolve(WORK_DIR, `claim-${code}.json`); }
+function claimPath(code) { return fileOfKey(`claim:${code}`); }
 function claimFor(code) {
-  try {
-    const claim = JSON.parse(readFileSync(claimPath(code), "utf8"));
-    if (Date.now() - Date.parse(claim.at) < CLAIM_STALE_MS) {
-      // A SIGTERM'd lane never runs its finally — its claim is a corpse that
-      // would otherwise lock a challenge for the full 55 minutes (the
-      // 2026-10-10 rollovers left two). Probe the owning pid: ESRCH = dead =
-      // treat as unclaimed; EPERM = alive under another user = valid hold.
-      try { process.kill(claim.pid, 0); } catch (probe) { if (probe.code === "ESRCH") return null; }
-      return claim;
-    }
-  } catch { /* absent or unreadable: unclaimed */ }
+  // single-shot read semantics, deliberately NOT stateRead: the
+  // 4x-retry-then-quarantine ladder can rename a mid-write claim away on
+  // exotic filesystems and hand the code to a second lane (seen in the R35
+  // file-backend stress test). An unparseable/absent claim is simply
+  // "unclaimed" here — claimCode's exclusive create decides the race, never
+  // a quarantine.
+  let claim = null;
+  stateInit();
+  if (stateDb) {
+    try { claim = JSON.parse(kvGet(`claim:${code}`)); } catch { /* absent or unparseable: unclaimed */ }
+  } else {
+    try { claim = JSON.parse(readFileSync(fileOfKey(`claim:${code}`), "utf8")); } catch { /* absent or mid-write: unclaimed */ }
+  }
+  if (claim && Date.now() - Date.parse(claim.at) < CLAIM_STALE_MS) {
+    // A SIGTERM'd lane never runs its finally — its claim is a corpse that
+    // would otherwise lock a challenge for the full 55 minutes (the
+    // 2026-10-10 rollovers left two). Probe the owning pid: ESRCH = dead =
+    // treat as unclaimed; EPERM = alive under another user = valid hold.
+    try { process.kill(claim.pid, 0); } catch (probe) { if (probe.code === "ESRCH") return null; }
+    return claim;
+  }
   return null;
 }
 function claimCode(code, lane) {
+  stateInit();
+  if (stateDb) {
+    // R35: BEGIN IMMEDIATE decides the claim race inside the database — the
+    // wx-file dance below was the same idea with weaker primitives.
+    return stateTx(() => {
+      const raw = kvGet(`claim:${code}`);
+      let cur = null;
+      if (raw !== undefined) { try { cur = JSON.parse(raw); } catch { cur = null; } }
+      if (cur && Date.now() - Date.parse(cur.at) < CLAIM_STALE_MS) {
+        try { process.kill(cur.pid, 0); } catch (probe) { if (probe.code !== "ESRCH") return false; cur = null; }
+        if (cur) return false;
+      }
+      kvPut(`claim:${code}`, { lane, at: new Date().toISOString(), pid: process.pid });
+      return true;
+    });
+  }
   if (claimFor(code)) return false;
   // Atomic claim: exclusive-create (wx) decides the race — the round-2 start
   // saw all three lanes pass check-then-write inside one ~100ms window and
@@ -757,6 +1026,8 @@ function releaseClaim(code) {
   // Owner check (R33): a lane whose stale claim was reclaimed by another lane
   // must not delete the new owner's claim from its finally block — that would
   // re-open the code for double-teaming while the new owner still runs.
+  stateInit();
+  if (stateDb) { stateReleaseIfMine(`claim:${code}`); return; }
   try {
     const claim = JSON.parse(readFileSync(claimPath(code), "utf8"));
     if (claim.pid !== process.pid) return;
@@ -767,11 +1038,9 @@ function releaseClaim(code) {
 // claim and the finally would otherwise strand the challenge for 55 minutes).
 function releaseOwnClaims() {
   try {
-    for (const name of readdirSync(WORK_DIR).filter((f) => f.startsWith("claim-"))) {
-      try {
-        const claim = JSON.parse(readFileSync(resolve(WORK_DIR, name), "utf8"));
-        if (claim.pid === process.pid) rmSync(resolve(WORK_DIR, name), { force: true });
-      } catch { /* unreadable claim: leave for staleness */ }
+    for (const key of stateKeys("claim:")) {
+      const claim = stateRead(key, null);
+      if (claim?.pid === process.pid) stateDelete(key);
     }
   } catch { /* WORK_DIR unreadable */ }
 }
@@ -783,17 +1052,18 @@ function releaseOwnClaims() {
 // watch — the watchdog reclaims it instead of letting 3 leaks freeze the
 // fleet behind the platform's container cap.
 const WATCH_GRACE_MS = 5 * 60_000;
-function watchPath(code) { return resolve(WORK_DIR, `watch-${code}.json`); }
+function watchPath(code) { return fileOfKey(`watch:${code}`); }
 function watchFor(code) {
-  try { return JSON.parse(readFileSync(watchPath(code), "utf8")); } catch { return undefined; }
+  const w = stateRead(`watch:${code}`, null);
+  return w ?? undefined;
 }
 function registerWatch(code, runId, horizonMs) {
   try {
-    atomicWriteJson(watchPath(code), { lane: process.env.TSEC_LANE ?? "main", pid: process.pid, runId, deadline: Date.now() + horizonMs, at: new Date().toISOString() });
+    stateWrite(`watch:${code}`, { lane: process.env.TSEC_LANE ?? "main", pid: process.pid, runId, deadline: Date.now() + horizonMs, at: new Date().toISOString() });
   } catch { /* registry is best-effort; the watchdog errs toward reclaiming */ }
 }
 function clearWatch(code) {
-  try { rmSync(watchPath(code), { force: true }); } catch { /* already gone */ }
+  try { stateDelete(`watch:${code}`); } catch { /* already gone */ }
 }
 function pidAlive(pid) {
   try { process.kill(pid, 0); return true; } catch (probe) { return probe.code === "EPERM"; }
@@ -843,6 +1113,9 @@ let currentPhase = "breadth";
 // R17 coverage floor: consecutive picks that were NOT first attempts; two in
 // a row forces the next pick back to a never-attempted challenge.
 let warmPickStreak = 0;
+// R35 endgame exploration quota (external review): counts endgame picks on
+// this lane so every third one still opens a never-attempted challenge.
+let endgamePicks = 0;
 let taskStartedAt = 0;
 function taskStartAt(now) {
   if (taskStartedAt) return taskStartedAt;
@@ -850,13 +1123,21 @@ function taskStartAt(now) {
   // restarted lane back into "breadth" while the task was deep in endgame.
   // The start timestamp is shared state: first writer wins (wx), every later
   // boot — lane restarts included — re-reads it.
-  const file = resolve(WORK_DIR, "task-start.json");
-  try { taskStartedAt = Date.parse(JSON.parse(readFileSync(file, "utf8")).at); }
-  catch {
-    taskStartedAt = now;
-    try { writeFileSync(file, JSON.stringify({ at: now }, null, 2), { flag: "wx" }); }
-    catch {
-      try { taskStartedAt = Date.parse(JSON.parse(readFileSync(file, "utf8")).at); } catch { /* private clock: WORK_DIR unwritable */ }
+  const stamp = stateRead("task-start", null);
+  if (stamp) taskStartedAt = Date.parse(stamp.at);
+  else {
+    // first writer wins, transactionally (R35): a single get-or-put inside
+    // BEGIN IMMEDIATE replaces the wx-file race — no losing writer exists.
+    stateInit();
+    if (stateDb) {
+      stateTx(() => {
+        const raw = kvGet("task-start");
+        taskStartedAt = raw !== undefined ? Date.parse(JSON.parse(raw).at) : now;
+        if (raw === undefined) kvPut("task-start", { at: now });
+      });
+    } else {
+      try { writeFileSync(resolve(WORK_DIR, "task-start.json"), JSON.stringify({ at: now }, null, 2), { flag: "wx" }); taskStartedAt = now; }
+      catch { try { taskStartedAt = Date.parse(JSON.parse(readFileSync(resolve(WORK_DIR, "task-start.json"), "utf8")).at); } catch { taskStartedAt = now; } }
     }
   }
   if (!Number.isFinite(taskStartedAt)) taskStartedAt = now;
@@ -880,7 +1161,7 @@ function evidenceBucket(item) {
   const code = item.unique_code;
   const done = readLedger().done[code];
   if (!done) return "D";
-  if (existsSync(boardPath(code))) {
+  if (boardExists(code)) {
     const board = boardFor(code);
     const openIntents = board.intents.filter((i) => !i.done);
     if (board.frontier?.text || openIntents.length > 0 || (board.facts?.length ?? 0) >= 3) return "A";
@@ -907,16 +1188,16 @@ function expectedScoreRate(item) {
 // temporary-address facts to "must re-verify" while stack/route conclusions
 // survive. Returns the PRIOR address so callers can log the swap.
 function boardContainer(code, addrs) {
-  return withLock(`board-${code}`, () => {
-    const board = boardFor(code);
+  let priorAddr = "";
+  stateUpdate(`board:${code}`, boardSeedFor, (board) => {
+    if (typeof board !== "object" || board === null) return;
     const addr = (addrs ?? [])[0] ?? "";
-    if (board.containerAddr === addr) return addr;
-    const prior = board.containerAddr ?? "";
+    if (board.containerAddr === addr) { priorAddr = addr; return; }
+    priorAddr = board.containerAddr ?? "";
     board.containerAddr = addr;
     board.containerAt = new Date().toISOString();
-    try { boardWrite(code, board); } catch { /* read-only fs */ }
-    return prior;
   });
+  return priorAddr;
 }
 
 // ── host-side submit proxy (R33) ─────────────────────────────────────────────
@@ -1223,7 +1504,7 @@ function buildTask(challenge, budgetMinutes, direction, freshEyes = false) {
   if (board.facts.length > 0 || accepted.length > 0 || (priorHandoff?.summary && !freshEyes)) {
     lines.push(`# VERIFIED FACTS(前轮实际验证,直接采信,禁止重推)`);
     if (priorHandoff?.summary && !freshEyes) lines.push(`- 前轮总结:${String(priorHandoff.summary).replace(/\s+/g, " ").slice(0, 240)}`);
-    for (const fact of board.facts.filter((f) => !/^已排除假设:/.test(f.text)).slice(-12)) lines.push(`- ${fact.text.slice(0, 260)}`);
+    for (const fact of board.facts.filter((f) => !/^已排除假设:/.test(f.text)).slice(-12)) lines.push(`- ${fact.grade === "verified" ? "【已验证】" : "【观察,使用前自行复核】"}${fact.text.slice(0, 260)}`);
     if (accepted.length > 0) lines.push(`- 已正确提交(平台已入账,严禁再交任何值——包括大小写/去包装变体;本轮只为【尚未确认的 flag 槽位】取值并提交):${accepted.map((v) => `"${v}"`).join("、")}`);
     lines.push("");
   }
@@ -1235,7 +1516,7 @@ function buildTask(challenge, budgetMinutes, direction, freshEyes = false) {
     lines.push(`# EXCLUDED(已彻底排除,严禁重走)`);
     if (rejectedList.length > 0) lines.push(`- 已判错值(严禁原样重交;变体仅按序试全小写/全大写/去包装,每个提交前与列表逐字符比对):${rejectedList.map((v) => `"${v}"`).join("、")}`);
     for (const f of deadEnds) lines.push(`- ${f.text.slice(0, 200)}`);
-    for (const lesson of arenaLessons) lines.push(`- ${lesson.text.slice(0, 200)}`);
+    for (const lesson of arenaLessons) lines.push(`- ${lesson.grade === "verified" ? "" : "(经验教训,未逐一验证)"}${lesson.text.slice(0, 200)}`);
     lines.push("");
   }
   // ---- HINT ----
@@ -1281,6 +1562,21 @@ function buildTask(challenge, budgetMinutes, direction, freshEyes = false) {
 }
 
 // ---------------------------------------------------------------- container + VPN
+
+// R35: the /start call is the one platform mutation every lane races for —
+// gate it globally so exactly one lane holds start rights at a time.
+const START_GATE_STALE_MS = 90_000;
+async function withStartGate(fn) {
+  const key = "start-gate";
+  let held = stateAcquire(key, START_GATE_STALE_MS);
+  const deadline = Date.now() + 30_000;
+  while (!held && Date.now() < deadline) {
+    await sleep(500);
+    held = stateAcquire(key, START_GATE_STALE_MS);
+  }
+  if (!held) console.warn("[tsec] start gate contended beyond 30s — starting anyway (the 409 mapping still catches the race)");
+  try { return await fn(); } finally { stateReleaseIfMine(key); }
+}
 
 function tcpProbe(host, port, timeoutMs = 2_500) {
   return new Promise((resolve) => {
@@ -1343,7 +1639,11 @@ async function ensureContainer(challenge) {
   // that misread killed lane-d wholesale on 2026-10-10).
   let started;
   try {
-    started = await api("/openapi/v1/challenges/start", { method: "POST", query: { unique_code: code } });
+    // R35 global start gate: two lanes polling the same "free" slot both
+    // called /start and the loser burned a 409 + join cycle. The gate is a
+    // shared token (SQLite tx on the primary backend) held ACROSS the async
+    // start — the only cross-process mutex that can span an await.
+    started = await withStartGate(() => api("/openapi/v1/challenges/start", { method: "POST", query: { unique_code: code } }));
   } catch (error) {
     if (isSlotLimit(error)) throw Object.assign(new Error("start hit the 3-instance limit (lost a lane race); holding for a free slot"), { slotsBusy: true });
     throw error;
@@ -1453,9 +1753,12 @@ async function solveOneInner(challenge) {
   const spentMin = ledgerEntry(code).spentMin ?? 0;
   const budgetMin = laneRole === "prospector"
     ? (rank === 2 ? 30 : rank === 0 ? 20 : 30) // prospector: surface map budgets
-    : deepTier
-      ? (misses >= 2 && (isChain || spentMin + 60 <= HARD_SPENT_CAP) ? 60 : 46)
-      : warm ? 35 : rank === 0 ? 20 : rank === 1 ? 30 : 40;
+    // R36 unlimited-token finals: the server's maxRuntimeMs is now 30min and
+    // every budget tells the truth — the old 46/60 ladder advertised episodes
+    // the 15-min hard kill never delivered (deep challenges consistently ran
+    // at a third of their promised depth; depth now doubles instead).
+    : deepTier ? 30
+    : warm ? 30 : rank === 0 ? 20 : 30;
   const budgetMs = budgetMin * 60_000;
   // R20 lifecycle registration: re-stamp the watch with the real budget
   // horizon once it is known (the provisional claim-time stamp is a ceiling).
@@ -1627,15 +1930,14 @@ async function solveOneInner(challenge) {
       const fullyDone = verdict.correct_flag_count >= verdict.total_flag_count;
       ledgerMark(code, fullyDone ? "solved" : "partial", { progress: verdict.correct_flag_count });
       ledgerNoteProgress(code, verdict.correct_flag_count);
-      boardUpdate(code, { facts: [`flag${verdict.correct_flag_count} 银行入账: ${submission} (平台确认)`], solvedIntentSubstr: submission.slice(0, 24) });
-      const { rmSync } = await import("node:fs");
-      try { rmSync(wrongPath(code), { force: true }); } catch { /* best effort */ }
+      boardUpdate(code, { facts: [{ text: `flag${verdict.correct_flag_count} 银行入账: ${submission} (平台确认)`, grade: "verified", source: "platform-confirm" }], solvedIntentSubstr: submission.slice(0, 24) });
+      try { stateDelete(`wrong:${code}`); } catch { /* best effort */ }
       if (verdict.correct_flag_count >= verdict.total_flag_count) {
-        try { rmSync(handoffPath(code), { force: true }); } catch { /* best effort */ }
+        try { stateDelete(`handoff:${code}`); } catch { /* best effort */ }
         boardClear(code); // challenge complete: the board's job is done
         await closeWithRetry(code); // completed: release the instance slot
       } else {
-        try { rmSync(handoffPath(code), { force: true }); } catch { /* banked flag makes stale handoff stale */ }
+        try { stateDelete(`handoff:${code}`); } catch { /* banked flag makes stale handoff stale */ }
       }
     } else {
       recordRejected(code, submission);
@@ -1729,7 +2031,9 @@ async function solveOneInner(challenge) {
 // The endgame auto-swarms to at least 6 regardless of the knob: the #1
 // bctf agent threw 25-30 concurrent workers at its unsolved set in the
 // final minutes; with 100-connection headroom 5 is a conservative floor.
-const FANOUT_WORKERS = Number(process.env.TSEC_FANOUT_WORKERS ?? "") || 4;
+// R36: 4 -> 6 — with per-server run gates at 32 the swarms no longer queue
+// behind the gate; wider directed fan-out is the cheapest token-to-flag trade.
+const FANOUT_WORKERS = Number(process.env.TSEC_FANOUT_WORKERS ?? "") || 6;
 const FANOUT_WALL_MIN = 34;
 function fanoutDirections(code, count) {
   const board = boardFor(code);
@@ -1810,7 +2114,7 @@ async function solveFanOut(challenge) {
     })();
 
     const worker = async (direction, index) => {
-      const budgetMin = Math.max(12, Math.round((deadline - Date.now()) / 60_000));
+      const budgetMin = Math.min(30, Math.max(12, Math.round((deadline - Date.now()) / 60_000))); // R36: never advertise past the 30-min server kill
       // R22: the LAST worker (static re-audit) runs without inherited scratch —
       // a wrong frame survives every direction change when all siblings inherit
       // it (30661 bctf2026-24: 25 re-attempts all re-chased the same auth
@@ -1993,9 +2297,9 @@ async function harvestFlags(code, terminal) {
       const fullyDone = verdict.correct_flag_count >= verdict.total_flag_count;
       ledgerMark(code, fullyDone ? "solved" : "partial", { progress: verdict.correct_flag_count });
       ledgerNoteProgress(code, verdict.correct_flag_count);
-      boardUpdate(code, { facts: [`flag${verdict.correct_flag_count} 收割入账: ${value} (平台确认)`], solvedIntentSubstr: value.slice(0, 24) });
+      boardUpdate(code, { facts: [{ text: `flag${verdict.correct_flag_count} 收割入账: ${value} (平台确认)`, grade: "verified", source: "platform-confirm" }], solvedIntentSubstr: value.slice(0, 24) });
       if (fullyDone) {
-        try { rmSync(handoffPath(code), { force: true }); } catch { /* best effort */ }
+        try { stateDelete(`handoff:${code}`); } catch { /* best effort */ }
         boardClear(code);
         await closeWithRetry(code);
         return; // challenge complete
@@ -2036,8 +2340,8 @@ function pickNext(items, role = "mixed", forceFresh = false, lastResort = false)
       const hinted = Boolean(hintFor(item.unique_code)?.hint);
       const singleCap = hinted ? 3 : 2;
       const cap = (item.flag_count ?? 1) > 1
-        ? (hinted ? 4 : (handoffFor(item.unique_code) || existsSync(boardPath(item.unique_code)) || done?.status === "partial" ? 2 : 1))
-        : (handoffFor(item.unique_code) || existsSync(boardPath(item.unique_code)) ? singleCap : 1);
+        ? (hinted ? 4 : (handoffFor(item.unique_code) || boardExists(item.unique_code) || done?.status === "partial" ? 2 : 1))
+        : (handoffFor(item.unique_code) || boardExists(item.unique_code) ? singleCap : 1);
       if (!lastResort && (done?.misses ?? 0) >= cap) return false;
       // Hard-single lane-minute cap (R6): attempts alone never stopped the
       // 2026-10-12 hards — revive/hint cycles kept resetting the miss budget
@@ -2108,7 +2412,7 @@ function pickNext(items, role = "mixed", forceFresh = false, lastResort = false)
   const richRetryPool = eligible.filter((c) => {
     const done = ledger.done[c.unique_code];
     if (!done || (done.misses ?? 0) !== 1 || (c.flag_count ?? 1) !== 1) return false;
-    if (!existsSync(boardPath(c.unique_code))) return false;
+    if (!boardExists(c.unique_code)) return false;
     const board = boardFor(c.unique_code);
     return (board.facts?.length ?? 0) >= 3;
   }).sort((a, b) => (b.total_score ?? 0) - (a.total_score ?? 0));
@@ -2147,6 +2451,12 @@ function pickNext(items, role = "mixed", forceFresh = false, lastResort = false)
   if (hintRetryPool.length > 0) return { ...hintRetryPool[0], fanout: true };
   if (richRetryPool.length > 0) return { ...richRetryPool[0], fanout: true };
   if (prospectorPool) return prospectorPool[0];
+  // R35 endgame exploration quota: all-in grinding on known-hard codes starves
+  // the coverage endgame conversions need — every third deep/mixed pick still
+  // opens a never-attempted challenge while any remain.
+  if (currentPhase === "endgame" && fresh.length > 0 && endgamePicks++ % 3 === 2) {
+    return { ...fresh.sort(byPriority)[0] };
+  }
   const pick = pool.sort(byPriority)[0];
   if (!pick) return null;
   return { ...pick, fanout: currentPhase === "endgame" || evidenceBucket(pick) === "A" || evidenceBucket(pick) === "B" };
@@ -2192,7 +2502,7 @@ async function maybePullHint(code, misses) {
     const text = typeof result?.hint === "string" ? result.hint.trim() : "";
     // Cache even the empty answer: "no hint exists" must not be re-queried
     // (every view of a real hint re-charges; assume the view already cost).
-    atomicWriteJson(hintPath(code), { code, hint: text, pulledAt: new Date().toISOString() });
+    stateWrite(`hint:${code}`, { code, hint: text, pulledAt: new Date().toISOString() });
     await record({ challenge: code, outcome: "hint-pulled", hasHint: text !== "", misses });
     console.log(`[tsec] hint pulled for ${code} (misses=${misses}): ${text ? text.slice(0, 120) : "(challenge has no hint)"}`);
   } catch (error) {
@@ -2530,7 +2840,7 @@ async function cmdStatus() {
     const code = item.unique_code;
     const done = ledger.done[code];
     const claim = claimFor(code);
-    const board = existsSync(boardPath(code)) ? boardFor(code) : null;
+    const board = boardExists(code) ? boardFor(code) : null;
     if (!done && !board && !claim && !(item.correct_flag_count > 0)) untouched.push(code);
     console.log(`${item.is_completed ? "DONE" : "    "} ${code.padEnd(6)} flags ${item.correct_flag_count}/${item.flag_count} facts=${board?.facts.length ?? 0} intents=${board?.intents.length ?? 0} hints=${board?.hints.length ?? 0} misses=${done?.misses ?? 0}${done ? ` status=${done.status}` : ""}${claim ? ` claimed=${claim.lane}` : ""}`);
   }
