@@ -74,6 +74,15 @@ case "${TSEC_THINKING_LEVEL:-max}" in
   off|minimal|low|medium|high|xhigh|max) THINKING_LEVEL="${TSEC_THINKING_LEVEL:-max}" ;;
   *) THINKING_LEVEL="max" ;;
 esac
+# R38b: every boot starts from the pristine config. The dual-key seds below
+# mutate container.yaml in place, so a container restart re-ran them on
+# already-mutated files — container-fast.yaml regenerated from a flipped
+# main and :7319 silently lost the GLM key pool. Restore-then-mutate makes
+# boot N idempotent for any N; the .orig copy is taken exactly once.
+[ -f config/container.yaml.orig ] || cp config/container.yaml config/container.yaml.orig
+cp config/container.yaml.orig config/container.yaml
+rm -f config/container-fast.yaml
+
 sed -i "s|^  thinkingLevel: high|  thinkingLevel: ${THINKING_LEVEL}|" config/container.yaml
 
 if [ "$DUAL_KEYS" = "1" ]; then

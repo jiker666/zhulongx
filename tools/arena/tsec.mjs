@@ -237,7 +237,13 @@ async function xuanshu(path, options = {}, timeoutMs = 45_000, retries = 1, base
 
 // Re-assert model settings every iteration: an API restart must not silently
 // break every run (same lesson as the arena/ctf2 drivers).
+// R38 (runs 35842/35921 post-mortem): in dual-key deployments the serving
+// config IS the model routing — this global override rewrote :7318 back to
+// glm-5.3 + GLM key on every iteration, so DPSK was never called even with
+// the R37 boot-order fix. Both panel keys present = serving config rules;
+// single-key deployments keep the self-heal.
 async function ensureModel() {
+  if (process.env.BIGMODEL_API_KEY && process.env.DEEPSEEK_API_KEY) return;
   const apiKey = process.env.BIGMODEL_API_KEY;
   if (!apiKey) return;
   try {

@@ -559,7 +559,11 @@ export class ModelGateway {
         continue;
       }
       const credentialFailure = poolActive && (attempted.status === 401 || attempted.status === 403);
-      if (attempted.status >= 500 || attempted.status === 429 || credentialFailure) {
+      // R38: >=400 (not just >=500/429) rotates keys and counts toward DPSK
+      // failover — providers wrap quota/balance exhaustion in 400-class
+      // bodies (zhipu 1113/1302), and passing those through stalled every
+      // run instead of letting the unmetered fallback carry the load.
+      if (attempted.status >= 400 || credentialFailure) {
         primaryFailed = true;
         lastPrimaryError = { status: attempted.status, text: await attempted.text(), headers: forwardedResponseHeaders(attempted) };
         if (poolActive) this.notePoolFailure(candidate, `HTTP ${attempted.status}`);
