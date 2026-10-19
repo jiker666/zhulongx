@@ -1714,6 +1714,239 @@ function modelWallActive() {
   }
 }
 
+// ============== R44: graph scheduler (Cairn/ARTEX transplant) ==============
+// The two champion architectures converge on the same shape: a per-code
+// fact-intent graph plus a SOLE intent generator (Cairn reason / ARTEX
+// planner), with exploration workers claiming ONE intent each. This ports
+// that shape onto the existing lane loop:
+//   bootstrap: first direct attempt on a fresh code (existing solveOne)
+//   reason:    slot-free graph evaluation — reads the graph, judges coverage,
+//              proposes <= REASON_MAX_INTENTS new directions or nothing
+//   explore:   claims ONE open intent, runs a directed episode via the
+//              buildTask direction channel, returns an incremental fact
+// Reason findings ride the existing board channel with an INTENT:: prefix
+// (record_finding persists immediately, watchRun mirrors live — zero server
+// changes). The reason trigger mirrors Cairn: new fact / new hint / open
+// intents drained since the last reason checkpoint. ALL R39-R43 walls stay
+// in force: graphPickNext only replaces pickNext's pool ladder, never the
+// safety stack. TSEC_SCHED=pool restores the legacy ladder everywhere.
+const SCHED = process.env.TSEC_SCHED ?? "graph";
+const REASON_BUDGET_MIN = Number(process.env.TSEC_REASON_BUDGET_MIN ?? "") || 8;
+const REASON_MAX_INTENTS = Number(process.env.TSEC_REASON_MAX_INTENTS ?? "") || 4;
+const REASON_LAUNCH_GAP_MS = 60_000; // fleet-wide spacing between reason launches
+const REASON_BACKOFF_MS = 5 * 60_000;
+const INTENT_PREFIX = "INTENT::";
+
+function graphRead(code) {
+  return stateRead(`g:${code}`, {
+    facts: [], intents: [],
+    ck: { facts: 0, hints: 0, openIntents: 0 },
+    phase: "fresh", reasoning: false, reasonBackoffUntil: 0,
+  });
+}
+function graphWrite(code, g) { stateWrite(`g:${code}`, g); }
+
+// Merge board facts (mirrored live by watchRun, banked by bankKnowledge)
+// into the graph. INTENT::-prefixed findings become open intents, not facts.
+function graphSyncFromBoard(code) {
+  const g = graphRead(code);
+  const board = boardExists(code) ? boardFor(code) : { facts: [], hints: [] };
+  const known = new Set(g.facts.map((f) => f.text));
+  const knownIntents = new Set(g.intents.filter((i) => i.status !== "dead").map((i) => i.text));
+  let n = g.facts.length, m = g.intents.length;
+  for (const f of board.facts ?? []) {
+    const text = String(f?.text ?? f ?? "").trim();
+    if (!text) continue;
+    if (text.startsWith(INTENT_PREFIX)) {
+      const it = text.slice(INTENT_PREFIX.length).trim();
+      if (it && !knownIntents.has(it)) {
+        g.intents.push({ id: `i${++m}`, from: g.facts.slice(-3).map((x) => x.id), text: it.slice(0, 400), status: "open", at: new Date().toISOString() });
+        knownIntents.add(it);
+      }
+    } else if (!known.has(text)) {
+      g.facts.push({ id: `f${++n}`, text: text.slice(0, 400), at: new Date().toISOString() });
+      known.add(text);
+    }
+  }
+  if (g.facts.length > 0 && g.phase === "fresh") g.phase = "active";
+  graphWrite(code, g);
+  return g;
+}
+
+function graphOpenIntents(g) { return g.intents.filter((i) => i.status === "open"); }
+function graphHintCount(code) { return hintFor(code)?.hint ? 1 : 0; }
+
+// Cairn's reason trigger: the graph changed since the last reason checkpoint.
+function graphReasonDue(g, code) {
+  if (g.reasoning || (g.reasonBackoffUntil ?? 0) > Date.now()) return false;
+  if (g.phase !== "active" || g.facts.length === 0) return false;
+  const ck = g.ck ?? { facts: 0, hints: 0, openIntents: 0 };
+  return g.facts.length > ck.facts
+    || graphHintCount(code) > ck.hints
+    || (ck.openIntents > 0 && graphOpenIntents(g).length === 0);
+}
+
+// Mirrors pickNext's per-code caps (miss budgets, quarantines, hard-single
+// spent cap) so graph picks can never outrun the safety stack.
+function graphCodeEligible(item, ledger, now) {
+  if (item.is_completed) return false;
+  const code = item.unique_code;
+  if (claimFor(code)) return false;
+  const done = ledger.done[code];
+  if (done?.status === "solved") return false;
+  if (done?.quarantineUntil && now < done.quarantineUntil) return false;
+  if ((done?.probeQuarantinedUntil ?? 0) > now) return false;
+  if (done) {
+    const hinted = Boolean(hintFor(code)?.hint);
+    const singleCap = hinted ? 3 : 2;
+    const cap = (item.flag_count ?? 1) > 1
+      ? (hinted ? 4 : (handoffFor(code) || boardExists(code) || done.status === "partial" ? 2 : 1))
+      : (handoffFor(code) || boardExists(code) ? singleCap : 1);
+    if ((done.misses ?? 0) >= cap) return false;
+    const hardSingle = (item.flag_count ?? 1) === 1
+      && (DIFFICULTY_RANK[String(item.difficulty ?? "").toLowerCase()] ?? 3) >= 2;
+    if (hardSingle && (done.spentMin ?? 0) >= HARD_SPENT_CAP) return false;
+  }
+  return true;
+}
+
+function graphPickNext(items, role) {
+  const ledger = readLedger();
+  const now = Date.now();
+  const elig = items.filter((item) => graphCodeEligible(item, ledger, now));
+  // 1) reason first: slot-free, cheap, and it feeds the explore queue
+  const gate = stateRead("reasongate", { lastAt: 0 });
+  if (now - (gate.lastAt ?? 0) >= REASON_LAUNCH_GAP_MS) {
+    for (const item of elig) {
+      const g = graphSyncFromBoard(item.unique_code);
+      if (graphReasonDue(g, item.unique_code)) {
+        stateWrite("reasongate", { lastAt: now });
+        return { ...item, kind: "reason" };
+      }
+    }
+  }
+  // 2) explore: claim the newest open intent (Cairn semantics)
+  let best = null;
+  for (const item of elig) {
+    const g = graphRead(item.unique_code);
+    for (const it of graphOpenIntents(g)) {
+      if (!best || (Date.parse(it.at ?? "") || 0) > (Date.parse(best.intent.at ?? "") || 0)) best = { item, intent: it };
+    }
+  }
+  if (best) {
+    return { ...best.item, kind: "explore", intentId: best.intent.id,
+      direction: `${best.intent.text}(探索起点:已确认事实 ${best.intent.from.join(", ")})` };
+  }
+  // 3) bootstrap: fresh codes only — easy first, then value
+  const fresh = elig.filter((item) => !ledger.done[item.unique_code]);
+  if (fresh.length > 0) {
+    fresh.sort((a, b) => ((DIFFICULTY_RANK[String(a.difficulty ?? "").toLowerCase()] ?? 3) - (DIFFICULTY_RANK[String(b.difficulty ?? "").toLowerCase()] ?? 3)) || ((b.total_score ?? 0) - (a.total_score ?? 0)));
+    return { ...fresh[0] };
+  }
+  return null; // fall through to the legacy lastResort/revive ladder
+}
+
+function graphIntentStart(code, intentId) {
+  const g = graphRead(code);
+  const it = g.intents.find((i) => i.id === intentId);
+  if (!it) return null;
+  it.status = "running";
+  graphWrite(code, g);
+  return { id: it.id, direction: `${it.text}(探索起点:已确认事实 ${it.from.join(", ")})` };
+}
+
+function graphIntentClose(code, intentId, grew) {
+  try {
+    const g = graphRead(code);
+    const it = g.intents.find((i) => i.id === intentId);
+    if (it && it.status === "running") { it.status = grew ? "done" : "dead"; graphWrite(code, g); }
+  } catch { /* best effort */ }
+}
+
+function renderGraphYaml(code, item, g) {
+  const lines = [];
+  lines.push(`# 图 ${code} ${String(item?.challenge_name ?? "").slice(0, 60)} (${item?.difficulty ?? "?"}, 平台已确认 flag ${item?.correct_flag_count ?? 0}/${item?.flag_count ?? 1})`);
+  lines.push("facts:");
+  for (const f of g.facts.slice(-25)) lines.push(`  - ${f.id}: ${f.text.slice(0, 200)}`);
+  const open = graphOpenIntents(g);
+  const closed = g.intents.filter((i) => i.status !== "open");
+  lines.push("open intents:");
+  lines.push(open.length ? open.map((i) => `  - ${i.id}: ${i.text.slice(0, 200)}`).join("\n") : "  (无)");
+  lines.push("closed intents(已探索/已死,严禁重复提出):");
+  lines.push(closed.length ? closed.slice(-15).map((i) => `  - ${i.text.slice(0, 120)}`).join("\n") : "  (无)");
+  lines.push("hints:");
+  lines.push(hintFor(code)?.hint ? `  - ${String(hintFor(code).hint).slice(0, 200)}` : "  (无)");
+  return lines.join("\n");
+}
+
+const REASON_DISCIPLINE = [
+  "你是状态空间搜索仲裁者(Reason),不接触任何远程目标:本任务无靶场环境,严禁任何网络探测与工具调用,只做图分析。",
+  "输出通道唯一:每提出一个新探索方向,立即用 record_finding 记录一行,格式严格为 INTENT::<方向描述>;除此之外不要记录任何普通 fact。",
+  `每个方向必须:独立可并行、与 open/closed intents 及彼此之间不重叠、源自具体已确认事实(fX)、一句核心洞察(是什么方向+为什么值得),不写步骤清单。最多提出 ${REASON_MAX_INTENTS} 个方向。`,
+  "若现有 open intents 已覆盖全部线索且无更优新方向,输出空(什么都不记录)。严禁提出:已完成方向、closed intents 的重复或换皮、无事实支撑的泛泛方向。",
+].join("\n");
+
+function buildReasonTask(code, item, graphYaml) {
+  return [
+    "# TASK",
+    `对题 ${code} 的探索图做一次全局审判(GOAL:读出并自交该题全部 flag)。判断现有 open intents 是否已覆盖所有已知线索;若有未覆盖的高价值方向,按系统纪律提出新方向。`,
+    "## 图",
+    "```",
+    graphYaml,
+    "```",
+    `## 题面摘要: ${String(item?.description ?? "").slice(0, 600) || "(无)"}`,
+    "## 要求:按系统纪律执行;有新方向就 record_finding INTENT::<描述>,没有就安静结束。不要做别的。",
+  ].join("\n");
+}
+
+// Slot-free reason pass: no /start, no claim, no miss, no rapid-episode
+// counting. Its INTENT:: findings ARE the explore queue. Never throws —
+// crashes back the code off and return to the caller.
+async function reasonOne(code, items) {
+  const item = items.find((i) => i.unique_code === code);
+  const g0 = graphSyncFromBoard(code);
+  g0.reasoning = true;
+  graphWrite(code, g0);
+  let runId = null;
+  try {
+    const task = buildReasonTask(code, item, renderGraphYaml(code, item, g0));
+    const created = await xuanshu("/v1/runs", {
+      method: "POST",
+      body: JSON.stringify({
+        task,
+        metadata: { source: "question-bank", questionId: `tsec-${code}-reason` },
+        evidenceGroup: `tsec-${code}`,
+        discipline: REASON_DISCIPLINE,
+      }),
+    }, 45_000, 0);
+    if (created.status !== 202) {
+      console.warn(`[tsec] graph reason ${code}: run creation failed (${created.status}) — backing off 5min`);
+      const gb = graphRead(code); gb.reasoning = false; gb.reasonBackoffUntil = Date.now() + REASON_BACKOFF_MS; graphWrite(code, gb);
+      return;
+    }
+    runId = created.json?.id;
+    if (!runId) throw new Error("no run id in creation response");
+    registerWatch(code, runId, REASON_BUDGET_MIN * 60_000 + 5 * 60_000);
+    console.log(`[tsec] graph reason ${code}: run ${runId.slice(0, 8)} (facts=${g0.facts.length}, open=${graphOpenIntents(g0).length})`);
+    const terminal = await watchRun(runId, REASON_BUDGET_MIN * 60_000, code);
+    try { await bankKnowledge(code, runId); } catch { /* best effort */ }
+    if (!terminal) { try { await stopRun(runId); } catch { /* budget edge */ } }
+    const g1 = graphSyncFromBoard(code); // converts INTENT:: findings into intents
+    g1.ck = { facts: g1.facts.length, hints: graphHintCount(code), openIntents: graphOpenIntents(g1).length };
+    g1.reasoning = false;
+    graphWrite(code, g1);
+    console.log(`[tsec] graph reason ${code}: settled — facts=${g1.facts.length}, open intents=${graphOpenIntents(g1).length}`);
+  } catch (error) {
+    console.warn(`[tsec] graph reason ${code} crashed: ${error?.message ?? error}`);
+    const ge = graphRead(code);
+    ge.reasoning = false;
+    ge.reasonBackoffUntil = Date.now() + REASON_BACKOFF_MS;
+    graphWrite(code, ge);
+  } finally {
+    if (runId) { try { clearWatch(code); } catch { /* already cleared */ } }
+  }
+}
+
 async function ensureContainer(challenge) {
   const code = challenge.unique_code;
   if (challenge.container_status === "available" && (challenge.container_addr ?? []).length > 0) return challenge;
@@ -1792,7 +2025,7 @@ function ledgerAddSpent(code, minutes) {
   } catch { /* ledger races are tolerated elsewhere; same here */ }
 }
 
-async function solveOne(challenge) {
+async function solveOne(challenge, opts = {}) {
   const code = challenge.unique_code;
   const lane = process.env.TSEC_LANE ?? "main";
   if (!claimCode(code, lane)) {
@@ -1802,7 +2035,7 @@ async function solveOne(challenge) {
   const claimedAt = Date.now();
   registerWatch(code, null, 90 * 60_000); // provisional: covers launch->build->create
   try {
-    return await solveOneInner(challenge);
+    return await solveOneInner(challenge, opts);
   } finally {
     clearWatch(code); // episode over: the watchdog must not see a stale owner
     releaseClaim(code);
@@ -1813,7 +2046,7 @@ async function solveOne(challenge) {
   }
 }
 
-async function solveOneInner(challenge) {
+async function solveOneInner(challenge, opts = {}) {
   const code = challenge.unique_code;
   const laneRole = process.env.TSEC_ROLE ?? "mixed";
   const startedAt = Date.now();
@@ -1885,7 +2118,7 @@ async function solveOneInner(challenge) {
   // for 4h while a fresh 38-minute pass solved it in the previous round.
   const freshEyes = effMisses >= 2 && effMisses % 2 === 0;
   if (freshEyes) console.log(`[tsec] ${code} fresh-eyes retry (effective misses=${effMisses}): dropping inherited context for an independent re-audit`);
-  const task = buildTask(ready, Math.round(budgetMs / 60_000), undefined, freshEyes);
+  const task = buildTask(ready, Math.round(budgetMs / 60_000), opts?.direction, freshEyes);
   await writeFile(resolve(dir, "task.txt"), task);
   // Scratch inheritance (round-3 lesson): retries rebuilt whole toolchains
   // because each run's scratch namespace is wiped. lineage.parentRunId makes
@@ -2886,7 +3119,7 @@ async function cmdLoop() {
         console.warn(`[tsec] model-wall breaker active — holding ~${Math.max(1, Math.ceil((until - Date.now()) / 60_000))}min (no new episodes)`);
         await sleep(Math.min(60_000, Math.max(5_000, until - Date.now())));
       }
-      let candidate = pickNext(items, role, retryMisses >= 2);
+      let candidate = SCHED === "graph" ? graphPickNext(items, role) : pickNext(items, role, retryMisses >= 2);
       if (!candidate) {
         const remaining = items.filter((item) => !item.is_completed);
         if (remaining.length === 0) { console.log("[tsec] all challenges completed — loop exiting"); return 0; }
@@ -2906,10 +3139,28 @@ async function cmdLoop() {
       }
       const wasFresh = !readLedger().done[candidate.unique_code];
       warmPickStreak = wasFresh ? 0 : warmPickStreak + 1;
+      if (candidate.kind === "reason") {
+        // R44: reason passes are slot-free graph evaluations — no /start, no
+        // claim, no miss. Their INTENT:: findings are the explore queue.
+        await reasonOne(candidate.unique_code, items);
+        slotHoldStreak = 0;
+        joinEpisodeCodes.clear();
+        await sleep(10_000);
+        continue;
+      }
       try {
         // Rich-retry picks fan out into directed workers (R7) instead of a
         // single-stream retry; everything else keeps the one-run-per-pick shape.
-        const solved = candidate.fanout ? await solveFanOut(candidate) : await solveOne(candidate);
+        // R44 graph scheduler: explore episodes run against ONE claimed
+        // intent; the intent closes done/dead by whether the graph grew.
+        const graphIntent = candidate.kind === "explore" ? graphIntentStart(candidate.unique_code, candidate.intentId) : null;
+        const preFactCount = boardExists(candidate.unique_code) ? boardFor(candidate.unique_code).facts.length : 0;
+        const solved = candidate.fanout ? await solveFanOut(candidate) : await solveOne(candidate, candidate.kind === "explore" ? { direction: graphIntent?.direction } : {});
+        if (candidate.kind === "explore") {
+          const grew = solved || (boardExists(candidate.unique_code) ? boardFor(candidate.unique_code).facts.length : 0) > preFactCount;
+          graphIntentClose(candidate.unique_code, candidate.intentId, grew);
+        }
+        if (SCHED === "graph") graphSyncFromBoard(candidate.unique_code);
         consecutiveMisses = solved ? 0 : consecutiveMisses + 1;
         retryMisses = solved || wasFresh ? 0 : retryMisses + 1;
         slotHoldStreak = 0; // a real pick resets the hold episode
