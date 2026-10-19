@@ -1672,6 +1672,48 @@ function probeBreakerActive() {
   }
 }
 
+// R42 (run 36914): every settle-path gate (fastFails infra wall, metronome
+// quarantine, provider-wall throw) is bypassed when an episode dies as an
+// EXCEPTION before classification — watchRun throws on a 404/reset, the SDK
+// session dies at event 0, and the generic catch recycles the lane in 60s.
+// Four lanes did exactly that for 4.5h: launch -> die ~19s -> close -> repick
+// the same codes every ~47s. Count rapid no-outcome episodes at the MAIN
+// LOOP level (every end path funnels through here) and hold the whole fleet
+// when they stack: a model layer this dead is dead for everyone, and /start
+// churn buys nothing.
+const RAPID_EPISODE_MS = Number(process.env.TSEC_RAPID_EPISODE_MS ?? "") || 5 * 60_000;
+const MODEL_WALL_EVENTS = Number(process.env.TSEC_MODEL_WALL_EVENTS ?? "") || 6;
+const MODEL_WALL_WINDOW_MS = 10 * 60_000;
+const MODEL_WALL_HOLD_MS = (Number(process.env.TSEC_MODEL_WALL_HOLD_MIN ?? "") || 15) * 60_000;
+function noteRapidEpisode() {
+  try {
+    return stateUpdate("modelwall", { events: [], until: 0 }, (st) => {
+      const now = Date.now();
+      st.events = [...(st.events ?? []).filter((e) => now - e.t < MODEL_WALL_WINDOW_MS), { t: now }];
+      if (st.events.length >= MODEL_WALL_EVENTS && (st.until ?? 0) < now) {
+        st.until = now + MODEL_WALL_HOLD_MS;
+        st.events = [];
+        console.warn(`[tsec] model-wall breaker armed: ${MODEL_WALL_EVENTS} rapid no-outcome episodes in ${Math.round(MODEL_WALL_WINDOW_MS / 60_000)}min — fleet holds ${Math.round(MODEL_WALL_HOLD_MS / 60_000)}min (no new episodes)`);
+      }
+    }).until ?? 0;
+  } catch {
+    return 0;
+  }
+}
+function noteEpisodeSuccess() {
+  // A real submission proves the model layer (and the code) alive — clear
+  // the breaker signature so healthy fast-block settles never stack into a
+  // false fleet hold.
+  try { stateUpdate("modelwall", { events: [], until: 0 }, (st) => { st.events = []; st.until = 0; }); } catch { /* best effort */ }
+}
+function modelWallActive() {
+  try {
+    return (stateRead("modelwall", { until: 0 }).until ?? 0) > Date.now();
+  } catch {
+    return false;
+  }
+}
+
 async function ensureContainer(challenge) {
   const code = challenge.unique_code;
   if (challenge.container_status === "available" && (challenge.container_addr ?? []).length > 0) return challenge;
@@ -2839,6 +2881,11 @@ async function cmdLoop() {
         console.warn(`[tsec] probe-failure circuit breaker active — holding ~${Math.max(1, Math.ceil((until - Date.now()) / 60_000))}min (no /start)`);
         await sleep(Math.min(60_000, Math.max(5_000, until - Date.now())));
       }
+      while (modelWallActive()) {
+        const until = stateRead("modelwall", { until: 0 }).until ?? Date.now();
+        console.warn(`[tsec] model-wall breaker active — holding ~${Math.max(1, Math.ceil((until - Date.now()) / 60_000))}min (no new episodes)`);
+        await sleep(Math.min(60_000, Math.max(5_000, until - Date.now())));
+      }
       let candidate = pickNext(items, role, retryMisses >= 2);
       if (!candidate) {
         const remaining = items.filter((item) => !item.is_completed);
@@ -2867,6 +2914,8 @@ async function cmdLoop() {
         retryMisses = solved || wasFresh ? 0 : retryMisses + 1;
         slotHoldStreak = 0; // a real pick resets the hold episode
         joinEpisodeCodes.clear();
+        if (solved) noteEpisodeSuccess();
+        else if (Date.now() - iterationStart < RAPID_EPISODE_MS) noteRapidEpisode();
         if (!solved && !wasFresh && retryMisses >= 2) console.warn(`[tsec] ${retryMisses} warm-retry misses in a row — next pick forced fresh`);
       } catch (error) {
         if (error.taskEnded || isTaskEnded(error)) {
@@ -2884,6 +2933,11 @@ async function cmdLoop() {
           // (2026-10-09 20:15-20:24 burned six short runs against one).
           // Back off long enough to clear a refresh boundary, then resume.
           console.warn("[tsec] suspected infra wall — pausing lane 15 minutes");
+          // R42: the throw that arms this wall also counts toward the fleet
+          // breaker — per-lane 15-min pauses alone never stop the fleet-level
+          // ~47s launch/close equilibrium (run 36914 ground for 4.5h inside
+          // exactly these pauses).
+          if (Date.now() - iterationStart < RAPID_EPISODE_MS) noteRapidEpisode();
           fastFails = 0;
           consecutiveMisses = 0;
           await sleep(15 * 60_000);
@@ -2913,6 +2967,7 @@ async function cmdLoop() {
           }
         } else {
           console.warn(`[tsec] solveOne crashed: ${error?.message ?? error}; pausing 60s`);
+          if (Date.now() - iterationStart < RAPID_EPISODE_MS) noteRapidEpisode();
           await sleep(60_000);
         }
       }
