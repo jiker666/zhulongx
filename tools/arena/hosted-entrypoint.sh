@@ -107,7 +107,12 @@ elif [ -n "${BIGMODEL_API_KEY:-}" ]; then
   # request pacing, a run gate the key can actually feed, capped fan-out,
   # and a 4-lane fleet (2 deep + 1 prospector + 1 sweep). All knobs are
   # env-overridable from the runtime panel.
-  sed -i -e "s|^  modelMinIntervalMs: 100$|  modelMinIntervalMs: ${GLM_SINGLE_MIN_INTERVAL_MS:-1500}|"          -e "s|^  modelRequestsPerMinute: 600$|  modelRequestsPerMinute: ${GLM_SINGLE_RPM:-40}|"          -e "s|^  modelTokensPerMinute: 10000000$|  modelTokensPerMinute: ${GLM_SINGLE_TPM:-500000}|"          config/container.yaml
+  # R43 (36914/37122 evidence): at 40 RPM the key dies after ~1-2h of load
+  # (both runs: strong first hour, then account-level throttle for the
+  # remaining 6h). Endurance over burst: default to 15 RPM / 4s interval —
+  # slower opens, but the key is meant to last the full 8h window. R42's
+  # fleet wall already parks the run quietly if throttle still lands.
+  sed -i -e "s|^  modelMinIntervalMs: 100$|  modelMinIntervalMs: ${GLM_SINGLE_MIN_INTERVAL_MS:-4000}|"          -e "s|^  modelRequestsPerMinute: 600$|  modelRequestsPerMinute: ${GLM_SINGLE_RPM:-15}|"          -e "s|^  modelTokensPerMinute: 10000000$|  modelTokensPerMinute: ${GLM_SINGLE_TPM:-500000}|"          config/container.yaml
   export XUANSHU_MAX_CONCURRENT_RUNS="${XUANSHU_MAX_CONCURRENT_RUNS:-6}"
   export TSEC_FANOUT_WORKERS="${TSEC_FANOUT_WORKERS:-2}"
   export TSEC_ENDGAME_FANOUT_WORKERS="${TSEC_ENDGAME_FANOUT_WORKERS:-2}"
