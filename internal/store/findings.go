@@ -168,8 +168,7 @@ func (s *Store) AddHumanFact(ctx context.Context, goalID, content, creator strin
 	return out, nil
 }
 
-// Graph is the full context snapshot handed to prompts (Cairn:
-// ProjectDetail + the export YAML written into containers).
+// Graph is the full context snapshot handed to prompts.
 type Graph struct {
 	Goal     fgs.Goal      `json:"goal" yaml:"goal"`
 	Facts    []fgs.Fact    `json:"facts" yaml:"facts"`
@@ -200,8 +199,8 @@ func (s *Store) LoadGraph(ctx context.Context, goalID string) (*Graph, error) {
 	return graph, nil
 }
 
-// SnapshotCounts feeds the Decide trigger heuristic (Cairn:
-// ReasonCheckpoint fact/hint/open-intent counts).
+// SnapshotCounts feeds the Decide trigger heuristic (fact/hint/open-step
+// counts).
 type SnapshotCounts struct {
 	Facts     int
 	Findings  int

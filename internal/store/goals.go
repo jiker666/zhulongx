@@ -11,9 +11,8 @@ import (
 
 // goals.go implements Goal lifecycle mutations.
 //
-// Cairn reference: server/routers/projects.py (create_project writes origin +
-// goal facts; complete_project flips status and records from-facts;
-// reopen_project un-completes with an external feedback fact).
+// create writes origin + goal facts; complete flips status and records
+// from-facts; reopen un-completes with an external feedback fact.
 
 const goalCols = `id, title, origin, objective, status, created_at, completed_at`
 
@@ -34,7 +33,7 @@ func scanGoal(row interface{ Scan(...any) error }) (*fgs.Goal, error) {
 	return &g, nil
 }
 
-// CreateGoal creates an active goal. Cairn equivalent: POST /projects.
+// CreateGoal creates an active goal.
 func (s *Store) CreateGoal(ctx context.Context, title, origin, objective string) (*fgs.Goal, error) {
 	for _, c := range []struct{ val, name string }{{title, "title"}, {origin, "origin"}, {objective, "objective"}} {
 		if err := nonEmpty(c.val, c.name); err != nil {
@@ -94,9 +93,8 @@ func (s *Store) getGoalForUpdate(tx *sql.Tx, goalID string) (*fgs.Goal, error) {
 	return scanGoal(tx.QueryRow(`SELECT `+goalCols+` FROM goals WHERE id = ?`, goalID))
 }
 
-// CompleteGoal marks the goal completed. Cairn equivalent: complete_project —
-// fromFacts must all exist; the verdict description is preserved in the audit
-// trail (Cairn stored it on a synthetic intent pointing at 'goal').
+// CompleteGoal marks the goal completed. fromFacts must all exist; the
+// verdict description is preserved in the audit trail.
 func (s *Store) CompleteGoal(ctx context.Context, goalID string, fromFacts []string, description, actor string) error {
 	if err := nonEmpty(description, "description"); err != nil {
 		return err
@@ -126,7 +124,7 @@ func (s *Store) CompleteGoal(ctx context.Context, goalID string, fromFacts []str
 	})
 }
 
-// SetGoalStatus stops or resumes a goal (Cairn: PUT status). Stopping
+// SetGoalStatus stops or resumes a goal. Stopping
 // releases claims on running steps so a later resume can pick them up again.
 func (s *Store) SetGoalStatus(ctx context.Context, goalID string, target fgs.GoalStatus, actor string) error {
 	return s.withTx(ctx, func(tx *sql.Tx) error {
@@ -167,8 +165,7 @@ func (s *Store) SetGoalStatus(ctx context.Context, goalID string, target fgs.Goa
 }
 
 // ReopenGoal brings a completed goal back to active and records the external
-// feedback as a Fact (Cairn: reopen_project writes an 'external_feedback'
-// intent + fact pair; zhulongx keeps just the fact plus audit).
+// feedback as a Fact (plus audit).
 func (s *Store) ReopenGoal(ctx context.Context, goalID, feedback, creator string) error {
 	if err := nonEmpty(feedback, "feedback"); err != nil {
 		return err

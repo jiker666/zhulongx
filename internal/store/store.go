@@ -1,9 +1,7 @@
 // Package store is zhulongx's SQLite persistence layer for the FGS graph.
 //
-// It replaces Cairn's server (FastAPI + sqlite, cairn/server/db.py and
-// routers/) with an embedded store: no HTTP, one process. Semantics that
-// MUST survive the rewrite are annotated at each method with the original
-// Cairn code they correspond to.
+// It is an embedded store: no HTTP, one process, direct SQL with
+// transactional graph mutations and an audit log.
 package store
 
 import (
@@ -17,7 +15,7 @@ import (
 	_ "modernc.org/sqlite" // pure-Go SQLite driver (no cgo, Windows-friendly)
 )
 
-// Sentinel errors mirroring Cairn's HTTP error classes.
+// Sentinel errors mirroring classic HTTP error classes.
 var (
 	ErrNotFound       = errors.New("zhulongx: not found")
 	ErrGoalNotActive  = errors.New("zhulongx: goal is not active")

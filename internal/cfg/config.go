@@ -1,6 +1,5 @@
-// Package cfg loads zhulongx.yaml. It replaces Cairn's dispatch.yaml
-// (cairn/dispatcher/config.py): no multi-worker matrix, no container
-// section — the runtime is exactly one Pi agent loop.
+// Package cfg loads zhulongx.yaml: runtime, scheduling and Pi settings
+// in one place — the runtime is exactly one Pi agent loop.
 package cfg
 
 import (
@@ -40,8 +39,7 @@ type Runtime struct {
 	MaxStepsPerDecide  int      `yaml:"max_steps_per_decide"`
 	StepMaxAttempts    int      `yaml:"step_max_attempts"`
 	// DecideNoopLimit auto-stops a goal after N consecutive no-op Decide
-	// rounds while no steps are open (Cairn loops forever here; zhulongx
-	// caps the burn — deviation documented in docs).
+	// rounds while no steps are open (bounds wasted Decide rounds).
 	DecideNoopLimit int `yaml:"decide_noop_limit"`
 }
 

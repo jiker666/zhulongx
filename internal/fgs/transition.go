@@ -4,9 +4,8 @@ package fgs
 // layer consults these tables before mutating; tests assert that the table
 // itself stays in sync with the engine's usage.
 //
-// Rules trace back to Cairn behavior:
+// Rules:
 //   - goal active→completed only via a Decide "complete" verdict
-//     (cairn server/routers/projects.py:complete_project)
 //   - goal active→stopped / completed→active mirror stop/reopen
 //   - step claim requires pending and no current claim (intent claim 409s)
 //   - step success is only writable by the claiming worker (conclude)

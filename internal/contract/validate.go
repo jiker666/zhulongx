@@ -5,10 +5,10 @@ import (
 	"strings"
 )
 
-// validate.go ports Cairn contracts.py payload validators to the FGS
+// validate.go holds the payload validators for the FGS
 // vocabulary: DecideAnswer (was reason), ExecuteAnswer (was explore).
 // The accepted/data envelope is preserved verbatim so prompts stay in the
-// same shape teams already know from Cairn.
+// same envelope teams already know.
 
 // Verdict kinds.
 const (
@@ -76,13 +76,12 @@ func unwrap(payload map[string]any) (rejected bool, reason string, data map[stri
 
 // ValidateDecide validates a Decide payload.
 //
-// Rules (Cairn validate_reason_payload + FGS finding review):
+// Rules (decide payload + FGS finding review):
 //   - accepted=false → rejected verdict
 //   - data.complete  → from must be non-empty strings; description non-empty
 //   - data.steps     → non-empty list; each has non-empty description and
 //     non-empty from; truncated to maxSteps; must be non-empty when there
-//     are no open steps (Cairn: "intents must be non-empty when open intents
-//     are empty")
+//     are no open steps ("steps must be non-empty when open steps are empty")
 //   - data.findings  → {promote: [ids], discard: [ids]}, no duplicates
 //   - complete and steps are mutually exclusive
 func ValidateDecide(payload map[string]any, openStepsEmpty bool, maxSteps int) (*DecideAnswer, error) {
@@ -175,7 +174,7 @@ func ValidateDecide(payload map[string]any, openStepsEmpty bool, maxSteps int) (
 	}
 
 	if openStepsEmpty && (ans.Promote == nil && ans.Discard == nil) {
-		// Cairn allows noop with zero open intents (the scheduler re-triggers
+		// Noop with zero open steps is allowed (the scheduler re-triggers
 		// reason); mirror that leniency — the engine enforces a no-progress
 		// guard instead of the contract.
 		return ans, nil
@@ -184,7 +183,7 @@ func ValidateDecide(payload map[string]any, openStepsEmpty bool, maxSteps int) (
 }
 
 // ValidateExecute validates an Execute payload: the agent must return
-// {"data": {"finding": {"content", "evidence"?}}} (Cairn explore returned a
+// {"data": {"finding": {"content", "evidence"?}}} (execute returned a
 // bare description; FGS adds evidence for the audit trail).
 func ValidateExecute(payload map[string]any) (*ExecuteAnswer, error) {
 	rejected, reason, data, err := unwrap(payload)

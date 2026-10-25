@@ -1,5 +1,5 @@
-// Package contract ports Cairn's agent-output contract layer
-// (cairn/dispatcher/output_parser.py + contracts.py) to Go.
+// Package contract extracts and validates agent output: JSON object
+// extraction plus payload contracts for Decide/Execute answers.
 //
 // Two jobs:
 //  1. ExtractJSONObject: pull the first JSON object out of arbitrary model

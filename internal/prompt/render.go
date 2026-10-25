@@ -1,5 +1,5 @@
 // Package prompt renders the Decide/Execute prompts from embedded
-// templates. It replaces Cairn's prompting.py + prompts/default/* with the
+// templates, rendered with the
 // FGS vocabulary (Step instead of Intent, plus the Finding review action).
 package prompt
 

@@ -2,13 +2,11 @@
 // FGS graph by alternating two modes.
 //
 //   - Decide (serial, globally): reviews open findings, judges completion,
-//     declares new steps. Replaces Cairn's reason task.
+//     declares new steps.
 //   - Execute (bounded concurrency): pushes one step through the Pi agent
-//     loop, validates the result, records a Finding. Replaces Cairn's
-//     explore task.
+//     loop, validates the result, records a Finding.
 //
-// Scheduling rules inherited from Cairn's dispatcher loop
-// (cairn/dispatcher/scheduler/loop.py):
+// Scheduling rules:
 //   - Decide runs on the first tick and whenever the graph grew (facts,
 //     findings, hints) or all steps drained to zero open.
 //   - While steps are open, Execute keeps ClaimNextStep until the
@@ -177,7 +175,7 @@ func (e *Engine) scheduleGoal(ctx context.Context, goalID string) {
 
 type stepRef struct{ id string }
 
-// decideTrigger mirrors Cairn's _reason_trigger: run Decide on first sight,
+// decideTrigger: run Decide on first sight,
 // when the graph grew since the last Decide, or when no steps remain open.
 func (e *Engine) decideTrigger(ctx context.Context, goalID string, prev store.SnapshotCounts, hasPrev bool) (bool, string) {
 	cur, err := e.store.Snapshot(ctx, goalID)

@@ -1,7 +1,6 @@
 # zhulongx(烛龙·玄枢)
 
 > 以 **FGS 状态图**为核心的自主任务运行时:**Go 调度引擎 + Pi Agent Loop 唯一运行时 + SQLite 持久化**。
-> 由 [Cairn](https://github.com/oritera/Cairn) 深度重构而来(上游基线完整保留在 [`testdata/upstream/`](testdata/upstream/),AGPL-3.0)。
 
 **状态:早期实验性项目。** 核心闭环(Decide/Execute、状态持久化与崩溃恢复、工具策略门禁)有自动化测试覆盖;已实测对接真实 Pi CLI 0.73.x(协议冒烟 + 真实模型与 bash 工具执行),E2E 回归使用 mock 子进程以便无 key 运行。详见[限制与路线图](#限制与路线图)。
 
@@ -101,15 +100,8 @@ internal/contract/ Agent 输出提取与契约校验
 internal/prompt/  Decide/Execute 提示词模板(内嵌)
 internal/cfg/     配置加载与校验
 e2e/              端到端测试
-docs/zhulongx/    架构文档、源码映射、构建运行指南、遗留引用审计
-testdata/upstream/ 上游 Cairn 基线(Python 原始快照,见下)
+docs/zhulongx/    架构文档、构建运行指南
 ```
-
-## 与上游 Cairn 的关系
-
-- 本仓库是 [Cairn](https://github.com/oritera/Cairn)(AGPL-3.0)的 Go 深度重构:沿用其调度触发启发式、claim/heartbeat 租约、conclude→Fact 事务化与输出契约等核心机制;移除其多 Worker/多后端 Agent 体系,Pi 为唯一 Agent 运行时。模块级对应关系见 [docs/zhulongx/01-source-mapping.md](docs/zhulongx/01-source-mapping.md)。
-- **上游基线**:`testdata/upstream/` 保存 Cairn 原始 Python 源码快照及其 Docker/配置/文档,不参与 zhulongx 的构建与运行;其回归测试可独立复现(`uv sync --project testdata/upstream/cairn --group dev && uv run --project testdata/upstream/cairn --group dev pytest`)。
-- **许可证**:全仓库沿用 **AGPL-3.0**(见 `LICENSE`),衍生与版权声明见 [`NOTICE-zhulongx.md`](NOTICE-zhulongx.md)。商业化授权须另行联系上游作者与法律审查,**本项目不对商业可用性作任何承诺**。
 
 ## 限制与路线图
 
@@ -124,4 +116,4 @@ testdata/upstream/ 上游 Cairn 基线(Python 原始快照,见下)
 
 ---
 
-**License**:GNU AGPL-3.0(继承自上游 Cairn,全仓库适用)
+**License**:GNU AGPL-3.0(全仓库适用)

@@ -1,15 +1,11 @@
-# Python
-__pycache__/
-*.pyc
-.venv/
-
-# runtime data (docker-compose volume)
-datas/
-
 # secrets / local-only config — never commit
-dispatch.yaml
 *.local.yaml
 *.secret.yaml
+
+# runtime data
+*.db
+*.db-wal
+*.db-shm
 
 # node
 node_modules/

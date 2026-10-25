@@ -1,7 +1,4 @@
 # zhulongx Go CI — build, vet, test (incl. e2e with mockpi).
-# Upstream Cairn's container-publish workflow is archived at
-# testdata/upstream/ci/build-container-ghcr.yml (out of .github/workflows,
-# so GitHub Actions no longer picks it up).
 name: zhulongx/ci/go
 
 on:

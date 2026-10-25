@@ -1,16 +1,15 @@
 // Package fgs defines the zhulongx Fact/Goal/Step/Finding domain model,
 // the legal state transitions between them, and the audit vocabulary.
 //
-// It is the Go re-imagining of Cairn's blackboard entities
-// (cairn/server/models.py): Project → Goal, Fact → Fact (+Finding split),
-// Intent → Step. Transition legality is enforced by the store layer
+// Entities map onto the FGS vocabulary: Fact (with a Finding split for
+// unverified output) and Step (an executable unit of work). Transition legality is enforced by the store layer
 // (internal/store); this package declares the rules as data so both the
 // store and tests can share one source of truth.
 package fgs
 
 import "time"
 
-// GoalStatus is the lifecycle of a Goal (Cairn: project.status).
+// GoalStatus is the lifecycle of a Goal.
 type GoalStatus string
 
 const (
@@ -19,7 +18,7 @@ const (
 	GoalStopped   GoalStatus = "stopped"
 )
 
-// StepStatus is the lifecycle of a Step (Cairn: intent open/claimed/concluded
+// StepStatus is the lifecycle of a Step (claimable, claimed, finished
 // expressed as worker+to_fact_id columns; here as one explicit column).
 type StepStatus string
 
@@ -41,7 +40,7 @@ const (
 	FindingDiscard  FindingStatus = "discarded"
 )
 
-// Goal is the top-level objective (Cairn folded origin/goal into two special
+// Goal is the top-level objective (origin/objective are preserved as two special
 // facts; zhulongx makes them first-class fields).
 type Goal struct {
 	ID          string     `json:"id"`
@@ -53,9 +52,9 @@ type Goal struct {
 	CompletedAt *time.Time `json:"completed_at,omitempty"`
 }
 
-// Step is an executable unit of work declared by Decide (Cairn: Intent).
+// Step is an executable unit of work declared by Decide.
 // DependsOn lists Fact ids that must exist when the Step is created — the
-// source-tracking counterpart of Cairn's intent_sources table.
+// source-tracking reference for where the step came from.
 type Step struct {
 	ID          string     `json:"id"`
 	GoalID      string     `json:"goal_id"`
@@ -87,7 +86,7 @@ type Finding struct {
 	DecidedAt *time.Time    `json:"decided_at,omitempty"`
 }
 
-// Fact is a verified, append-only conclusion (Cairn: facts table). Once
+// Fact is a verified, append-only conclusion. Once
 // written a Fact never changes — steps may only depend on existing Facts.
 type Fact struct {
 	ID        string    `json:"id"`
@@ -98,7 +97,7 @@ type Fact struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// Hint is human guidance injected into the Decide context (Cairn: hints).
+// Hint is human guidance injected into the Decide context.
 type Hint struct {
 	ID        string    `json:"id"`
 	GoalID    string    `json:"goal_id"`

@@ -83,7 +83,7 @@ func TestValidateDecideSteps(t *testing.T) {
 	if err != nil || b.Kind != KindNoop {
 		t.Fatalf("empty steps noop: %+v %v", b, err)
 	}
-	// empty steps with no open steps → error (Cairn rule)
+	// empty steps with no open steps → error
 	if _, err := ValidateDecide(obj(t, `{"accepted":true,"data":{"steps":[]}}`), true, 2); err == nil {
 		t.Fatal("empty steps with no open steps must fail")
 	}
@@ -149,7 +149,7 @@ func TestValidateExecute(t *testing.T) {
 }
 
 func TestUnwrapRawPayload(t *testing.T) {
-	// Cairn tolerated unwrapped payloads via _unwrap_wrapped_payload.
+	// Unwrapped payloads are tolerated via the accepted/data envelope.
 	a, err := ValidateDecide(obj(t, `{"complete":{"from":["f_0001"],"description":"x"}}`), false, 2)
 	if err != nil || a.Kind != KindComplete {
 		t.Fatalf("raw payload: %+v %v", a, err)

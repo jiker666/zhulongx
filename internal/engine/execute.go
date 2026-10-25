@@ -13,7 +13,7 @@ import (
 )
 
 // executeStep pushes one claimed step through the agent loop
-// (Cairn: run_explore_task). Outcome handling:
+// Outcome handling:
 //
 //   - valid payload  → FinishStepWithFinding (Step done, Finding open)
 //   - timeout/crash/protocol garbage → FailStep(retryable)
@@ -78,7 +78,7 @@ func (e *Engine) executeStep(ctx context.Context, goalID, stepID string) {
 	res, err := runner.Prompt(rctx, p)
 
 	// Terminal writes must survive engine shutdown / claim-loss: the run ctx
-	// may already be cancelled by the time we get here (Cairn parallel:
+	// may already be cancelled by the time we get here
 	// best_effort_release runs in the finally block regardless).
 	dctx, dcancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer dcancel()

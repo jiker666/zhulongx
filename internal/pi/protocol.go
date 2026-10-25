@@ -17,10 +17,8 @@
 //   - stderr is diagnostics-only, never protocol
 //   - closing stdin shuts the agent down gracefully
 //
-// It replaces Cairn's one-shot `--mode json` Pi driver
-// (cairn/dispatcher/workers/adapters/pi.py): the old driver re-parsed a
-// finished process's stdout; the adapter below is interactive, which is
-// what makes timeout→abort and crash→classify handling honest.
+// The adapter is interactive (long-lived RPC subprocess), which is what
+// makes timeout→abort and crash→classify handling honest.
 package pi
 
 import "encoding/json"

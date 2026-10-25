@@ -15,9 +15,8 @@ import (
 // validation, CAS-style claim, heartbeat, finish-with-finding, failure
 // classification, and reclaim (crash recovery).
 //
-// Cairn reference: server/routers/intents.py (claim/heartbeat/conclude),
-// server/services.py (expire_workers timeout reclaim), and the dispatcher's
-// best-effort release paths in tasks/common.py.
+// claim/heartbeat/conclude semantics with lease-expiry reclaim
+// (crash recovery) and best-effort release paths.
 
 const stepCols = `id, goal_id, description, status, producer, attempts, claimed_by,
 	claimed_at, heartbeat_at, created_at, finished_at, finding_id, fact_id, last_error`
@@ -87,7 +86,7 @@ func scanDeps(q queryer, goalID, stepID string) []string {
 }
 
 // CreateStep declares a new pending step. Every depends-on fact must already
-// exist (Cairn: validate_facts_exist on POST /intents).
+// exist.
 func (s *Store) CreateStep(ctx context.Context, goalID, description string, dependsOn []string, producer string) (*fgs.Step, error) {
 	if err := nonEmpty(description, "description"); err != nil {
 		return nil, err
@@ -185,8 +184,8 @@ func (s *Store) ClaimNextStep(ctx context.Context, goalID, claimer string) (*fgs
 }
 
 // HeartbeatStep refreshes the claim lease. Returns ErrClaimLost when the
-// step is no longer running or is claimed by someone else (Cairn: heartbeat
-// 409 race → task aborts immediately).
+// step is no longer running or is claimed by someone else (lost-claim
+// race → task aborts immediately).
 func (s *Store) HeartbeatStep(ctx context.Context, goalID, stepID, claimer string) error {
 	return s.withTx(ctx, func(tx *sql.Tx) error {
 		res, err := tx.Exec(
@@ -204,9 +203,9 @@ func (s *Store) HeartbeatStep(ctx context.Context, goalID, stepID, claimer strin
 }
 
 // FinishStepWithFinding completes a step and records its output as an open
-// Finding in one transaction (Cairn: conclude writes fact + sets
-// to_fact_id atomically; zhulongx inserts the Finding first and lets Decide
-// promote it to a Fact, so an agent's claim of success never becomes graph
+// Finding in one transaction (the Finding is inserted atomically and
+// Decide later promotes it to a Fact, so an agent's claim of success never
+// becomes graph
 // truth on its own).
 func (s *Store) FinishStepWithFinding(ctx context.Context, goalID, stepID, claimer, findingContent, evidence string) (*fgs.Finding, error) {
 	if err := nonEmpty(findingContent, "finding content"); err != nil {
@@ -310,8 +309,8 @@ func (s *Store) FailStep(ctx context.Context, goalID, stepID, claimer, errMsg st
 }
 
 // ReclaimStaleSteps returns running steps whose heartbeat is older than ttl
-// (or never set) to pending. Cairn: services.expire_workers. Used when an
-// engine instance died mid-run; single-process zhulongx calls it on startup.
+// (or never set) to pending. Used when an engine instance died mid-run;
+// single-process zhulongx calls it on startup.
 func (s *Store) ReclaimStaleSteps(ctx context.Context, ttl time.Duration, reason string) (int, error) {
 	cutoff := time.Now().UTC().Add(-ttl).Format(timeLayout)
 	reclaimed := 0

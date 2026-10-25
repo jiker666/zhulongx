@@ -10,7 +10,7 @@ import (
 	"zhulongx/internal/prompt"
 )
 
-// decide runs one Decide round for a goal (Cairn: run_reason_task).
+// decide runs one Decide round for a goal.
 // The verdict only becomes graph state after contract validation — a model
 // saying "complete" without valid from-facts changes nothing.
 func (e *Engine) decide(ctx context.Context, goalID, why string) {
@@ -91,7 +91,7 @@ func (e *Engine) decide(ctx context.Context, goalID, why string) {
 		created := 0
 		for _, spec := range answer.Steps {
 			if _, err := e.store.CreateStep(ctx, goalID, spec.Description, spec.From, fgs.ActorDecide); err != nil {
-				// Cairn tolerates per-intent create failures (403/404) and
+				// Per-step create failures are tolerated (lost races/inactive goals) and
 				// continues; mirror that.
 				e.log.Warn("decide: step create skipped", "goal", goalID, "err", err)
 				continue
@@ -112,7 +112,7 @@ func (e *Engine) decide(ctx context.Context, goalID, why string) {
 
 // countNoop tracks consecutive unproductive rounds; when no steps are open
 // past the configured limit the goal is auto-stopped so a looping model
-// cannot burn budget forever (Cairn deviation, documented).
+// cannot burn budget forever.
 func (e *Engine) countNoop(goalID string, openStepsEmpty bool) {
 	if !openStepsEmpty {
 		return // waiting on in-flight steps is normal, not a no-op streak

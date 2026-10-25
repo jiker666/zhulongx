@@ -1,6 +1,6 @@
 // zhulongx is the CLI entry point: run (scheduler loop), goal, hint, fact,
-// status, export, init-config. It replaces Cairn's `cairn serve` +
-// `cairn dispatch` pair with one process.
+// status, export, init-config — scheduling and task management in one
+// process.
 package main
 
 import (

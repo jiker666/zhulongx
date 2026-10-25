@@ -32,7 +32,7 @@ func (s *Store) ListFacts(ctx context.Context, goalID string) ([]fgs.Fact, error
 	return out, rows.Err()
 }
 
-// AddHint records human guidance shown to every Decide round (Cairn: hints).
+// AddHint records human guidance shown to every Decide round.
 func (s *Store) AddHint(ctx context.Context, goalID, content, creator string) (*fgs.Hint, error) {
 	if err := nonEmpty(content, "content"); err != nil {
 		return nil, err
@@ -120,7 +120,7 @@ func (s *Store) ListAudit(ctx context.Context, goalID string, limit int) ([]fgs.
 	return out, rows.Err()
 }
 
-// ExportYAML renders the graph as YAML (Cairn: /projects/{id}/export,
+// ExportYAML renders the graph as YAML
 // which the dispatcher snapshotted into the container for prompts).
 func (s *Store) ExportYAML(ctx context.Context, goalID string) (string, error) {
 	g, err := s.LoadGraph(ctx, goalID)

@@ -1,6 +1,6 @@
 # zhulongx 架构(中文)
 
-zhulongx 是从 Cairn(Python/FastAPI)深度重构而来的独立 Go 项目。核心变化是**三段式分离**:
+zhulongx 是一个独立 Go 项目,核心设计是**三段式分离**:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -27,14 +27,14 @@ zhulongx 是从 Cairn(Python/FastAPI)深度重构而来的独立 Go 项目。核
 只有两种模式,**没有第三种角色**:
 
 ### Decide(**全局串行**——同一时刻整个引擎至多一轮,跨 Goal 也互斥)
-- 触发启发式(继承 Cairn `_reason_trigger`):首次见到 Goal / Fact 增长 /
+- 触发启发式:首次见到 Goal / Fact 增长 /
   Finding 增长 / Hint 增长 / 开放 Step 清零。
 - 先**审查 Finding**(promote→新 Fact、discard),再处理裁决——顺序是有意的:
   `complete.from` 可能引用本轮 promote 刚生成的 Fact,先 complete 会让
   store 拒绝后续审查(goal 已非 active)。
 - 裁决三种:complete(引用既有 Fact)、steps(声明新 Step,带 DependsOn)、
   noop(连续 `decide_noop_limit` 轮且无开放 Step → 自动停 Goal,
-  这是与 Cairn 的**已记录偏离**:Cairn 会永远轮询)。
+  避免无界空转)。
 - 模型输出经 `internal/contract` 校验:JSON 对象提取、契约校验、
   非法引用(Fact 不存在)的 Step 整条丢弃,**不**静默降级。
 
@@ -51,16 +51,16 @@ zhulongx 是从 Cairn(Python/FastAPI)深度重构而来的独立 Go 项目。核
   | 永久 | permission denied / eacces / unauthorized / quota | 直接 failed,不耗尽重试 |
   | 取消 | claim 丢失或引擎关停 | 释放为 pending(下次重启重试) |
 - 终态写库用**脱离引擎生命周期的 10s context**——引擎关停/取消后
-  状态也必须落盘(Cairn 平行物:`best_effort_release` 的 finally 语义)。
+  状态也必须落盘(finally 语义)。
 
 ### 恢复
 - 启动时 `RecoverAllRunning`:所有 running Step 确定性回到 pending,
-  写 `step.reclaimed` 审计。Cairn 依赖租约超时被动回收;zhulongx
+  写 `step.reclaimed` 审计。zhulongx
   单进程模型下启动即回收,更快且无 TTL 时钟量化的坑。
 
 ## ② Pi Agent Loop 适配(internal/pi)
 
-- 唯一 agent 运行时。Cairn 的 claudecode/codex/mock 多 worker 层**全部移除**。
+- 唯一 agent 运行时;无多 worker/多后端体系。
 - 启动:`pi --mode rpc --no-session`,stdin/stdout 交换严格 LF 分帧的
   JSONL;stderr 只作诊断(环形缓冲,不参与协议)。
 - **完成语义**:`prompt` 响应的 `disposition ∈ {started,queued,handled}`
