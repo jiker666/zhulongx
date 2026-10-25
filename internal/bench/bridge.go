@@ -48,8 +48,18 @@ func Import(ctx context.Context, st *store.Store, c *Client) (created int, err e
 		if strings.TrimSpace(ch.UniqueCode) == "" || existing[ch.UniqueCode] {
 			continue
 		}
-		if _, err := st.CreateGoal(ctx, goalTitle(ch.UniqueCode), Brief(c, ch), Objective(ch)); err != nil {
+		g, err := st.CreateGoal(ctx, goalTitle(ch.UniqueCode), Brief(c, ch), Objective(ch))
+		if err != nil {
 			return created, fmt.Errorf("bench: create goal for %s: %w", ch.UniqueCode, err)
+		}
+		// Bootstrap fact: the step contract requires a non-empty source
+		// (from), and a fresh goal has no facts for Decide to anchor the
+		// first step on. Origin/objective are goal fields here, not
+		// facts, so import must seed the anchor itself.
+		if _, err := st.AddHumanFact(ctx, g.ID,
+			"bootstrap: 平台任务已就绪。作战简报(题目信息、平台 API 速查、约束与完成判据)见本目标 origin 字段。从此事实出发建第一个步骤。",
+			ActorSync); err != nil {
+			return created, fmt.Errorf("bench: bootstrap fact for %s: %w", ch.UniqueCode, err)
 		}
 		created++
 	}

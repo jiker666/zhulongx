@@ -274,3 +274,21 @@ func TestSyncRepeatedIsStable(t *testing.T) {
 		}
 	}
 }
+
+func TestImportSeedsBootstrapFact(t *testing.T) {
+	st := openStore(t)
+	p := newPlatformStub(t, twoChallenges)
+	if _, err := Import(context.Background(), st, client(t, p.srv.URL)); err != nil {
+		t.Fatal(err)
+	}
+	for _, title := range []string{"bench:web_01", "bench:crypto_02"} {
+		g := goalByTitle(t, st, title)
+		facts, err := st.ListFacts(context.Background(), g.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(facts) != 1 || !strings.Contains(facts[0].Content, "bootstrap") {
+			t.Errorf("%s: want one bootstrap fact, got %+v", title, facts)
+		}
+	}
+}
