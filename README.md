@@ -67,6 +67,19 @@ go build -o zhulongx.exe ./cmd/zhulongx    # Linux/macOS: go build -o zhulongx .
 
 > Windows 说明:npm 安装的 `pi` 是 `.cmd` 启动器,已实测 Go 可按 `pi.command: pi` 裸名直接启动(解析走 PATHEXT);若你的 PATH 不含 npm 全局目录,再改配绝对路径。
 
+### TSecBench 评测接入
+
+对接 TSec Benchmark Platform Challenges API:每道题导入为一个 Goal,Agent 在 Execute 里经 bash+curl 自助 start/hint/submit/close,`bench sync` 以平台 `is_completed` 复核完成状态(信任边界:平台是真值)。
+
+```bash
+export BENCHMARK_BASE_URL=... BENCHMARK_TOKEN=...   # 平台下发的任务凭证(先连靶场 VPN)
+./zhulongx.exe bench import   # 题目 → Goal(幂等)
+./zhulongx.exe run            # 正常调度循环解题
+./zhulongx.exe bench sync     # 平台确认通关 → 完成 Goal;MISMATCH 人工复查
+```
+
+详见 [docs/zhulongx/04-benchmark.md](docs/zhulongx/04-benchmark.md)。
+
 完整配置说明(超时、并发、重试、`pi.blocked_tools` 工具封禁策略等)见 [docs/zhulongx/03-build-and-run.md](docs/zhulongx/03-build-and-run.md)。
 
 ## 安全边界
@@ -91,7 +104,7 @@ ZHX_PI_SMOKE=2 go test ./internal/pi/ -run TestRealPiProtocolSmoke -v
 ## 目录结构
 
 ```text
-cmd/zhulongx/     CLI 入口(run / goal / hint / fact / status / export / audit)
+cmd/zhulongx/     CLI 入口(run / goal / hint / fact / status / export / audit / bench)
 internal/fgs/     FGS 领域模型与状态转换规则
 internal/store/   SQLite 持久化(WAL、审计、CAS 语义)
 internal/engine/  调度引擎:Decide(全局串行)/ Execute(受预算并发)
@@ -99,6 +112,7 @@ internal/pi/      Pi RPC 适配器(含测试用 mockpi)
 internal/contract/ Agent 输出提取与契约校验
 internal/prompt/  Decide/Execute 提示词模板(内嵌)
 internal/cfg/     配置加载与校验
+internal/bench/   TSecBench Challenges API 客户端与 Goal 桥接
 e2e/              端到端测试
 docs/zhulongx/    架构文档、构建运行指南
 ```

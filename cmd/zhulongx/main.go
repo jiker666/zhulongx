@@ -16,6 +16,7 @@ import (
 
 	_ "embed"
 
+	"zhulongx/internal/bench"
 	"zhulongx/internal/cfg"
 	"zhulongx/internal/engine"
 	"zhulongx/internal/fgs"
@@ -37,6 +38,12 @@ Usage:
   zhulongx status [goalID] [--config F]            graph overview / detail
   zhulongx export <goalID> [--config F]            print graph YAML
   zhulongx audit [goalID] [--config F]             recent audit entries
+  zhulongx bench import [--base-url URL] [--config F]  TSecBench: challenges -> goals
+  zhulongx bench sync [--base-url URL] [--config F]    TSecBench: reconcile goal states
+
+bench auth comes from the environment only: BENCHMARK_BASE_URL (or
+--base-url) and BENCHMARK_TOKEN — export both in the shell that runs
+zhulongx so the agent's shell inherits them too.
 `
 
 func main() {
@@ -62,6 +69,8 @@ func main() {
 		err = cmdExport(os.Args[2:])
 	case "audit":
 		err = cmdAudit(os.Args[2:])
+	case "bench":
+		err = cmdBench(os.Args[2:])
 	default:
 		fmt.Fprint(os.Stderr, usageText)
 		os.Exit(2)
@@ -397,4 +406,75 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n-1] + "…"
+}
+
+// cmdBench bridges the TSec Benchmark Platform Challenges API: import
+// creates one goal per challenge (origin carries the full combat brief),
+// sync reconciles platform completion state back into the graph. The
+// solving itself runs through the normal run loop: the agent operates
+// start/hint/submit/close via curl with BENCHMARK_TOKEN from its
+// inherited environment.
+func cmdBench(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("bench requires a subcommand: import|sync")
+	}
+	sub := args[0]
+	if sub != "import" && sub != "sync" {
+		return fmt.Errorf("unknown bench subcommand %q (want import|sync)", sub)
+	}
+	fs := flag.NewFlagSet("bench "+sub, flag.ContinueOnError)
+	configPath := fs.String("config", "zhulongx.yaml", "config file path")
+	baseURL := fs.String("base-url", os.Getenv("BENCHMARK_BASE_URL"),
+		"benchmark platform base URL (default: env BENCHMARK_BASE_URL)")
+	if _, err := parseMixed(fs, args[1:]); err != nil {
+		return err
+	}
+	c, err := cfg.Load(*configPath)
+	if err != nil {
+		return err
+	}
+	st, err := openStore(c)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	bc, err := bench.NewClient(*baseURL, os.Getenv("BENCHMARK_TOKEN"))
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+	switch sub {
+	case "import":
+		n, err := bench.Import(ctx, st, bc)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("bench: imported %d new challenge goal(s)\n", n)
+		fmt.Println("bench: next — export BENCHMARK_TOKEN in this shell, then `zhulongx run`")
+		return nil
+	default: // sync
+		rep, err := bench.Sync(ctx, st, bc)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("bench: sync done — %d completed by platform", len(rep.Completed))
+		if len(rep.Completed) > 0 {
+			fmt.Println()
+			for _, s := range rep.Completed {
+				fmt.Printf("  completed %s\n", s)
+			}
+		} else {
+			fmt.Println()
+		}
+		if rep.InProgress > 0 {
+			fmt.Printf("  in progress: %d goal(s)\n", rep.InProgress)
+		}
+		for _, s := range rep.Mismatched {
+			fmt.Printf("  MISMATCH %s — locally completed, platform disagrees; review before trusting\n", s)
+		}
+		for _, s := range rep.Missing {
+			fmt.Printf("  missing  %s — platform no longer lists this challenge\n", s)
+		}
+		return nil
+	}
 }
