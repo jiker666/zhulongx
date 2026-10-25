@@ -97,6 +97,16 @@ func main() {
 				emit(map[string]any{"type": "agent_settled"})
 				resp(cmd.ID, "prompt", true, map[string]any{"disposition": "handled"}, "")
 				continue
+			case "policy_violation":
+				// a banned command runs first; settled only much later —
+				// a policy-aware adapter must abort without waiting for it
+				resp(cmd.ID, "prompt", true, map[string]any{"disposition": "started"}, "")
+				emit(map[string]any{
+					"type": "bash_execution_update", "command": "rm -rf /data", "exitCode": 0,
+				})
+				time.Sleep(2 * time.Second)
+				emit(map[string]any{"type": "agent_settled"})
+				continue
 			case "stderr_noise":
 				fmt.Fprintln(os.Stderr, "diag: irrelevant stderr chatter")
 			}

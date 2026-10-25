@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"zhulongx/internal/pi"
 )
 
 // Duration is a time.Duration that unmarshals from YAML strings ("30s").
@@ -51,6 +53,9 @@ type Pi struct {
 	Args         []string `yaml:"args"`
 	Dir          string   `yaml:"dir"`
 	SpawnRetries int      `yaml:"spawn_retries"`
+	// BlockedTools are case-insensitive regex patterns; a bash command
+	// matching any of them aborts the run as a policy violation.
+	BlockedTools []string `yaml:"blocked_tools"`
 }
 
 // Config is the whole file.
@@ -110,6 +115,10 @@ func (c *Config) validate() error {
 	}
 	if c.Runtime.TickInterval.D() <= 0 || c.Runtime.DecideTimeout.D() <= 0 || c.Runtime.ExecuteTimeout.D() <= 0 {
 		return fmt.Errorf("cfg: durations must be positive")
+	}
+	// fail fast on a bad regex before the first runner launch
+	if _, err := pi.CompileToolPolicy(c.Pi.BlockedTools); err != nil {
+		return fmt.Errorf("cfg: %w", err)
 	}
 	return nil
 }

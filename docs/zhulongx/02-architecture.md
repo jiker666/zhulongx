@@ -26,7 +26,7 @@ zhulongx 是从 Cairn(Python/FastAPI)深度重构而来的独立 Go 项目。核
 
 只有两种模式,**没有第三种角色**:
 
-### Decide(串行,每 Goal 同时至多一轮)
+### Decide(**全局串行**——同一时刻整个引擎至多一轮,跨 Goal 也互斥)
 - 触发启发式(继承 Cairn `_reason_trigger`):首次见到 Goal / Fact 增长 /
   Finding 增长 / Hint 增长 / 开放 Step 清零。
 - 先**审查 Finding**(promote→新 Fact、discard),再处理裁决——顺序是有意的:
@@ -80,6 +80,18 @@ MVP 直接使用 Pi 内建工具集(bash、edit 等),不为 zhulongx 写 TS 扩�
 可注册自定义工具,Go 侧无需改动(Pi 子进程内部消化)。这是"最小 TS
 扩展仅用于工具桥接"约束的落地方式——当前为零 TS 代码。
 
+### 工具权限(封禁策略)
+`pi.blocked_tools` 配置大小写不敏感正则列表。zhulongx 在 agent 进程
+**外部**,无法在命令执行前拦截——诚实且有效的执行点是**运行中**:
+适配器监听 `bash_execution_update` 事件,命令命中封禁模式即刻
+
+1. 中止当前 prompt(不等 `agent_settled`),返回 `ErrPolicyViolation`;
+2. **硬杀** agent 进程(被判死的运行不做优雅排空);
+3. 引擎把该 Step 判为**永久失败**(重试同样会撞墙),审计留痕。
+
+执行前拦截需要 Pi TS 扩展(见上节未来路径);当前实现是事后即中止,
+这个边界在 NOTICE 中如实声明。
+
 ## ③ FGS 状态图(internal/fgs + internal/store)
 
 - **Fact**:只增不改。来源链 `source`(human / `decide:promote:fd_xxxx`)。
@@ -104,8 +116,8 @@ MVP 直接使用 Pi 内建工具集(bash、edit 等),不为 zhulongx 写 TS 扩�
 |---|---|---|
 | store | 内存 SQLite 单测 9 例 | 迁移合法性、claim 竞态、租约回收、审查原子性、非法直达 completed |
 | contract | 表驱动 12 例 | 整体/围栏/交错 JSON 提取、契约校验、截断、互斥 |
-| pi | **真实 mockpi 子进程** 12 例 | 正常/多行/工具事件/完成语义/非法 JSON/超时/取消/崩溃/非零退出/settled 早于响应/无文本 |
-| engine | fake Runner 9 例 | 闭环到完成、重试与耗尽、永久失败、noop 停机、启动恢复 |
+| pi | **真实 mockpi 子进程** 14 例 | 正常/多行/工具事件/完成语义/非法 JSON/超时/取消/崩溃/非零退出/settled 早于响应/无文本/策略违规中途中止/未命中放行 |
+| engine | fake Runner 11 例 | 闭环到完成、重试与耗尽、永久失败、noop 停机、启动恢复、Decide 全局串行、策略违规永久失败 |
 | e2e | 真二进制 + 真 SQLite + mockpi | 建目标→Decide→Execute→中途硬杀→重启回收重试→promote→completed→审计/导出 |
 
 mockpi 是按官方 RPC 协议文档实现的测试替身,不是缩水的 stub——

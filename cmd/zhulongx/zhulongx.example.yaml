@@ -17,3 +17,9 @@ pi:
   args: []
   # dir: /path/to/working/directory   # optional agent cwd
   spawn_retries: 1
+  # Tool policy: case-insensitive regex patterns. A bash command matching any
+  # pattern aborts the run mid-flight (step fails permanently, no retry).
+  # Empty/omitted = allow everything.
+  blocked_tools:
+    - "rm\\s+-rf"
+    - "shutdown|reboot"

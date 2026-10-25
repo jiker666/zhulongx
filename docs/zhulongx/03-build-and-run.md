@@ -44,6 +44,7 @@ go build -o zhulongx.exe ./cmd/zhulongx
 | `pi.args` | `[]` | 追加参数(自动补 `--mode rpc --no-session`) |
 | `pi.dir` | `""` | 子进程工作目录 |
 | `pi.spawn_retries` | `1` | Pi 启动失败重试次数 |
+| `pi.blocked_tools` | `[]` | 工具封禁策略:大小写不敏感正则列表;bash 命令命中任一模式 → **运行中途 abort、硬杀进程、Step 判永久失败**(不重试)。空 = 不限制 |
 
 ## 运行
 

@@ -188,6 +188,60 @@ func TestCloseIsGracefulAndIdempotent(t *testing.T) {
 	}
 }
 
+func TestToolPolicyViolationAbortsMidRun(t *testing.T) {
+	bin := buildMock(t)
+	policy, err := CompileToolPolicy([]string{`rm\s+-rf`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := Start(LaunchConfig{
+		Command: bin,
+		Policy:  policy,
+		Env:     []string{"MOCK_SCENARIO=policy_violation"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	start := time.Now()
+	_, err = a.Prompt(context.Background(), "go")
+	if !errors.Is(err, ErrPolicyViolation) {
+		t.Fatalf("want ErrPolicyViolation, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "rm") {
+		t.Fatalf("violation should name the matched pattern: %v", err)
+	}
+	// settled fires 2s after the banned command; aborting at the violation
+	// must beat it by a wide margin
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("policy abort arrived late (waited for settled?): %v", elapsed)
+	}
+}
+
+func TestToolPolicyAllowsUnmatchedCommands(t *testing.T) {
+	bin := buildMock(t)
+	policy, err := CompileToolPolicy([]string{"shutdown"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := Start(LaunchConfig{
+		Command: bin,
+		Policy:  policy,
+		Env:     []string{"MOCK_SCENARIO=tool_use"}, // runs "nmap -sV target"
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	res, err := a.Prompt(context.Background(), "go")
+	if err != nil {
+		t.Fatalf("unmatched command must not trip the policy: %v", err)
+	}
+	if res.ToolCalls != 1 {
+		t.Fatalf("tool calls: %d", res.ToolCalls)
+	}
+}
+
 func TestStderrIsDiagnosticsOnly(t *testing.T) {
 	bin := buildMock(t)
 	a := launch(t, bin, "stderr_noise")

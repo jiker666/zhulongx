@@ -22,6 +22,9 @@ var (
 	ErrProtocol = errors.New("pi: command failed")
 	// ErrTimeout: the caller's deadline expired before agent_settled.
 	ErrTimeout = errors.New("pi: deadline exceeded before agent_settled")
+	// ErrPolicyViolation: the agent ran a command matched by the blocked
+	// tool policy; the run is aborted mid-flight.
+	ErrPolicyViolation = errors.New("pi: tool policy violation")
 	// ErrClosed: adapter already closed.
 	ErrClosed = errors.New("pi: adapter closed")
 )
@@ -37,6 +40,9 @@ type LaunchConfig struct {
 	// Env additions (KEY=VALUE). The agent's model/provider config stays
 	// under the user's own pi configuration — zhulongx never injects one.
 	Env []string
+	// Policy (optional) aborts the run when a bash command matches a
+	// blocked pattern. nil = allow everything.
+	Policy *ToolPolicy
 }
 
 // fixed RPC flags: deterministic, stateless by default.
@@ -69,6 +75,9 @@ type Adapter struct {
 	waiters map[string]chan *Record
 	// settledCh fires (once per agent turn) on agent_settled.
 	settledCh chan struct{}
+	// violationCh carries the first tool-policy violation of the current
+	// turn, waking Prompt before the agent settles.
+	violationCh chan string
 	// streamText accumulates assistant text deltas as a fallback when
 	// get_last_assistant_text is unavailable.
 	streamText strings.Builder
@@ -108,13 +117,14 @@ func Start(cfg LaunchConfig) (*Adapter, error) {
 		return nil, fmt.Errorf("pi: start %s: %w", cfg.Command, err)
 	}
 	a := &Adapter{
-		cfg:       cfg,
-		cmd:       cmd,
-		stdin:     stdin,
-		stdout:    stdout,
-		waiters:   map[string]chan *Record{},
-		settledCh: make(chan struct{}, 1),
-		exited:    make(chan struct{}),
+		cfg:         cfg,
+		cmd:         cmd,
+		stdin:       stdin,
+		stdout:      stdout,
+		waiters:     map[string]chan *Record{},
+		settledCh:   make(chan struct{}, 1),
+		violationCh: make(chan string, 1),
+		exited:      make(chan struct{}),
 	}
 	go a.drainStderr(stderr)
 	go a.readLoop()
@@ -124,18 +134,26 @@ func Start(cfg LaunchConfig) (*Adapter, error) {
 
 // Prompt sends a prompt and blocks until the agent settles, then fetches
 // the final assistant text. ctx cancellation aborts the run and kills the
-// process after a grace period.
+// process after a grace period; a tool-policy violation aborts the same
+// way but preserves its diagnostic message.
 func (a *Adapter) Prompt(ctx context.Context, message string) (*PromptResult, error) {
 	res, err := a.prompt(ctx, message)
-	if err != nil && errors.Is(err, context.DeadlineExceeded) {
-		// best-effort graceful abort, then hard kill
-		abortCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		_, _ = a.send(abortCtx, Command{Type: "abort"})
-		cancel()
-		_ = a.Close()
-		return nil, ErrTimeout
+	if err != nil {
+		switch {
+		case errors.Is(err, context.DeadlineExceeded):
+			// best-effort graceful abort, then hard kill
+			abortCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			_, _ = a.send(abortCtx, Command{Type: "abort"})
+			cancel()
+			_ = a.Close()
+			return nil, ErrTimeout
+		case errors.Is(err, ErrPolicyViolation):
+			// the run is poisoned: no graceful drain, kill immediately
+			a.killNow()
+		}
+		return nil, err
 	}
-	return res, err
+	return res, nil
 }
 
 func (a *Adapter) prompt(ctx context.Context, message string) (*PromptResult, error) {
@@ -147,6 +165,7 @@ func (a *Adapter) prompt(ctx context.Context, message string) (*PromptResult, er
 	a.seq++
 	id := fmt.Sprintf("zhx-%d", a.seq)
 	a.settledCh = make(chan struct{}, 1) // fresh per turn
+	a.violationCh = make(chan string, 1)
 	a.streamText.Reset()
 	a.toolCalls = 0
 	a.events = a.events[:0]
@@ -166,6 +185,8 @@ func (a *Adapter) prompt(ctx context.Context, message string) (*PromptResult, er
 	// already have fired before the response; the channel buffer covers it.
 	select {
 	case <-a.settledCh:
+	case v := <-a.violationCh:
+		return nil, fmt.Errorf("%w: command matched %s", ErrPolicyViolation, v)
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-a.exited:
@@ -286,6 +307,19 @@ func (a *Adapter) dispatch(rec *Record) {
 		a.mu.Lock()
 		a.toolCalls++
 		a.mu.Unlock()
+		if a.cfg.Policy != nil {
+			var probe struct {
+				Command string `json:"command"`
+			}
+			if json.Unmarshal([]byte(rec.Raw), &probe) == nil && probe.Command != "" {
+				if v := a.cfg.Policy.Violation(probe.Command); v != "" {
+					select { // wake Prompt mid-run; buffer 1, first hit wins
+					case a.violationCh <- v:
+					default:
+					}
+				}
+			}
+		}
 	}
 	a.pushEvent(truncate(rec.Raw, 400))
 }
@@ -376,6 +410,19 @@ func (a *Adapter) exitState() string {
 		}
 	}
 	return fmt.Sprintf("exit=%d; stderr: %s", code, a.stderrTail.tail(3))
+}
+
+// killNow terminates the process with no grace period — a policy-violating
+// run must not be trusted to drain its remaining work.
+func (a *Adapter) killNow() {
+	a.mu.Lock()
+	already := a.closed
+	a.closed = true
+	a.mu.Unlock()
+	if !already {
+		_ = a.cmd.Process.Kill()
+	}
+	<-a.exited // closed chan: safe even after Close()
 }
 
 // Close shuts the agent down: close stdin (graceful), then kill after grace.

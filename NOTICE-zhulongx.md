@@ -38,6 +38,9 @@
   (协议要点:JSONL LF 分帧、`agent_settled` 完成语义、id 乱序关联)。
 - Windows 平台信号语义与 Linux 有差异(Ctrl+C/终止通知),部署到
   Linux/systemd 时建议补充 `SIGTERM` 联调。
+- 工具封禁策略(`pi.blocked_tools`)是**运行中中止**而非执行前拦截:
+  zhulongx 在 agent 进程外,真正的执行前门控需要 Pi TS 扩展(未实现,
+  见架构文档"工具桥接决策")。
 - Pi CLI 的 RPC 协议接口若在未来版本变更(字段名、事件类型),
   `internal/pi` 需要同步适配;适配层刻意收窄在 protocol.go/adapter.go
   两个文件内。

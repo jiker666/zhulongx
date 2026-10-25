@@ -50,7 +50,7 @@ type Engine struct {
 	mu       sync.Mutex
 	snapshot map[string]store.SnapshotCounts // last Decide checkpoint per goal
 	noop     map[string]int                  // consecutive empty Decide rounds
-	deciding map[string]bool                 // goal currently in Decide
+	deciding string                          // goalID of the in-flight Decide round ("" = none): Decide is globally serial
 	running  int                             // active Execute goroutines
 
 	cancel context.CancelFunc
@@ -61,10 +61,13 @@ type Engine struct {
 func New(st *store.Store, c *cfg.Config, log *slog.Logger, factory RunnerFactory) *Engine {
 	if factory == nil {
 		factory = func() (Runner, error) {
+			// invalid patterns already rejected at config load; ignore the error
+			policy, _ := pi.CompileToolPolicy(c.Pi.BlockedTools)
 			return pi.Start(pi.LaunchConfig{
 				Command: c.Pi.Command,
 				Args:    c.Pi.Args,
 				Dir:     c.Pi.Dir,
+				Policy:  policy,
 			})
 		}
 	}
@@ -75,7 +78,6 @@ func New(st *store.Store, c *cfg.Config, log *slog.Logger, factory RunnerFactory
 		newRunner: factory,
 		snapshot:  map[string]store.SnapshotCounts{},
 		noop:      map[string]int{},
-		deciding:  map[string]bool{},
 	}
 }
 
@@ -133,10 +135,11 @@ func (e *Engine) tick(ctx context.Context) {
 func (e *Engine) scheduleGoal(ctx context.Context, goalID string) {
 	e.mu.Lock()
 	snap, hasSnap := e.snapshot[goalID]
-	deciding := e.deciding[goalID]
+	deciding := e.deciding != ""
 	e.mu.Unlock()
 
-	// Decide trigger: first round, graph growth, or drained steps.
+	// Decide trigger: first round, graph growth, or drained steps. Decide
+	// is globally serial — one round across all goals at a time.
 	if !deciding {
 		if trigger, why := e.decideTrigger(ctx, goalID, snap, hasSnap); trigger {
 			e.startDecide(ctx, goalID, why)
@@ -200,21 +203,21 @@ func (e *Engine) decideTrigger(ctx context.Context, goalID string, prev store.Sn
 	return false, ""
 }
 
-// startDecide launches the serial Decide round in the background.
+// startDecide launches the globally serial Decide round in the background.
 func (e *Engine) startDecide(ctx context.Context, goalID, why string) {
 	e.mu.Lock()
-	if e.deciding[goalID] {
+	if e.deciding != "" {
 		e.mu.Unlock()
 		return
 	}
-	e.deciding[goalID] = true
+	e.deciding = goalID
 	e.mu.Unlock()
 	e.wg.Add(1)
 	go func() {
 		defer e.wg.Done()
 		e.decide(ctx, goalID, why)
 		e.mu.Lock()
-		delete(e.deciding, goalID)
+		e.deciding = ""
 		e.mu.Unlock()
 	}()
 }

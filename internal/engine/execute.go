@@ -89,6 +89,11 @@ func (e *Engine) executeStep(ctx context.Context, goalID, stepID string) {
 		switch {
 		case errors.Is(err, pi.ErrTimeout):
 			msg = "timeout"
+		case errors.Is(err, pi.ErrPolicyViolation):
+			// the agent crossed the tool boundary: retrying the same step
+			// with the same policy would just abort again
+			msg = err.Error()
+			retryable = false
 		case errors.Is(err, pi.ErrProcessExit):
 			msg = "agent process exited: " + err.Error()
 		case errors.Is(err, pi.ErrProtocol):

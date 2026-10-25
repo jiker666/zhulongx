@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -219,6 +220,84 @@ func TestDecideInvalidFromFactSkipsStep(t *testing.T) {
 	steps, _ := st.ListSteps(ctx, g.ID)
 	if len(steps) != 0 {
 		t.Fatalf("phantom step must not be created: %+v", steps)
+	}
+}
+
+// countingBlockRunner blocks in Prompt (like blockingRunner) but counts
+// calls, so the test can prove how many Decide rounds actually started.
+type countingBlockRunner struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (c *countingBlockRunner) Prompt(ctx context.Context, _ string) (*pi.PromptResult, error) {
+	c.mu.Lock()
+	c.calls++
+	c.mu.Unlock()
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (c *countingBlockRunner) Close() error { return nil }
+
+func (c *countingBlockRunner) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls
+}
+
+func TestDecideIsGloballySerial(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	c := cfg.Default()
+	c.Runtime.TickInterval = cfg.Duration(5 * time.Millisecond)
+	r := &countingBlockRunner{}
+	e := New(st, c, slog.New(slog.NewTextHandler(&strings.Builder{}, nil)),
+		func() (Runner, error) { return r, nil })
+
+	if _, err := st.CreateGoal(ctx, "one", "o", "obj"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateGoal(ctx, "two", "o", "obj"); err != nil {
+		t.Fatal(err)
+	}
+
+	runCtx, cancel := context.WithCancel(ctx)
+	go e.Run(runCtx)
+	defer func() { cancel(); e.Stop() }()
+
+	// goal 1's initial Decide starts and blocks; goal 2's initial Decide
+	// must NOT start while the global Decide slot is held.
+	waitFor(t, 3*time.Second, func() bool { return r.count() == 1 },
+		"first decide round never started")
+	time.Sleep(200 * time.Millisecond) // >> several ticks for goal 2 to slip in
+	if got := r.count(); got != 1 {
+		t.Fatalf("Decide is not globally serial: %d rounds started", got)
+	}
+}
+
+func TestExecutePolicyViolationIsPermanent(t *testing.T) {
+	ctx := context.Background()
+	e, st, _ := newEngine(t,
+		ok(`{"accepted":true,"data":{"steps":[{"from":["f_0001"],"description":"the step"}]}}`),
+		failWith(fmt.Errorf("%w: command matched (?i)rm\\s+-rf", pi.ErrPolicyViolation)),
+	)
+	g, _ := st.CreateGoal(ctx, "policy", "o", "obj")
+	st.AddHumanFact(ctx, g.ID, "seed", "t")
+	e.decide(ctx, g.ID, "initial")
+	steps, _ := st.ListSteps(ctx, g.ID)
+	if len(steps) != 1 {
+		t.Fatalf("no step declared: %+v", steps)
+	}
+	st.ClaimNextStep(ctx, g.ID, "zhulongx")
+	e.executeStep(ctx, g.ID, steps[0].ID)
+	steps, _ = st.ListSteps(ctx, g.ID)
+	if steps[0].Status != fgs.StepFailed || steps[0].Attempts != 1 {
+		t.Fatalf("policy violation must fail fast without retry: %+v", steps[0])
 	}
 }
 
