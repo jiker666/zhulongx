@@ -67,20 +67,11 @@ func (h *harness) zhxOut(args ...string) (string, error) {
 	return string(out), err
 }
 
-// killTree hard-kills a runner and its children (Windows keeps child
-// processes alive when the parent dies; taskkill /T closes the whole tree).
-func killTree(cmd *exec.Cmd) {
-	if cmd.Process == nil {
-		return
-	}
-	_ = exec.Command("taskkill", "/PID", fmt.Sprint(cmd.Process.Pid), "/T", "/F").Run()
-	cmd.Wait()
-}
-
 // startRunner launches `zhulongx run` with the given env extras.
 func (h *harness) startRunner(env ...string) *exec.Cmd {
 	cmd := exec.Command(h.zhx, h.args("run")...)
 	cmd.Env = append(os.Environ(), env...)
+	setProcAttr(cmd)
 	if err := cmd.Start(); err != nil {
 		h.t.Fatalf("start run: %v", err)
 	}
