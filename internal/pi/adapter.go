@@ -20,8 +20,8 @@ var (
 	ErrProcessExit = errors.New("pi: process exited")
 	// ErrProtocol: response arrived with success=false.
 	ErrProtocol = errors.New("pi: command failed")
-	// ErrTimeout: the caller's deadline expired before agent_settled.
-	ErrTimeout = errors.New("pi: deadline exceeded before agent_settled")
+	// ErrTimeout: the caller's deadline expired before agent_end.
+	ErrTimeout = errors.New("pi: deadline exceeded before agent_end")
 	// ErrPolicyViolation: the agent ran a command matched by the blocked
 	// tool policy; the run is aborted mid-flight.
 	ErrPolicyViolation = errors.New("pi: tool policy violation")
@@ -73,7 +73,7 @@ type Adapter struct {
 	closed  bool
 	seq     int
 	waiters map[string]chan *Record
-	// settledCh fires (once per agent turn) on agent_settled.
+	// settledCh fires (once per agent turn) on agent_end (agent_settled legacy).
 	settledCh chan struct{}
 	// violationCh carries the first tool-policy violation of the current
 	// turn, waking Prompt before the agent settles.
@@ -180,7 +180,7 @@ func (a *Adapter) prompt(ctx context.Context, message string) (*PromptResult, er
 		return nil, fmt.Errorf("%w: prompt: %s", ErrProtocol, resp.Error)
 	}
 
-	// 2. wait for agent_settled — the actual completion marker. If the
+	// 2. wait for agent_end — the actual completion marker. If the
 	// disposition was "handled" (no run started) the settled event may
 	// already have fired before the response; the channel buffer covers it.
 	select {
@@ -296,23 +296,30 @@ func (a *Adapter) dispatch(rec *Record) {
 		return
 	}
 	switch rec.Type {
-	case EventAgentSettled:
+	case EventAgentSettled, EventAgentEnd:
+		// completion marker: agent_end on pi ≥ 0.73 (verified against the
+		// bundled docs/rpc.md); agent_settled tolerated from older builds
 		select {
 		case a.settledCh <- struct{}{}:
 		default:
 		}
 	case EventMessageUpdate, EventMessageEnd:
 		a.captureAssistantText(rec)
-	case EventBashUpdate:
+	case EventToolExecStart, EventToolExecUpdate:
 		a.mu.Lock()
 		a.toolCalls++
 		a.mu.Unlock()
 		if a.cfg.Policy != nil {
+			// tool_execution_* shape: {"toolName":"bash","args":{"command":...}}
 			var probe struct {
-				Command string `json:"command"`
+				ToolName string `json:"toolName"`
+				Args     struct {
+					Command string `json:"command"`
+				} `json:"args"`
 			}
-			if json.Unmarshal([]byte(rec.Raw), &probe) == nil && probe.Command != "" {
-				if v := a.cfg.Policy.Violation(probe.Command); v != "" {
+			if json.Unmarshal([]byte(rec.Raw), &probe) == nil &&
+				probe.ToolName == "bash" && probe.Args.Command != "" {
+				if v := a.cfg.Policy.Violation(probe.Args.Command); v != "" {
 					select { // wake Prompt mid-run; buffer 1, first hit wins
 					case a.violationCh <- v:
 					default:

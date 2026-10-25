@@ -44,9 +44,6 @@ func TestPromptNormalFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prompt: %v", err)
 	}
-	if res.Disposition != "started" {
-		t.Fatalf("disposition: %s", res.Disposition)
-	}
 	if res.Text != "hello final" {
 		t.Fatalf("text (get_last_assistant_text preferred): %q", res.Text)
 	}
@@ -102,7 +99,7 @@ func TestSettledBeforeResponse(t *testing.T) {
 	bin := buildMock(t)
 	a := launch(t, bin, "handled")
 	res, err := a.Prompt(context.Background(), "go")
-	if err != nil || res.Disposition != "handled" {
+	if err != nil {
 		t.Fatalf("handled: %+v %v", res, err)
 	}
 }
@@ -164,7 +161,7 @@ func TestSecondPromptReusesProcess(t *testing.T) {
 		t.Fatalf("first: %v", err)
 	}
 	res, err := a.Prompt(context.Background(), "second")
-	if err != nil || res.Disposition != "started" {
+	if err != nil {
 		t.Fatalf("second: %+v %v", res, err)
 	}
 }
@@ -253,5 +250,19 @@ func TestStderrIsDiagnosticsOnly(t *testing.T) {
 	tail := a.StderrTail(4)
 	if !strings.Contains(tail, "irrelevant stderr chatter") {
 		t.Fatalf("stderr captured: %q", tail)
+	}
+}
+
+// Older documented pi builds emitted agent_settled as the completion
+// marker; the adapter must complete on it just like on agent_end.
+func TestLegacySettledEvent(t *testing.T) {
+	bin := buildMock(t)
+	a := launch(t, bin, "legacy_settled", "MOCK_FINAL_TEXT=legacy ok")
+	res, err := a.Prompt(context.Background(), "do the thing")
+	if err != nil {
+		t.Fatalf("prompt: %v", err)
+	}
+	if res.Text != "legacy ok" {
+		t.Fatalf("text: %q", res.Text)
 	}
 }

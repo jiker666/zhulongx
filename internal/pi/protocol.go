@@ -1,14 +1,19 @@
 // Package pi implements zhulongx's adapter to the Pi coding agent running
-// in official RPC mode (`pi --mode rpc`), speaking the JSONL protocol
-// documented at https://pi.dev/docs/latest/rpc.
+// in official RPC mode (`pi --mode rpc`), speaking the JSONL protocol of
+// @mariozechner/pi-coding-agent (verified against 0.73.1's bundled
+// docs/rpc.md and a live session; see docs/zhulongx/02-architecture.md).
 //
 // Protocol invariants this adapter relies on:
 //   - one JSON object per line on stdin/stdout, LF-terminated (CR tolerated)
-//   - commands carry an optional `id`; responses repeat it; responses may
-//     arrive out of order → correlate by id, never by position
-//   - a successful `prompt` response (disposition started/queued/handled)
-//     only means the request was ACCEPTED — completion is the separate
-//     `agent_settled` event
+//   - the command name rides in the `type` field; commands carry an
+//     optional `id`; responses repeat it; responses may arrive out of
+//     order → correlate by id, never by position
+//   - a successful `prompt` response only means the request was ACCEPTED
+//     (started/queued/handled) — completion is the separate `agent_end`
+//     event; failures after acceptance surface in the event stream, never
+//     as a second response for the same id
+//   - tool executions surface as tool_execution_start/update/end events
+//     with `toolName` and `args` (e.g. args.command for bash)
 //   - stderr is diagnostics-only, never protocol
 //   - closing stdin shuts the agent down gracefully
 //
@@ -20,14 +25,18 @@ package pi
 
 import "encoding/json"
 
-// Event names observed on stdout (session events).
+// Event names observed on stdout (session events). pi ≥ 0.73 signals
+// completion with agent_end; the agent_settled name from older published
+// docs is kept as a tolerated alias so the adapter works with both.
 const (
-	EventAgentStart    = "agent_start"
-	EventAgentEnd      = "agent_end"
-	EventAgentSettled  = "agent_settled" // the true completion marker
-	EventMessageUpdate = "message_update"
-	EventMessageEnd    = "message_end"
-	EventBashUpdate    = "bash_execution_update"
+	EventAgentStart     = "agent_start"
+	EventAgentEnd       = "agent_end"     // the completion marker (pi ≥ 0.73)
+	EventAgentSettled   = "agent_settled" // legacy alias, tolerated
+	EventMessageUpdate  = "message_update"
+	EventMessageEnd     = "message_end"
+	EventToolExecStart  = "tool_execution_start"
+	EventToolExecUpdate = "tool_execution_update"
+	EventToolExecEnd    = "tool_execution_end"
 )
 
 // Command is a stdin record. Exactly one command field is set; Type carries

@@ -59,6 +59,7 @@ func main() {
 		}
 		switch cmd.Type {
 		case "prompt":
+			finalEvent := "agent_end"
 			if scenario == "flow" {
 				// Content-routed script for the E2E closed loop:
 				//   Execute prompt → finding JSON
@@ -86,37 +87,47 @@ func main() {
 				resp(cmd.ID, "prompt", false, nil, "model unavailable")
 				continue
 			case "no_settled":
-				resp(cmd.ID, "prompt", true, map[string]any{"disposition": "started"}, "")
+				resp(cmd.ID, "prompt", true, nil, "")
 				continue // never settles
 			case "exit_late":
-				resp(cmd.ID, "prompt", true, map[string]any{"disposition": "started"}, "")
+				resp(cmd.ID, "prompt", true, nil, "")
 				time.Sleep(delay)
 				os.Exit(0)
 			case "handled":
-				// settled fires BEFORE the response; adapter must cope
-				emit(map[string]any{"type": "agent_settled"})
-				resp(cmd.ID, "prompt", true, map[string]any{"disposition": "handled"}, "")
+				// agent_end fires BEFORE the response; adapter must cope
+				emit(map[string]any{"type": "agent_end"})
+				resp(cmd.ID, "prompt", true, nil, "")
 				continue
+			case "legacy_settled":
+				// older documented builds emitted agent_settled as the
+				// completion marker, AFTER the message stream; the adapter
+				// must still complete on it
+				finalEvent = "agent_settled"
 			case "policy_violation":
 				// a banned command runs first; settled only much later —
 				// a policy-aware adapter must abort without waiting for it
-				resp(cmd.ID, "prompt", true, map[string]any{"disposition": "started"}, "")
+				resp(cmd.ID, "prompt", true, nil, "")
 				emit(map[string]any{
-					"type": "bash_execution_update", "command": "rm -rf /data", "exitCode": 0,
+					"type": "tool_execution_start", "toolName": "bash",
+					"args": map[string]any{"command": "rm -rf /data"},
 				})
 				time.Sleep(2 * time.Second)
-				emit(map[string]any{"type": "agent_settled"})
+				emit(map[string]any{"type": "agent_end"})
 				continue
 			case "stderr_noise":
 				fmt.Fprintln(os.Stderr, "diag: irrelevant stderr chatter")
 			}
-			resp(cmd.ID, "prompt", true, map[string]any{"disposition": "started"}, "")
+			resp(cmd.ID, "prompt", true, nil, "")
 			time.Sleep(delay)
 			emit(map[string]any{"type": "agent_start"})
 			if scenario == "tool_use" {
 				emit(map[string]any{
-					"type": "bash_execution_update", "command": "nmap -sV target",
-					"output": "22/tcp open", "exitCode": 0,
+					"type": "tool_execution_start", "toolCallId": "call_1", "toolName": "bash",
+					"args": map[string]any{"command": "nmap -sV target"},
+				})
+				emit(map[string]any{
+					"type": "tool_execution_end", "toolCallId": "call_1", "toolName": "bash",
+					"args": map[string]any{"command": "nmap -sV target"},
 				})
 			}
 			emit(map[string]any{
@@ -130,11 +141,10 @@ func main() {
 					"content": []map[string]any{{"type": "text", "text": finalText}},
 				},
 			})
-			emit(map[string]any{"type": "agent_end"})
-			emit(map[string]any{"type": "agent_settled"})
+			emit(map[string]any{"type": finalEvent})
 		case "abort":
 			resp(cmd.ID, "abort", true, nil, "")
-			emit(map[string]any{"type": "agent_settled"})
+			emit(map[string]any{"type": "agent_end"})
 		case "get_last_assistant_text":
 			if scenario == "no_text" {
 				resp(cmd.ID, "get_last_assistant_text", true, map[string]any{"text": ""}, "")

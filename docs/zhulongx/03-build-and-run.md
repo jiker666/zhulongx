@@ -104,3 +104,45 @@ Pi CLI、不产生外部副作用。
   进程树,手工排查可用 `tasklist | findstr mockpi`。
 - **时间类测试偶发失败**:Windows 时钟量化约 0.5ms,纳秒级 TTL 断言
   已改为注入确定性的过期心跳,不受影响。
+
+## Pi CLI 安装与 Provider 配置(实测 2026-10-26)
+
+```bash
+npm install -g @mariozechner/pi-coding-agent   # bin 名为 pi;注意不是 @mariozechner/pi(那是 GPU 部署工具)
+pi --version                                    # 0.73.x
+```
+
+zhulongx 只按 `pi --mode rpc --no-session` 启动 Pi,模型/Provider 完全由你自己的
+Pi 配置决定。自定义 Provider(如智谱 GLM 的 Anthropic 兼容端点)配置在
+`~/.pi/agent/models.json`,`apiKey` 字段支持**环境变量名引用**(key 不落盘):
+
+```json
+{
+  "providers": {
+    "glm": {
+      "baseUrl": "https://open.bigmodel.cn/api/anthropic",
+      "api": "anthropic-messages",
+      "apiKey": "ZHIPU_API_KEY",
+      "authHeader": true,
+      "models": [{ "id": "glm-5.3", "name": "GLM 5.3 (Anthropic-compat)" }]
+    }
+  }
+}
+```
+
+注意:Pi 不读取 `ANTHROPIC_BASE_URL`;其内置 `anthropic` Provider 打官方端点。
+走智谱等兼容端点必须如上自定义 Provider。
+
+## 真实 Pi 冒烟测试
+
+```bash
+# 协议层(无需可用模型;会话以 agent_end 完成即通过)
+ZHX_PI_SMOKE=1 go test ./internal/pi/ -run TestRealPiProtocolSmoke -v
+# 真实模型往返(需已配置可用 Provider,如 ZHIPU_API_KEY + 上面的 glm 条目)
+ZHIPU_API_KEY=... ZHX_PI_SMOKE=2 go test ./internal/pi/ -run TestRealPiProtocolSmoke -v
+```
+
+协议依据:@mariozechner/pi-coding-agent 0.73.1 包内 `docs/rpc.md` + 实测会话。
+关键点:命令名走 `type` 字段;完成事件是 `agent_end`(`agent_settled` 为旧文档遗留名,
+适配器双兼容);工具执行事件为 `tool_execution_start/update/end`(`toolName`/`args.command`);
+`prompt` 响应 `success:true` 仅表示**已接受**,结果在事件流中。
