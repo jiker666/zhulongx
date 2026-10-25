@@ -1,0 +1,43 @@
+# zhulongx Go CI — build, vet, test (incl. e2e with mockpi).
+# Upstream Cairn's container-publish workflow is archived at
+# testdata/upstream/ci/build-container-ghcr.yml (out of .github/workflows,
+# so GitHub Actions no longer picks it up).
+name: zhulongx/ci/go
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "testdata/**"
+      - "**.md"
+  pull_request:
+    paths-ignore:
+      - "testdata/**"
+      - "**.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: zhulongx/ci/go/${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt check
+        if: matrix.os == 'ubuntu-latest'
+        run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+      - name: go vet
+        run: go vet ./...
+      - name: go build
+        run: go build ./...
+      - name: go test
+        run: go test ./... -count=1
