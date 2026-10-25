@@ -147,6 +147,18 @@ func (s *Store) ClaimNextStep(ctx context.Context, goalID, claimer string) (*fgs
 		if g.Status != fgs.GoalActive {
 			return fmt.Errorf("%w: goal is %s", ErrGoalNotActive, g.Status)
 		}
+		// One running step per goal: a goal's steps are sequential probes
+		// (later ones build on earlier findings), so a second concurrent
+		// slot on the same goal wastes the global execute budget. The
+		// engine treats this like an empty queue and moves to the next
+		// goal, spreading slots across goals.
+		var running int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM steps WHERE goal_id = ? AND status = 'running'`, goalID).Scan(&running); err != nil {
+			return err
+		}
+		if running > 0 {
+			return ErrNothingToClaim
+		}
 		row := tx.QueryRow(`SELECT `+stepCols+` FROM steps WHERE goal_id = ? AND status = 'pending' ORDER BY created_at, id LIMIT 1`, goalID)
 		candidate, err := scanStep(row, tx, goalID)
 		if errors.Is(err, ErrNotFound) {
