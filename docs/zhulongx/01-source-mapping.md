@@ -1,7 +1,7 @@
 # zhulongx 源码映射文档(Phase 1 产出)
 
 > 基于 Cairn 真实源码的逐文件分析,给出 Cairn → zhulongx 的模块级映射。
-> 分析日期:2026-10-26。Cairn 代码根:`cairn/src/cairn/`。
+> 分析日期:2026-10-26。Cairn 代码根:`testdata/upstream/cairn/src/cairn/`(上游基线已整体迁入 `testdata/upstream/`)。
 > 本文档是后续所有 Go 实现的依据;实现不得凭空发明行为,应能回溯到本文引用的源码位置。
 
 ## 1. 已通读的 Cairn 源码清单

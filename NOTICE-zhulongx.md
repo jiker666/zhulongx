@@ -25,7 +25,7 @@
 
 ## 版权归属
 
-- Cairn 原始代码:保留其原始版权与作者声明(见仓库 README/LICENSE)。
+- Cairn 原始代码:保留其原始版权与作者声明(见上游基线 `testdata/upstream/README.md` 与根目录 `LICENSE`)。
 - zhulongx 新增代码:Copyright (C) 2026 zhulongx contributors,
   AGPL-3.0。
 
