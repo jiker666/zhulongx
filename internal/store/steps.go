@@ -150,6 +150,9 @@ func (s *Store) ClaimNextStep(ctx context.Context, goalID, claimer string) (*fgs
 		}
 		row := tx.QueryRow(`SELECT `+stepCols+` FROM steps WHERE goal_id = ? AND status = 'pending' ORDER BY created_at, id LIMIT 1`, goalID)
 		candidate, err := scanStep(row, tx, goalID)
+		if errors.Is(err, ErrNotFound) {
+			return ErrNothingToClaim // no pending rows: the normal empty-queue case
+		}
 		if err != nil {
 			return err
 		}
@@ -401,4 +404,46 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+// RecoverAllRunning resets every running step to pending — deterministic
+// startup recovery for a single-process engine: on boot nobody can hold a
+// valid claim, so all in-flight attempts go back to the queue (attempts
+// counters are preserved so crash-looping steps still exhaust).
+func (s *Store) RecoverAllRunning(ctx context.Context, reason string) (int, error) {
+	reclaimed := 0
+	err := s.withTx(ctx, func(tx *sql.Tx) error {
+		rows, err := tx.Query(`SELECT id, goal_id FROM steps WHERE status = 'running'`)
+		if err != nil {
+			return err
+		}
+		type pair struct{ id, goal string }
+		var stale []pair
+		for rows.Next() {
+			var p pair
+			if err := rows.Scan(&p.id, &p.goal); err != nil {
+				rows.Close()
+				return err
+			}
+			stale = append(stale, p)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		for _, p := range stale {
+			if _, err := tx.Exec(
+				`UPDATE steps SET status = 'pending', claimed_by = NULL, claimed_at = NULL, heartbeat_at = NULL WHERE goal_id = ? AND id = ?`,
+				p.goal, p.id,
+			); err != nil {
+				return err
+			}
+			if err := audit(tx, p.goal, fgs.ActorEngine, "step.reclaimed", "step:"+p.id, reason); err != nil {
+				return err
+			}
+			reclaimed++
+		}
+		return nil
+	})
+	return reclaimed, err
 }

@@ -1,0 +1,19 @@
+# zhulongx configuration. Model/provider selection lives in your own pi
+# configuration (PI_CODING_AGENT_DIR or defaults); zhulongx never overrides it.
+db_path: zhulongx.db
+log_level: info
+
+runtime:
+  tick_interval: 2s
+  decide_timeout: 10m
+  execute_timeout: 15m
+  max_concurrent_steps: 2
+  max_steps_per_decide: 3
+  step_max_attempts: 3
+  decide_noop_limit: 3
+
+pi:
+  command: pi
+  args: []
+  # dir: /path/to/working/directory   # optional agent cwd
+  spawn_retries: 1

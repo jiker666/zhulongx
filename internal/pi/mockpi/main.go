@@ -49,8 +49,9 @@ func main() {
 			continue
 		}
 		var cmd struct {
-			ID   string `json:"id"`
-			Type string `json:"type"`
+			ID      string `json:"id"`
+			Type    string `json:"type"`
+			Message string `json:"message"`
 		}
 		if err := json.Unmarshal([]byte(line), &cmd); err != nil {
 			resp("", "parse", false, nil, "invalid json: "+err.Error())
@@ -58,6 +59,23 @@ func main() {
 		}
 		switch cmd.Type {
 		case "prompt":
+			if scenario == "flow" {
+				// Content-routed script for the E2E closed loop:
+				//   Execute prompt → finding JSON
+				//   Decide prompt that lists a real open finding ("fd_0001 [open]",
+				//     rendered in the graph dump — the decide.md template mentions
+				//     fd_0001 only inside a JSON example, which must not route
+				//     here) → promote + complete
+				//   fresh Decide prompt → declare one step from f_0001
+				switch {
+				case strings.Contains(cmd.Message, "Execute mode"):
+					finalText = `{"accepted":true,"data":{"finding":{"content":"e2e observed the objective is reachable","evidence":"mock tool output: ok"}}}`
+				case strings.Contains(cmd.Message, "fd_0001 [open]"):
+					finalText = `{"accepted":true,"data":{"findings":{"promote":["fd_0001"],"discard":[]},"complete":{"from":["f_0002"],"description":"e2e objective met"}}}`
+				default:
+					finalText = `{"accepted":true,"data":{"steps":[{"from":["f_0001"],"description":"e2e explore the target"}]}}`
+				}
+			}
 			switch scenario {
 			case "garbage":
 				fmt.Fprintln(os.Stdout, "this is { not json")
