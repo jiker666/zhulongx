@@ -179,7 +179,7 @@ func TestHeartbeatReclaim(t *testing.T) {
 	if _, err := s.db.Exec(`UPDATE steps SET heartbeat_at = ? WHERE goal_id = ?`, stale, g.ID); err != nil {
 		t.Fatal(err)
 	}
-	n, err := s.ReclaimStaleSteps(ctx, time.Hour, "startup recovery")
+	n, err := s.ReclaimStaleSteps(ctx, time.Hour, 3, "startup recovery")
 	if err != nil || n != 1 {
 		t.Fatalf("reclaim: n=%d err=%v", n, err)
 	}
@@ -190,9 +190,30 @@ func TestHeartbeatReclaim(t *testing.T) {
 	// fresh heartbeat survives
 	s.ClaimNextStep(ctx, g.ID, "engine-1")
 	s.HeartbeatStep(ctx, g.ID, st.ID, "engine-1")
-	n, err = s.ReclaimStaleSteps(ctx, time.Hour, "startup recovery")
+	n, err = s.ReclaimStaleSteps(ctx, time.Hour, 3, "startup recovery")
 	if err != nil || n != 0 {
 		t.Fatalf("fresh heartbeat reclaimed: n=%d err=%v", n, err)
+	}
+	// exhausted attempts → failed permanently, not back to the queue
+	if _, err := s.db.Exec(`UPDATE steps SET heartbeat_at = ? WHERE goal_id = ?`, stale, g.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReclaimStaleSteps(ctx, time.Hour, 3, "watchdog"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ClaimNextStep(ctx, g.ID, "engine-1"); err != nil { // attempts=3, running
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`UPDATE steps SET heartbeat_at = ? WHERE goal_id = ?`, stale, g.ID); err != nil {
+		t.Fatal(err)
+	}
+	n, err = s.ReclaimStaleSteps(ctx, time.Hour, 3, "watchdog")
+	if err != nil || n != 1 {
+		t.Fatalf("exhausted reclaim: n=%d err=%v", n, err)
+	}
+	steps, _ = s.ListSteps(ctx, g.ID)
+	if steps[0].Status != fgs.StepFailed || steps[0].Attempts != 3 {
+		t.Fatalf("exhausted step should fail at 3 attempts, got %+v", steps[0])
 	}
 }
 

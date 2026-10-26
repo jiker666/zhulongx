@@ -321,42 +321,60 @@ func (s *Store) FailStep(ctx context.Context, goalID, stepID, claimer, errMsg st
 }
 
 // ReclaimStaleSteps returns running steps whose heartbeat is older than ttl
-// (or never set) to pending. Used when an engine instance died mid-run;
-// single-process zhulongx calls it on startup.
-func (s *Store) ReclaimStaleSteps(ctx context.Context, ttl time.Duration, reason string) (int, error) {
+// (or never set) to pending. The engine calls it both on startup and every
+// tick: a live executor heartbeats each tick, so minutes of silence means
+// the goroutine (or the whole engine) died mid-flight and the slot is stuck
+// until someone reclaims. Steps that already exhausted their attempts are
+// failed permanently instead of looping back into the queue.
+func (s *Store) ReclaimStaleSteps(ctx context.Context, ttl time.Duration, maxAttempts int, reason string) (int, error) {
 	cutoff := time.Now().UTC().Add(-ttl).Format(timeLayout)
 	reclaimed := 0
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
 		rows, err := tx.Query(
-			`SELECT id, goal_id FROM steps WHERE status = 'running' AND (heartbeat_at IS NULL OR heartbeat_at < ?)`,
+			`SELECT id, goal_id, attempts FROM steps WHERE status = 'running' AND (heartbeat_at IS NULL OR heartbeat_at < ?)`,
 			cutoff,
 		)
 		if err != nil {
 			return err
 		}
-		type pair struct{ id, goal string }
-		var stale []pair
+		type tri struct {
+			id, goal string
+			attempts int
+		}
+		var stale []tri
 		for rows.Next() {
-			var p pair
-			if err := rows.Scan(&p.id, &p.goal); err != nil {
+			var t tri
+			if err := rows.Scan(&t.id, &t.goal, &t.attempts); err != nil {
 				rows.Close()
 				return err
 			}
-			stale = append(stale, p)
+			stale = append(stale, t)
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
 			return err
 		}
-		for _, p := range stale {
-			if _, err := tx.Exec(
-				`UPDATE steps SET status = 'pending', claimed_by = NULL, claimed_at = NULL, heartbeat_at = NULL WHERE goal_id = ? AND id = ?`,
-				p.goal, p.id,
-			); err != nil {
-				return err
-			}
-			if err := audit(tx, p.goal, fgs.ActorEngine, "step.reclaimed", "step:"+p.id, reason); err != nil {
-				return err
+		for _, t := range stale {
+			if t.attempts >= maxAttempts {
+				if _, err := tx.Exec(
+					`UPDATE steps SET status = 'failed', finished_at = ?, claimed_by = NULL, last_error = ? WHERE goal_id = ? AND id = ?`,
+					nowUTC(), reason, t.goal, t.id,
+				); err != nil {
+					return err
+				}
+				if err := audit(tx, t.goal, fgs.ActorEngine, "step.failed", "step:"+t.id, reason); err != nil {
+					return err
+				}
+			} else {
+				if _, err := tx.Exec(
+					`UPDATE steps SET status = 'pending', claimed_by = NULL, claimed_at = NULL, heartbeat_at = NULL WHERE goal_id = ? AND id = ?`,
+					t.goal, t.id,
+				); err != nil {
+					return err
+				}
+				if err := audit(tx, t.goal, fgs.ActorEngine, "step.reclaimed", "step:"+t.id, reason); err != nil {
+					return err
+				}
 			}
 			reclaimed++
 		}

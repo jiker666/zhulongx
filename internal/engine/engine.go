@@ -123,8 +123,19 @@ func (e *Engine) Stop() {
 	e.wg.Wait()
 }
 
+// stepWatchdogTTL bounds how long a running step may go without a
+// heartbeat before the scheduler reclaims it. Live executors heartbeat
+// every TickInterval; several minutes of silence means the goroutine (or
+// the whole engine) died mid-flight and its slot is stuck.
+const stepWatchdogTTL = 3 * time.Minute
+
 // tick is one scheduling pass over all goals.
 func (e *Engine) tick(ctx context.Context) {
+	if n, err := e.store.ReclaimStaleSteps(ctx, stepWatchdogTTL, e.cfg.Runtime.StepMaxAttempts, "heartbeat lease expired"); err != nil {
+		e.log.Error("reclaim stale steps", "err", err)
+	} else if n > 0 {
+		e.log.Warn("reclaimed stale running steps", "count", n)
+	}
 	goals, err := e.store.ListGoals(ctx)
 	if err != nil {
 		e.log.Error("list goals", "err", err)
