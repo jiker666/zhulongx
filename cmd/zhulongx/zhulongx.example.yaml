@@ -20,6 +20,11 @@ pi:
   # Tool policy: case-insensitive regex patterns. A bash command matching any
   # pattern aborts the run mid-flight (step fails permanently, no retry).
   # Empty/omitted = allow everything.
+  # NOTE: patterns match the raw bash command string and cannot tell the
+  # target — "shutdown|reboot" also kills legitimate remote host management
+  # during cloud-range challenges (observed live on TSecBench: 4 permanent
+  # step failures on one challenge). Keep only patterns that are never
+  # legitimate on ANY target; drop host-management verbs when the agent
+  # works a remote range.
   blocked_tools:
     - "rm\\s+-rf"
-    - "shutdown|reboot"
