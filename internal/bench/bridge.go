@@ -29,7 +29,12 @@ func codeOfTitle(title string) (string, bool) {
 // yet. The goal's origin carries the full combat brief (challenge facts +
 // API quick reference + operating constraints); the objective names the
 // platform's own completion criterion. Repeat runs are idempotent.
-func Import(ctx context.Context, st *store.Store, c *Client) (created int, err error) {
+//
+// priority lists unique codes to import FIRST: the engine schedules
+// goals in creation order, so last round's unfinished challenges go to
+// the head of the queue ahead of everything else. Codes missing from
+// the task set are ignored.
+func Import(ctx context.Context, st *store.Store, c *Client, priority []string) (created int, err error) {
 	challenges, err := c.List(ctx)
 	if err != nil {
 		return 0, err
@@ -44,6 +49,7 @@ func Import(ctx context.Context, st *store.Store, c *Client) (created int, err e
 			existing[code] = true
 		}
 	}
+	challenges = sortByPriority(challenges, priority)
 	for _, ch := range challenges {
 		if strings.TrimSpace(ch.UniqueCode) == "" || existing[ch.UniqueCode] {
 			continue
@@ -173,3 +179,29 @@ func completeFromPlatform(ctx context.Context, st *store.Store, goalID string, c
 	}
 	return nil
 }
+
+// sortByPriority moves the listed codes to the front (in list order);
+// everything else keeps the platform order.
+func sortByPriority(challenges []Challenge, priority []string) []Challenge {
+	if len(priority) == 0 {
+		return challenges
+	}
+	rank := make(map[string]int, len(priority))
+	for i, code := range priority {
+		rank[code] = i
+	}
+	head := make([]Challenge, 0, len(challenges))
+	tail := make([]Challenge, 0, len(challenges))
+	for _, ch := range challenges {
+		if _, ok := rank[ch.UniqueCode]; ok {
+			head = append(head, ch)
+		} else {
+			tail = append(tail, ch)
+		}
+	}
+	sort.SliceStable(head, func(i, j int) bool { return rank[head[i].UniqueCode] < rank[head[j].UniqueCode] })
+	return append(head, tail...)
+}
+
+// CodeOfTitle reports the challenge unique code of a benchmark goal title.
+func CodeOfTitle(title string) (string, bool) { return codeOfTitle(title) }

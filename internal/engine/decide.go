@@ -80,7 +80,7 @@ func (e *Engine) decide(ctx context.Context, goalID, why string) {
 	switch answer.Kind {
 	case contract.KindRejected:
 		e.log.Warn("decide: rejected by agent", "goal", goalID, "reason", answer.RejectMsg)
-		e.countNoop(goalID, openStepsEmpty)
+		e.countNoop(ctx, goalID, openStepsEmpty)
 	case contract.KindComplete:
 		if err := e.store.CompleteGoal(ctx, goalID, answer.Complete.From, answer.Complete.Description, fgs.ActorDecide); err != nil {
 			e.log.Error("decide: complete write failed", "goal", goalID, "err", err)
@@ -100,28 +100,45 @@ func (e *Engine) decide(ctx context.Context, goalID, why string) {
 		}
 		e.log.Info("decide: declared steps", "goal", goalID, "created", created, "asked", len(answer.Steps), "trigger", why)
 		if created == 0 {
-			e.countNoop(goalID, openStepsEmpty)
+			e.countNoop(ctx, goalID, openStepsEmpty)
 			return
 		}
 		e.resetNoop(goalID)
 	default: // noop
 		e.log.Info("decide: no graph change", "goal", goalID, "trigger", why)
-		e.countNoop(goalID, openStepsEmpty)
+		e.countNoop(ctx, goalID, openStepsEmpty)
 	}
 }
 
 // countNoop tracks consecutive unproductive rounds; when no steps are open
 // past the configured limit the goal is auto-stopped so a looping model
-// cannot burn budget forever.
-func (e *Engine) countNoop(goalID string, openStepsEmpty bool) {
+// cannot burn budget forever. One last chance first: if NoopRescue is wired
+// and has not fired for this goal, it may fetch a hint (at the edge the
+// agent has demonstrably run out of its own ideas) and buy a guided round.
+func (e *Engine) countNoop(ctx context.Context, goalID string, openStepsEmpty bool) {
 	if !openStepsEmpty {
 		return // waiting on in-flight steps is normal, not a no-op streak
 	}
 	e.mu.Lock()
 	e.noop[goalID]++
 	n := e.noop[goalID]
+	alreadyRescued := e.rescued[goalID]
 	e.mu.Unlock()
 	if n >= e.cfg.Runtime.DecideNoopLimit {
+		if e.NoopRescue != nil && !alreadyRescued {
+			e.mu.Lock()
+			e.rescued[goalID] = true
+			e.mu.Unlock()
+			if hint, ok := e.NoopRescue(ctx, goalID); ok && strings.TrimSpace(hint) != "" {
+				if _, err := e.store.AddHint(ctx, goalID, hint, fgs.ActorEngine); err != nil {
+					e.log.Error("decide: noop rescue hint write failed", "goal", goalID, "err", err)
+				} else {
+					e.resetNoop(goalID)
+					e.log.Warn("decide: noop guard rescued by hint", "goal", goalID, "rounds", n)
+					return
+				}
+			}
+		}
 		if err := e.store.SetGoalStatus(context.Background(), goalID, fgs.GoalStopped, fgs.ActorEngine); err != nil {
 			e.log.Error("decide: noop guard stop failed", "goal", goalID, "err", err)
 			return

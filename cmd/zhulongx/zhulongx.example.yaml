@@ -10,7 +10,7 @@ runtime:
   max_concurrent_steps: 2
   max_steps_per_decide: 3
   step_max_attempts: 3
-  decide_noop_limit: 3
+  decide_noop_limit: 5
 
 pi:
   command: pi

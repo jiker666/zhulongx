@@ -89,12 +89,12 @@ func TestImportCreatesGoalsWithBriefAndIsIdempotent(t *testing.T) {
 	p := newPlatformStub(t, twoChallenges)
 	c := client(t, p.srv.URL)
 
-	n, err := Import(context.Background(), st, c)
+	n, err := Import(context.Background(), st, c, nil)
 	if err != nil || n != 2 {
 		t.Fatalf("Import = %d, %v; want 2, nil", n, err)
 	}
 	// Re-import: nothing new.
-	if n, err := Import(context.Background(), st, c); err != nil || n != 0 {
+	if n, err := Import(context.Background(), st, c, nil); err != nil || n != 0 {
 		t.Fatalf("re-Import = %d, %v; want 0, nil", n, err)
 	}
 
@@ -134,7 +134,7 @@ func TestImportLeavesNonBenchGoalsAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := newPlatformStub(t, twoChallenges)
-	n, err := Import(context.Background(), st, client(t, p.srv.URL))
+	n, err := Import(context.Background(), st, client(t, p.srv.URL), nil)
 	if err != nil || n != 2 {
 		t.Fatalf("Import = %d, %v", n, err)
 	}
@@ -143,7 +143,7 @@ func TestImportLeavesNonBenchGoalsAlone(t *testing.T) {
 		t.Fatalf("want 3 goals (1 mine + 2 bench), got %d", len(goals))
 	}
 	// And re-import still skips: only 2 bench titles exist.
-	if n, _ := Import(context.Background(), st, client(t, p.srv.URL)); n != 0 {
+	if n, _ := Import(context.Background(), st, client(t, p.srv.URL), nil); n != 0 {
 		t.Errorf("re-import created %d", n)
 	}
 }
@@ -152,7 +152,7 @@ func TestSyncCompletesPlatformConfirmedGoals(t *testing.T) {
 	st := openStore(t)
 	p := newPlatformStub(t, twoChallenges)
 	c := client(t, p.srv.URL)
-	if _, err := Import(context.Background(), st, c); err != nil {
+	if _, err := Import(context.Background(), st, c, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -200,7 +200,7 @@ func TestSyncReportsMismatchAndMissing(t *testing.T) {
 	st := openStore(t)
 	p := newPlatformStub(t, twoChallenges)
 	c := client(t, p.srv.URL)
-	if _, err := Import(context.Background(), st, c); err != nil {
+	if _, err := Import(context.Background(), st, c, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -246,7 +246,7 @@ func TestSyncRepeatedIsStable(t *testing.T) {
 	st := openStore(t)
 	p := newPlatformStub(t, twoChallenges)
 	c := client(t, p.srv.URL)
-	if _, err := Import(context.Background(), st, c); err != nil {
+	if _, err := Import(context.Background(), st, c, nil); err != nil {
 		t.Fatal(err)
 	}
 	p.set(`[
@@ -278,7 +278,7 @@ func TestSyncRepeatedIsStable(t *testing.T) {
 func TestImportSeedsBootstrapFact(t *testing.T) {
 	st := openStore(t)
 	p := newPlatformStub(t, twoChallenges)
-	if _, err := Import(context.Background(), st, client(t, p.srv.URL)); err != nil {
+	if _, err := Import(context.Background(), st, client(t, p.srv.URL), nil); err != nil {
 		t.Fatal(err)
 	}
 	for _, title := range []string{"bench:web_01", "bench:crypto_02"} {
@@ -290,5 +290,23 @@ func TestImportSeedsBootstrapFact(t *testing.T) {
 		if len(facts) != 1 || !strings.Contains(facts[0].Content, "bootstrap") {
 			t.Errorf("%s: want one bootstrap fact, got %+v", title, facts)
 		}
+	}
+}
+
+func TestImportPriorityHeadsTheQueue(t *testing.T) {
+	st := openStore(t)
+	p := newPlatformStub(t, twoChallenges) // platform order: web_01, crypto_02
+	c := client(t, p.srv.URL)
+	if _, err := Import(context.Background(), st, c, []string{"crypto_02", "missing_code", "web_01"}); err != nil {
+		t.Fatal(err)
+	}
+	goals, _ := st.ListGoals(context.Background())
+	if len(goals) != 2 {
+		t.Fatalf("want 2 goals, got %d", len(goals))
+	}
+	// Engine schedules in creation order: crypto_02 (listed first) must be
+	// the earlier goal; missing_code is ignored.
+	if goals[0].Title != "bench:crypto_02" || goals[1].Title != "bench:web_01" {
+		t.Fatalf("priority order wrong: %s then %s", goals[0].Title, goals[1].Title)
 	}
 }

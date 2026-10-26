@@ -147,6 +147,7 @@ func cmdRun(args []string) error {
 
 	log := newLogger(c.LogLevel)
 	e := engine.New(st, c, log, nil)
+	wireNoopRescue(e, st, log)
 	log.Info("zhulongx running", "db", c.DBPath, "pi", c.Pi.Command)
 	if err := e.Run(ctx); err != nil {
 		return err
@@ -426,6 +427,8 @@ func cmdBench(args []string) error {
 	configPath := fs.String("config", "zhulongx.yaml", "config file path")
 	baseURL := fs.String("base-url", os.Getenv("BENCHMARK_BASE_URL"),
 		"benchmark platform base URL (default: env BENCHMARK_BASE_URL)")
+	prioFile := fs.String("priority-file", "",
+		"file with unique codes to import first, one per line (# comments)")
 	if _, err := parseMixed(fs, args[1:]); err != nil {
 		return err
 	}
@@ -445,7 +448,14 @@ func cmdBench(args []string) error {
 	ctx := context.Background()
 	switch sub {
 	case "import":
-		n, err := bench.Import(ctx, st, bc)
+		priority, err := readPriorityFile(*prioFile)
+		if err != nil {
+			return err
+		}
+		if len(priority) > 0 {
+			fmt.Printf("bench: %d code(s) from priority file head the queue\n", len(priority))
+		}
+		n, err := bench.Import(ctx, st, bc, priority)
 		if err != nil {
 			return err
 		}
@@ -477,4 +487,63 @@ func cmdBench(args []string) error {
 		}
 		return nil
 	}
+}
+
+// readPriorityFile loads unique codes (one per line, # comments and blank
+// lines ignored) that bench import should put at the head of the queue.
+func readPriorityFile(path string) ([]string, error) {
+	if path == "" {
+		return nil, nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("bench: read priority file: %w", err)
+	}
+	var codes []string
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		codes = append(codes, line)
+	}
+	return codes, nil
+}
+
+// wireNoopRescue arms the benchmark hint rescue when the run is a
+// benchmark session (both env vars present). At the noop-guard edge — the
+// agent has produced nothing for DecideNoopLimit straight rounds — it
+// fetches the platform hint once per goal and writes it as a Hint,
+// buying one last guided round instead of a guaranteed zero. Hints cost
+// score, so this fires exactly once and only at that edge.
+func wireNoopRescue(e *engine.Engine, st *store.Store, log *slog.Logger) {
+	base, token := os.Getenv("BENCHMARK_BASE_URL"), os.Getenv("BENCHMARK_TOKEN")
+	if base == "" || token == "" {
+		return
+	}
+	bc, err := bench.NewClient(base, token)
+	if err != nil {
+		log.Warn("bench: noop rescue not armed", "err", err)
+		return
+	}
+	e.NoopRescue = func(ctx context.Context, goalID string) (string, bool) {
+		g, err := st.GetGoal(ctx, goalID)
+		if err != nil {
+			return "", false
+		}
+		code, ok := bench.CodeOfTitle(g.Title)
+		if !ok {
+			return "", false // not a benchmark goal
+		}
+		hint, has, err := bc.Hint(ctx, code)
+		if err != nil {
+			log.Warn("bench: rescue hint fetch failed", "goal", goalID, "err", err)
+			return "", false
+		}
+		if !has {
+			return "", false // platform has no hint for this one
+		}
+		return hint, true
+	}
+	log.Info("bench: noop rescue armed (hint at guard edge, once per goal)")
 }

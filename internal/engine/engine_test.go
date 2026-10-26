@@ -401,3 +401,41 @@ func TestFullLoopScheduling(t *testing.T) {
 	e.Stop()
 	t.Fatal("goal did not complete through the scheduling loop")
 }
+
+func TestNoopGuardRescueHint(t *testing.T) {
+	ctx := context.Background()
+	e, st, _ := newEngine(t,
+		ok(`{"accepted":true,"data":{}}`),
+		ok(`{"accepted":true,"data":{}}`),
+		ok(`{"accepted":true,"data":{}}`),
+		ok(`{"accepted":true,"data":{}}`),
+	)
+	g, _ := st.CreateGoal(ctx, "rescue", "o", "obj")
+	calls := 0
+	e.NoopRescue = func(_ context.Context, goalID string) (string, bool) {
+		calls++
+		return "try the username field", true
+	}
+	e.decide(ctx, g.ID, "initial") // noop 1
+	e.decide(ctx, g.ID, "tick")    // noop 2 -> at limit: rescue fires
+	if calls != 1 {
+		t.Fatalf("rescue calls = %d, want 1", calls)
+	}
+	hints, err := st.ListHints(ctx, g.ID)
+	if err != nil || len(hints) != 1 || !strings.Contains(hints[0].Content, "username field") {
+		t.Fatalf("rescue hint not written: %v %+v", err, hints)
+	}
+	got, _ := st.GetGoal(ctx, g.ID)
+	if got.Status != fgs.GoalActive {
+		t.Fatalf("goal should survive the rescue, got %s", got.Status)
+	}
+	e.decide(ctx, g.ID, "tick") // noop 1 after rescue
+	e.decide(ctx, g.ID, "tick") // noop 2 -> rescue already fired, now stop
+	if calls != 1 {
+		t.Fatalf("rescue must fire once per goal, calls = %d", calls)
+	}
+	got, _ = st.GetGoal(ctx, g.ID)
+	if got.Status != fgs.GoalStopped {
+		t.Fatalf("goal should stop after the guided round, got %s", got.Status)
+	}
+}

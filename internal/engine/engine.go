@@ -48,8 +48,18 @@ type Engine struct {
 	mu       sync.Mutex
 	snapshot map[string]store.SnapshotCounts // last Decide checkpoint per goal
 	noop     map[string]int                  // consecutive empty Decide rounds
+	rescued  map[string]bool                 // goals whose noop rescue already fired (one shot per goal)
 	deciding string                          // goalID of the in-flight Decide round ("" = none): Decide is globally serial
 	running  int                             // active Execute goroutines
+
+	// NoopRescue, when set, fires once per goal at the edge of the noop
+	// guard — the moment the agent has exhausted its own ideas across
+	// DecideNoopLimit empty rounds. Returning a non-empty hint writes it
+	// as a Hint (decideTrigger re-runs Decide on hint growth) and buys one
+	// last guided round; returning ok=false proceeds with the stop.
+	// Wire it to the benchmark hint endpoint: full score is lost either
+	// way, the hint only trades a fraction of it.
+	NoopRescue func(ctx context.Context, goalID string) (hint string, ok bool)
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -76,6 +86,7 @@ func New(st *store.Store, c *cfg.Config, log *slog.Logger, factory RunnerFactory
 		newRunner: factory,
 		snapshot:  map[string]store.SnapshotCounts{},
 		noop:      map[string]int{},
+		rescued:   map[string]bool{},
 	}
 }
 
