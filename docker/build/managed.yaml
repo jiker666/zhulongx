@@ -1,0 +1,21 @@
+db_path: /work/managed.db
+log_level: info
+
+runtime:
+  tick_interval: 2s
+  decide_timeout: 15m
+  execute_timeout: 90m
+  max_concurrent_steps: 4
+  max_steps_per_decide: 4
+  step_max_attempts: 3
+  decide_noop_limit: 5
+  repair_timeout: 4m
+  goal_step_budget: 6
+  goal_wall_budget: 45m
+  run_deadline: 350m
+
+pi:
+  command: pi
+  args: []
+  dir: /work
+  spawn_retries: 3

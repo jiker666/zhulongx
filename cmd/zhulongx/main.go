@@ -148,6 +148,7 @@ func cmdRun(args []string) error {
 	log := newLogger(c.LogLevel)
 	e := engine.New(st, c, log, nil)
 	wireNoopRescue(e, st, log)
+	wireStepGate(e, st, log)
 	log.Info("zhulongx running", "db", c.DBPath, "pi", c.Pi.Command)
 	if err := e.Run(ctx); err != nil {
 		return err
@@ -546,4 +547,26 @@ func wireNoopRescue(e *engine.Engine, st *store.Store, log *slog.Logger) {
 		return hint, true
 	}
 	log.Info("bench: noop rescue armed (hint at guard edge, once per goal)")
+}
+
+// wireStepGate arms the benchmark container-slot gate when the run is a
+// benchmark session. The platform allows at most 3 concurrent challenge
+// containers per task; the gate keeps slot-less goals out of the agent
+// loop entirely (their steps stay pending at zero model cost) instead of
+// letting them burn turns polling for a slot, and reaps containers leaked
+// by terminal goals.
+func wireStepGate(e *engine.Engine, st *store.Store, log *slog.Logger) {
+	base, token := os.Getenv("BENCHMARK_BASE_URL"), os.Getenv("BENCHMARK_TOKEN")
+	if base == "" || token == "" {
+		return
+	}
+	bc, err := bench.NewClient(base, token)
+	if err != nil {
+		log.Warn("bench: step gate not armed", "err", err)
+		return
+	}
+	const maxContainers = 3
+	gate := bench.NewSlotGate(st, bc, maxContainers, log)
+	e.StepGate = gate.Allow
+	log.Info("bench: step gate armed (slot-paced execute, max concurrent containers)", "max", maxContainers)
 }

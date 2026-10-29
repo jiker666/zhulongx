@@ -1,0 +1,10 @@
+{
+  "defaultProvider": "glm",
+  "defaultModel": "glm-5.3",
+  "modelThinkingLevels": {
+    "glm/glm-5.3": "medium"
+  },
+  "compaction": {
+    "keepRecentTokens": 96000
+  }
+}

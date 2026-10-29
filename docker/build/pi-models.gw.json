@@ -1,0 +1,16 @@
+{
+  "providers": {
+    "glm": {
+      "baseUrl": "http://open.bigmodel.cn.tsecbench.gw/api/anthropic",
+      "api": "anthropic-messages",
+      "apiKey": "ZHIPU_API_KEY",
+      "authHeader": true,
+      "models": [
+        {
+          "id": "glm-5.3",
+          "name": "GLM 5.3 (Anthropic-compat via gateway)"
+        }
+      ]
+    }
+  }
+}
