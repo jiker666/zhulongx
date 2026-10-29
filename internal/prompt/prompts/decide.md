@@ -49,6 +49,14 @@ Finding review may be combined with steps. If no action is warranted, return:
 - Steps must depend on existing fact ids.
 - If open steps already cover every known lead and nothing new emerged, returning an empty object is acceptable — but repeated empty answers will stop the goal.
 
+## Escalation discipline (hard requirement)
+
+Slot time is the scarcest resource of the whole run. Count the done steps in the graph:
+
+- After **3 done steps without a flag**: the next step you declare MUST attack a *different* attack surface than everything tried so far. Deepening the same surface (more variants, more parameters, more payloads of the same class) is forbidden — that is the proven rabbit-hole pattern.
+- A step that only re-runs or slightly extends a previous step's experiment matrix has negative value: do not declare it.
+- Only if the evidence says the challenge instance itself is broken (e.g. responses identical to a known-good reference for every input) declare a step that closes the container and end with a finding starting `FINAL_STOP:` — difficulty alone is NEVER a reason to stop.
+
 ## Context
 
 ### Goal

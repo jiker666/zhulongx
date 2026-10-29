@@ -476,3 +476,24 @@ func (s *Store) RecoverAllRunning(ctx context.Context, reason string) (int, erro
 	})
 	return reclaimed, err
 }
+
+// UnclaimStep returns a running step to pending without consuming an
+// attempt. It is the no-cost undo for WAITING_SLOT outcomes: the step's
+// executor could not get a challenge slot this round, which is scheduling
+// state, not a failure of the work.
+func (s *Store) UnclaimStep(ctx context.Context, goalID, stepID, claimer, reason string) error {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.Exec(
+			`UPDATE steps SET status = 'pending', claimed_by = NULL, claimed_at = NULL, heartbeat_at = NULL
+			 WHERE goal_id = ? AND id = ? AND status = 'running' AND claimed_by = ?`,
+			goalID, stepID, claimer,
+		)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return ErrClaimLost
+		}
+		return audit(tx, goalID, fgs.ActorEngine, "step.unclaimed", "step:"+stepID, reason)
+	})
+}

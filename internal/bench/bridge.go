@@ -94,6 +94,7 @@ func Brief(c *Client, ch Challenge) string {
 	fmt.Fprintf(&b, "  5. POST %s/openapi/v1/challenges/close?unique_code=%s  — 做完一题立即释放容器\n\n", base, code)
 	b.WriteString("约束:\n")
 	b.WriteString("- 同时最多 3 道题的容器在跑;开新题前先 close 已做完的题。\n")
+	b.WriteString("- 槽位由引擎统一调度。若 start 返回 409/invalid_state(槽位满):立即结束本步,返回 finding content 以 WAITING_SLOT: 开头并附一句说明。严禁在本步内轮询等待、sleep 循环或创建后台 poller 抢槽——那只会烧掉回合;引擎会在槽位空闲后重新调度你。\n")
 	b.WriteString("- 入口地址仅 VPN 内可达;若不通,先确认 VPN 再重试,不要盲目重启容器。\n")
 	b.WriteString("- 跑分任务有总时限,超时后全部接口返回 invalid_state。\n")
 	b.WriteString("- 拿到的每个 flag:先提交(接口 4),确认 correct=true 后再进入下一个 flag。\n\n")

@@ -112,16 +112,47 @@ func (e *Engine) executeStep(ctx context.Context, goalID, stepID string) {
 		return
 	}
 
-	payload, err := contract.ExtractJSONObject(res.Text)
-	if err != nil {
-		log.Error("execute: no JSON in output", "preview", preview(res.Text))
-		e.failStep(dctx, goalID, stepID, "output contained no JSON object", true)
-		return
+	payload, _ := contract.ExtractJSONObject(res.Text)
+	if payload == nil {
+		log.Warn("execute: no JSON in output — one repair round", "preview", preview(res.Text))
+		payload = e.repairJSON(hbCtx, runner, "contained no parseable JSON object")
+		if payload == nil {
+			log.Error("execute: no JSON in output", "preview", preview(res.Text))
+			e.failStep(dctx, goalID, stepID, "output contained no JSON object", true)
+			return
+		}
+		log.Info("execute: repair round salvaged the report")
 	}
 	answer, err := contract.ValidateExecute(payload)
 	if err != nil {
-		log.Error("execute: invalid payload", "err", err, "preview", preview(res.Text))
-		e.failStep(dctx, goalID, stepID, "invalid payload: "+err.Error(), !classifyPermanent(err.Error()))
+		log.Warn("execute: invalid payload — one repair round", "err", err)
+		if fixed := e.repairJSON(hbCtx, runner, "did not validate ("+err.Error()+")"); fixed != nil {
+			if a2, err2 := contract.ValidateExecute(fixed); err2 == nil {
+				answer, err = a2, nil
+				log.Info("execute: repair round salvaged the report")
+			}
+		}
+		if err != nil {
+			log.Error("execute: invalid payload", "err", err, "preview", preview(res.Text))
+			e.failStep(dctx, goalID, stepID, "invalid payload: "+err.Error(), !classifyPermanent(err.Error()))
+			return
+		}
+	}
+
+	// A WAITING_SLOT report is scheduling state, not work output: return
+	// the step to pending at zero attempt cost — no finding, no Decide
+	// round, no re-declared steps. The gate re-admits the goal when a
+	// container slot actually frees (run 41925: d-02 burned model rounds
+	// narrating waits and never re-entered).
+	if strings.HasPrefix(strings.TrimSpace(answer.Content), "WAITING_SLOT:") {
+		if err := e.store.UnclaimStep(dctx, goalID, stepID, "zhulongx", "waiting for container slot"); err != nil {
+			if !errors.Is(err, store.ErrClaimLost) {
+				e.log.Error("execute: unclaim write failed", "err", err)
+				e.failStep(dctx, goalID, stepID, "unclaim failed: "+err.Error(), true)
+			}
+			return
+		}
+		e.log.Info("execute: step deferred — no slot yet", "goal", goalID, "step", stepID)
 		return
 	}
 

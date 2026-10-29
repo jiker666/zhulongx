@@ -54,15 +54,31 @@ func (e *Engine) decide(ctx context.Context, goalID, why string) {
 		return
 	}
 
-	payload, err := contract.ExtractJSONObject(res.Text)
-	if err != nil {
+	payload, _ := contract.ExtractJSONObject(res.Text)
+	if payload == nil {
+		e.log.Warn("decide: no JSON in output — one repair round", "goal", goalID, "preview", preview(res.Text))
+		if fixed := e.repairJSON(ctx, runner, "contained no parseable JSON object"); fixed != nil {
+			payload = fixed
+			e.log.Info("decide: repair round salvaged the verdict", "goal", goalID)
+		}
+	}
+	if payload == nil {
 		e.log.Error("decide: no JSON in output", "goal", goalID, "preview", preview(res.Text))
 		return
 	}
 	answer, err := contract.ValidateDecide(payload, openStepsEmpty, e.cfg.Runtime.MaxStepsPerDecide)
 	if err != nil {
-		e.log.Error("decide: invalid payload", "goal", goalID, "err", err, "preview", preview(res.Text))
-		return
+		e.log.Warn("decide: invalid payload — one repair round", "goal", goalID, "err", err)
+		if fixed := e.repairJSON(ctx, runner, "did not validate ("+err.Error()+")"); fixed != nil {
+			if a2, err2 := contract.ValidateDecide(fixed, openStepsEmpty, e.cfg.Runtime.MaxStepsPerDecide); err2 == nil {
+				answer, err = a2, nil
+				e.log.Info("decide: repair round salvaged the verdict", "goal", goalID)
+			}
+		}
+		if err != nil {
+			e.log.Error("decide: invalid payload", "goal", goalID, "err", err, "preview", preview(res.Text))
+			return
+		}
 	}
 
 	// Finding review is applied FIRST: a complete/steps verdict may
@@ -143,6 +159,13 @@ func (e *Engine) countNoop(ctx context.Context, goalID string, openStepsEmpty bo
 			e.log.Error("decide: noop guard stop failed", "goal", goalID, "err", err)
 			return
 		}
+		if e.cfg.Runtime.RunDeadline > 0 {
+			// Idealess goals also earn a second pass: with a fresh attack
+			// surface instruction and the on-disk ledger they sometimes crack.
+			if g, err := e.store.GetGoal(ctx, goalID); err == nil {
+				e.requeuePass2(ctx, g)
+			}
+		}
 		e.log.Warn("decide: goal auto-stopped after repeated empty rounds", "goal", goalID, "rounds", n)
 	}
 }
@@ -164,6 +187,25 @@ func (e *Engine) launchRunner() (Runner, error) {
 		lastErr = err
 	}
 	return nil, fmt.Errorf("runner launch failed after %d attempt(s): %w", e.cfg.Pi.SpawnRetries+1, lastErr)
+}
+
+// repairJSON salvages a contract miss (final text with no parseable JSON
+// object, or a JSON object violating the schema) with ONE cheap follow-up
+// on the same runner. The runner process still holds the conversation —
+// the work the agent did is not lost — so re-asking for the report costs a
+// single round-trip instead of a full step re-execution with all its tool
+// calls. Returns nil when the repair fails too; the caller then falls
+// back to the ordinary failure path.
+func (e *Engine) repairJSON(ctx context.Context, runner Runner, problem string) map[string]any {
+	rctx, cancel := context.WithTimeout(ctx, e.cfg.Runtime.RepairTimeout.D())
+	defer cancel()
+	res, err := runner.Prompt(rctx,
+		"Your previous reply "+problem+". Reply now with ONLY the raw JSON object required by the task contract — same schema, filled in from the work you already did in this conversation. No prose, no markdown fences, no tool calls.")
+	if err != nil {
+		return nil
+	}
+	payload, _ := contract.ExtractJSONObject(res.Text)
+	return payload
 }
 
 func preview(s string) string {

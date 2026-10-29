@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"zhulongx/internal/cfg"
+	"zhulongx/internal/fgs"
 	"zhulongx/internal/pi"
 	"zhulongx/internal/store"
 )
@@ -52,6 +53,12 @@ type Engine struct {
 	deciding string                          // goalID of the in-flight Decide round ("" = none): Decide is globally serial
 	running  int                             // active Execute goroutines
 
+	// Budget bookkeeping (GoalStepBudget / GoalWallBudget / RunDeadline).
+	now        func() time.Time    // injectable clock
+	startedAt  time.Time           // set in Run; RunDeadline counts from here
+	firstClaim map[string]time.Time // goalID → first claimed step time
+	requeued   map[string]bool      // title → already requeued once
+
 	// NoopRescue, when set, fires once per goal at the edge of the noop
 	// guard — the moment the agent has exhausted its own ideas across
 	// DecideNoopLimit empty rounds. Returning a non-empty hint writes it
@@ -60,6 +67,13 @@ type Engine struct {
 	// Wire it to the benchmark hint endpoint: full score is lost either
 	// way, the hint only trades a fraction of it.
 	NoopRescue func(ctx context.Context, goalID string) (hint string, ok bool)
+
+	// StepGate, when set, is consulted before claiming each Execute step
+	// for a goal. Returning false skips the goal for this tick — its steps
+	// stay pending at zero model cost. Wire it to the benchmark slot gate
+	// so a goal that cannot get a challenge container never enters the
+	// agent loop to burn turns waiting for one.
+	StepGate func(ctx context.Context, goalID string) bool
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -80,13 +94,16 @@ func New(st *store.Store, c *cfg.Config, log *slog.Logger, factory RunnerFactory
 		}
 	}
 	return &Engine{
-		store:     st,
-		cfg:       c,
-		log:       log,
-		newRunner: factory,
-		snapshot:  map[string]store.SnapshotCounts{},
-		noop:      map[string]int{},
-		rescued:   map[string]bool{},
+		store:      st,
+		cfg:        c,
+		log:        log,
+		newRunner:  factory,
+		snapshot:   map[string]store.SnapshotCounts{},
+		noop:       map[string]int{},
+		rescued:    map[string]bool{},
+		now:        time.Now,
+		firstClaim: map[string]time.Time{},
+		requeued:   map[string]bool{},
 	}
 }
 
@@ -101,6 +118,7 @@ func (e *Engine) Run(ctx context.Context) error {
 	} else if n > 0 {
 		e.log.Info("recovered running steps", "count", n)
 	}
+	e.startedAt = e.now()
 
 	ticker := time.NewTicker(e.cfg.Runtime.TickInterval.D())
 	defer ticker.Stop()
@@ -152,7 +170,50 @@ func (e *Engine) tick(ctx context.Context) {
 	}
 }
 
+// requeuePass2 immediately recreates a just-stopped goal for its second
+// pass. The pass-2 goal lands at the BACK of the scheduling queue
+// (creation order), so untouched first-pass challenges keep priority and
+// retries fill the remaining time. Run 41925 proved a drain-gated requeue
+// never fires on a 63-challenge queue — the first pass alone outlives the
+// run — so the requeue must be immediate. One requeue per title; a goal
+// whose second pass also exhausts its budget stays stopped for good.
+func (e *Engine) requeuePass2(ctx context.Context, g *fgs.Goal) {
+	if e.cfg.Runtime.RunDeadline <= 0 || ctx.Err() != nil {
+		return
+	}
+	e.mu.Lock()
+	already := e.requeued[g.Title]
+	e.mu.Unlock()
+	if already {
+		return
+	}
+	if e.now().Add(10 * time.Minute).After(e.startedAt.Add(e.cfg.Runtime.RunDeadline.D())) {
+		return // too late for a meaningful second pass
+	}
+	ng, err := e.store.CreateGoal(ctx, g.Title, g.Origin, g.Objective)
+	if err != nil {
+		e.log.Error("requeue: create goal", "title", g.Title, "err", err)
+		return
+	}
+	if _, err := e.store.AddHumanFact(ctx, ng.ID,
+		"此题进入第二遍进攻:上一遍的完整过程与结论已写入 attack/ 目录下本题的 work.md 台账。开局第一动作是读台账(及 attack/notes.md),在其结论之上换一个攻击面继续,严禁从零重扫已排除的方向。flag 目标与提交方式不变。",
+		"engine:pass2"); err != nil {
+		e.log.Error("requeue: seed fact", "goal", ng.ID, "err", err)
+	}
+	e.mu.Lock()
+	e.requeued[g.Title] = true
+	e.mu.Unlock()
+	e.log.Info("requeue: goal requeued for a second pass", "title", g.Title, "goal", ng.ID)
+}
+
 func (e *Engine) scheduleGoal(ctx context.Context, goalID string) {
+	// Budget first: an exhausted goal must not spend another Decide round
+	// declaring "promising" steps it will never get to run.
+	if over, why := e.goalOverBudget(ctx, goalID); over {
+		e.stopGoalForBudget(ctx, goalID, why)
+		return
+	}
+
 	e.mu.Lock()
 	snap, hasSnap := e.snapshot[goalID]
 	deciding := e.deciding != ""
@@ -174,6 +235,9 @@ func (e *Engine) scheduleGoal(ctx context.Context, goalID string) {
 			return
 		}
 		e.mu.Unlock()
+		if e.StepGate != nil && !e.StepGate(ctx, goalID) {
+			return // no slot for this goal's challenge; steps stay pending
+		}
 		step, err := e.store.ClaimNextStep(ctx, goalID, "zhulongx")
 		if err != nil {
 			if !errors.Is(err, store.ErrNothingToClaim) && !errors.Is(err, store.ErrGoalNotActive) {
@@ -183,6 +247,9 @@ func (e *Engine) scheduleGoal(ctx context.Context, goalID string) {
 		}
 		e.mu.Lock()
 		e.running++
+		if _, ok := e.firstClaim[goalID]; !ok {
+			e.firstClaim[goalID] = e.now()
+		}
 		e.mu.Unlock()
 		e.wg.Add(1)
 		go func(st *stepRef) {
@@ -196,6 +263,59 @@ func (e *Engine) scheduleGoal(ctx context.Context, goalID string) {
 }
 
 type stepRef struct{ id string }
+
+// goalOverBudget reports whether the goal has exhausted GoalStepBudget or
+// GoalWallBudget. A goal with a step still in flight is never over budget
+// here: the stop must not race the executor's finish write.
+func (e *Engine) goalOverBudget(ctx context.Context, goalID string) (bool, string) {
+	sb, wb := e.cfg.Runtime.GoalStepBudget, e.cfg.Runtime.GoalWallBudget.D()
+	if sb <= 0 && wb <= 0 {
+		return false, ""
+	}
+	_, running, err := e.store.OpenStepCount(ctx, goalID)
+	if err != nil || running > 0 {
+		return false, "" // checked again next tick
+	}
+	if sb > 0 {
+		steps, err := e.store.ListSteps(ctx, goalID)
+		if err == nil {
+			done := 0
+			for _, s := range steps {
+				if s.Status == fgs.StepDone {
+					done++
+				}
+			}
+			if done >= sb {
+				return true, fmt.Sprintf("step budget exhausted (%d done steps)", done)
+			}
+		}
+	}
+	if wb > 0 {
+		e.mu.Lock()
+		first, ok := e.firstClaim[goalID]
+		e.mu.Unlock()
+		if ok && e.now().Sub(first) > wb {
+			return true, fmt.Sprintf("wall budget exhausted (%s in flight)", e.now().Sub(first).Round(time.Second))
+		}
+	}
+	return false, ""
+}
+
+// stopGoalForBudget stops a zombie goal and requeues it for the second
+// pass immediately. Findings stay in the graph; the agent-maintained attack
+// ledger on disk is what carries knowledge across the requeue.
+func (e *Engine) stopGoalForBudget(ctx context.Context, goalID string, why string) {
+	g, err := e.store.GetGoal(ctx, goalID)
+	if err != nil {
+		return
+	}
+	if err := e.store.SetGoalStatus(ctx, goalID, fgs.GoalStopped, fgs.ActorEngine); err != nil {
+		e.log.Error("budget stop: set status", "goal", goalID, "err", err)
+		return
+	}
+	e.requeuePass2(ctx, g)
+	e.log.Warn("budget: goal stopped, slot released", "goal", goalID, "title", g.Title, "reason", why)
+}
 
 // decideTrigger: run Decide on first sight,
 // when the graph grew since the last Decide, or when no steps remain open.

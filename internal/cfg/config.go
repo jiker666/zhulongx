@@ -38,9 +38,25 @@ type Runtime struct {
 	MaxConcurrentSteps int      `yaml:"max_concurrent_steps"`
 	MaxStepsPerDecide  int      `yaml:"max_steps_per_decide"`
 	StepMaxAttempts    int      `yaml:"step_max_attempts"`
+	// RepairTimeout bounds the single follow-up round that salvages a
+	// contract miss (no JSON / invalid schema) without re-running the step.
+	RepairTimeout Duration `yaml:"repair_timeout"`
 	// DecideNoopLimit auto-stops a goal after N consecutive no-op Decide
 	// rounds while no steps are open (bounds wasted Decide rounds).
 	DecideNoopLimit int `yaml:"decide_noop_limit"`
+	// GoalStepBudget caps how many DONE Execute steps one goal may run
+	// before the scheduler stops it. 0 disables. It is the engine-side
+	// backstop against zombie goals: a goal whose Decide keeps declaring
+	// "promising" next steps can otherwise pin a scarce slot forever.
+	GoalStepBudget int `yaml:"goal_step_budget"`
+	// GoalWallBudget caps a goal's total wall time from its first claimed
+	// step. 0 disables. Step count alone cannot bound a goal that runs few
+	// but very long steps.
+	GoalWallBudget Duration `yaml:"goal_wall_budget"`
+	// RunDeadline, when > 0, is measured from engine start: budget-stopped
+	// goals are requeued for a second pass once the whole queue drains,
+	// until the deadline nears. 0 disables requeueing.
+	RunDeadline Duration `yaml:"run_deadline"`
 }
 
 // Pi describes how to launch the agent runtime.
@@ -77,6 +93,7 @@ func Default() *Config {
 			MaxStepsPerDecide:  3,
 			StepMaxAttempts:    3,
 			DecideNoopLimit:    3,
+			RepairTimeout:      Duration(3 * time.Minute),
 		},
 		Pi: Pi{
 			Command:      "pi",
