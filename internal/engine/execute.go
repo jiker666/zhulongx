@@ -248,14 +248,18 @@ func (e *Engine) finishPartial(ctx context.Context, log *slog.Logger, goalID, st
 		}
 		return
 	}
-	e.noteStepFinish(goalID)
+	// No noteStepFinish here, deliberately: a deadline-killed step lands
+	// seconds before the wall by construction, so counting it as "the goal
+	// is mid-flow" would arm the active grace on EVERY budget-stopped goal
+	// (run 42407: three flagless goals each burned the +10m grace this way).
 	e.harvestFlags(ctx, goalID, res.Text) // the kill can land mid-report, flag and all
 	log.Info("execute: step done with partial finding (deadline salvage)", "finding", fd.ID, "tools", res.ToolCalls)
 	e.noteRunnerSuccess()
 }
 
-// noteStepFinish records when a step last landed, feeding the wall-budget
-// active grace: a goal whose steps keep finishing is mid-flow, not wedged.
+// noteStepFinish records when a step last landed NATURALLY (the agent chose
+// to wrap up and report), feeding the wall-budget active grace: a goal whose
+// steps keep landing on their own is mid-flow, not wedged.
 func (e *Engine) noteStepFinish(goalID string) {
 	e.mu.Lock()
 	e.lastFinish[goalID] = e.now()
