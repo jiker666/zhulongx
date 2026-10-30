@@ -86,6 +86,25 @@ func (g *SlotGate) Progress(code string) (cur, total int, ok bool) {
 	return
 }
 
+// Submittable reports whether a flag for this challenge is still worth
+// submitting right now: the container must be RUNNING and the challenge not
+// already completed. The platform judges a submission against the CURRENT
+// instance's flag values, so once the container is closed a re-submission of
+// a previously banked value scores as WRONG (run 42416: the flag fast lane
+// re-submitted the agent's own banked flag 7 seconds after its close), and a
+// completed challenge needs nothing.
+func (g *SlotGate) Submittable(code string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.status == nil {
+		return false
+	}
+	if g.completed[code] {
+		return false
+	}
+	return isRunning(g.status[code])
+}
+
 // Allow reports whether the goal may claim an Execute step right now.
 // Non-benchmark goals are always allowed (no container to manage).
 func (g *SlotGate) Allow(ctx context.Context, goalID string) bool {

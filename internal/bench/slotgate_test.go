@@ -208,6 +208,29 @@ func TestSlotGateSweepReapsIdleContainerOfQueuedPass2(t *testing.T) {
 	}
 }
 
+func TestSlotGateSubmittable(t *testing.T) {
+	f := newFixture(t, 1)
+	f.challenges = []Challenge{
+		{UniqueCode: "a-01", ContainerStatus: "running", FlagCount: 1},
+		{UniqueCode: "a-02", ContainerStatus: "stopped", FlagCount: 1},
+		{UniqueCode: "a-03", ContainerStatus: "running", FlagCount: 4, CorrectFlagCount: 4, IsCompleted: true},
+	}
+	a := f.goal(t, "a-01", fgs.GoalActive)
+	f.gate.Allow(context.Background(), a) // forces the first poll
+	if !f.gate.Submittable("a-01") {
+		t.Fatal("a live container of an unfinished challenge is submittable")
+	}
+	if f.gate.Submittable("a-02") {
+		t.Fatal("a closed container is never submittable — the platform re-judges against it and a banked value comes back wrong")
+	}
+	if f.gate.Submittable("a-03") {
+		t.Fatal("a completed challenge needs no submission")
+	}
+	if f.gate.Submittable("zz-99") {
+		t.Fatal("an unknown challenge is not submittable")
+	}
+}
+
 func TestSlotGateProgressReportsFlagCounts(t *testing.T) {
 	f := newFixture(t, 1)
 	f.challenges = []Challenge{{UniqueCode: "b-01", ContainerStatus: "stopped", FlagCount: 4, CorrectFlagCount: 2}}

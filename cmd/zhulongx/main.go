@@ -614,6 +614,13 @@ func wireFlagFastLane(e *engine.Engine, bc *bench.Client, gate *bench.SlotGate, 
 		}
 		submitted[flag] = true
 		mu.Unlock()
+		// Post-close re-submission of the agent's own banked flag scores as
+		// wrong (the platform re-evaluates against the closed instance), so
+		// only fire while the container is live and the challenge unfinished.
+		if !gate.Submittable(code) {
+			log.Info("bench: fast-lane skips closed/finished challenge", "code", code)
+			return
+		}
 		res, err := bc.Submit(ctx, code, flag)
 		var ae *bench.APIError
 		switch {
