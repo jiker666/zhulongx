@@ -42,6 +42,22 @@ if [ ! -s $WL/secrets/flask-secret-keys.txt ]; then
 fi
 wc -l $WL/web/*.txt $WL/passwords/*.txt $WL/secrets/*.txt
 
+echo "== shell gate =="
+# Run 42298 postmortem: an ASCII quote inside the single-quoted CONTENT
+# assignment silently truncated it — the script shipped broken while greps
+# still matched the payload bytes. Parse every shipped script, and hold the
+# CONTENT line to its invariant: exactly one opening and one closing quote,
+# with the tail marker inside (a truncation loses the tail).
+bash -n docker/build/inject-facts.sh
+bash -n docker/build/entrypoint.sh
+CONTENT_LINE="$(sed -n '/^CONTENT=/p' docker/build/inject-facts.sh)"
+NQ="$(tr -cd "'" <<<"$CONTENT_LINE" | wc -c)"
+[ "$NQ" -eq 2 ] || { echo "FATAL: inject-facts.sh CONTENT has $NQ ASCII quotes (need exactly 2 — open+close)"; exit 1; }
+case "$CONTENT_LINE" in
+  *"解出永远优先于省 hint。"*) ;;
+  *) echo "FATAL: inject-facts.sh CONTENT tail marker missing — string truncated?"; exit 1;;
+esac
+
 echo "== docker build =="
 docker build -t zhulongx-agent:managed docker/
 
