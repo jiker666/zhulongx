@@ -333,7 +333,10 @@ func TestGoalWallBudgetStops(t *testing.T) {
 
 	e.scheduleGoal(ctx, g.ID) // claims at fake T0 and runs the step
 	e.wg.Wait()
-	fake = fake.Add(2 * time.Minute)
+	// +5m: past the 1m wall budget AND past the 3m active-grace window —
+	// a step that landed 5 minutes before the deadline check means the
+	// goal went quiet, not mid-flow.
+	fake = fake.Add(5 * time.Minute)
 	e.scheduleGoal(ctx, g.ID)
 	got, _ := st.GetGoal(ctx, g.ID)
 	if got.Status != fgs.GoalStopped {
@@ -441,7 +444,7 @@ func TestBudgetStopReleasesContainer(t *testing.T) {
 	)
 	e.cfg.Runtime.GoalStepBudget = 1
 	rel := make(chan string, 1)
-	e.ReleaseContainer = func(_ context.Context, goalID string) { rel <- goalID }
+	e.ReleaseContainer = func(_ context.Context, goalID string) error { rel <- goalID; return nil }
 
 	g, _ := st.CreateGoal(ctx, "rel", "o", "obj")
 	st.AddHumanFact(ctx, g.ID, "seed", "t")
@@ -468,7 +471,7 @@ func TestNoopStopReleasesContainer(t *testing.T) {
 	ctx := context.Background()
 	e, _, _ := newEngine(t, ok(`{}`), ok(`{}`))
 	rel := make(chan string, 1)
-	e.ReleaseContainer = func(_ context.Context, goalID string) { rel <- goalID }
+	e.ReleaseContainer = func(_ context.Context, goalID string) error { rel <- goalID; return nil }
 
 	g, _ := e.store.CreateGoal(ctx, "nooprel", "o", "obj")
 	e.decide(ctx, g.ID, "initial")
@@ -938,4 +941,180 @@ func TestRunnerBreakerResetsOnSuccess(t *testing.T) {
 	if e.breakerOpen() {
 		t.Fatal("breaker must stay closed after a success reset")
 	}
+}
+
+func TestFlagRefuelExtendsWallBudget(t *testing.T) {
+	// Banking a new flag mid-pass refuels the wall budget: the goal keeps
+	// its slot while it is demonstrably converting time into score. Two
+	// refuels per goal, then the budget bites.
+	ctx := context.Background()
+	e, st, _ := newEngine(t, ok(`{}`))
+	e.cfg.Runtime.GoalWallBudget = cfg.Duration(time.Minute)
+	fake := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	e.now = func() time.Time { return fake }
+	correct := 0
+	e.FlagProgress = func(string) (int, int, bool) { return correct, 4, true }
+
+	g, _ := st.CreateGoal(ctx, "refuel", "o", "obj")
+	e.mu.Lock()
+	e.firstClaim[g.ID] = fake.Add(-2 * time.Minute)
+	e.flagBase[g.ID] = 0
+	e.mu.Unlock()
+
+	correct = 1 // flag banked during the pass
+	if over, _ := e.goalOverBudget(ctx, g.ID); over {
+		t.Fatal("a goal with fresh flag progress must not be budget-stopped")
+	}
+	e.mu.Lock()
+	refills := e.flagRefills[g.ID]
+	rewound := e.firstClaim[g.ID].Equal(fake)
+	e.mu.Unlock()
+	if refills != 1 || !rewound {
+		t.Fatalf("refuel must rewind the window once: refills=%d rewound=%v", refills, rewound)
+	}
+
+	// No further progress and no fresh finish: the refueled window expires.
+	fake = fake.Add(2 * time.Minute)
+	if over, _ := e.goalOverBudget(ctx, g.ID); !over {
+		t.Fatal("without new progress the refueled budget must bite")
+	}
+}
+
+func TestActiveGraceExtendsWallBudgetOnce(t *testing.T) {
+	// A step that landed moments before the deadline means the goal is
+	// mid-flow, not wedged: one 10-minute extension, never two.
+	ctx := context.Background()
+	e, st, _ := newEngine(t, ok(`{}`))
+	e.cfg.Runtime.GoalWallBudget = cfg.Duration(time.Minute)
+	fake := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	e.now = func() time.Time { return fake }
+
+	g, _ := st.CreateGoal(ctx, "grace", "o", "obj")
+	e.mu.Lock()
+	e.firstClaim[g.ID] = fake.Add(-2 * time.Minute)
+	e.lastFinish[g.ID] = fake.Add(-1 * time.Minute) // landed 1m before the check
+	e.mu.Unlock()
+
+	if over, _ := e.goalOverBudget(ctx, g.ID); over {
+		t.Fatal("a step landing inside the grace window must earn the extension")
+	}
+	e.mu.Lock()
+	deadline := e.firstClaim[g.ID]
+	used := e.graceUsed[g.ID]
+	e.mu.Unlock()
+	if !used || !deadline.Equal(fake.Add(8*time.Minute)) {
+		t.Fatalf("grace must push the deadline 10m out: used=%v deadline=%v", used, deadline)
+	}
+
+	// Second time the same goal is out of luck — grace is one-shot.
+	e.mu.Lock()
+	e.lastFinish[g.ID] = fake // finished "now", still mid-flow
+	e.mu.Unlock()
+	fake = fake.Add(12 * time.Minute)
+	e.mu.Lock()
+	e.lastFinish[g.ID] = fake
+	e.mu.Unlock()
+	if over, _ := e.goalOverBudget(ctx, g.ID); !over {
+		t.Fatal("grace must fire only once per goal")
+	}
+}
+
+func TestHarvestFlagsSubmitsConcreteCandidates(t *testing.T) {
+	// Concrete flag-shaped values in landing text reach the submit hook;
+	// brief-style examples (flag{...}, flag{uuid}) must not.
+	ctx := context.Background()
+	e, st, _ := newEngine(t, ok(`{}`))
+	got := make(chan string, 4)
+	e.OnFlagCandidate = func(_ context.Context, _, flag string) { got <- flag }
+
+	g, _ := st.CreateGoal(ctx, "bench:b-01 harvest", "o", "obj")
+	e.harvestFlags(ctx, g.ID,
+		"cracked it: FLAG{f5m_st4t3_tr4c3_1s_th3_k3y5tr34m} and flag{3f2a9c1d-77b2-4e18-9c0f-6a2b8d4e9f10} — format is flag{...} e.g. flag{uuid}")
+	e.wg.Wait()
+	close(got)
+	var seen []string
+	for f := range got {
+		seen = append(seen, f)
+	}
+	if len(seen) != 2 {
+		t.Fatalf("exactly the two concrete flags must be harvested: %v", seen)
+	}
+}
+
+func TestDecideStepDescriptionHarvestsFlag(t *testing.T) {
+	// run 42361's f2-01: the computed flag lived in a DECIDE round's step
+	// declaration and the submit step never ran. The declaration itself
+	// must reach the submit hook.
+	ctx := context.Background()
+	e, st, _ := newEngine(t,
+		ok(`{"accepted":true,"data":{"steps":[{"from":["f_0001"],"description":"submit FLAG{d3c0d3_th3_k3y} via platform API now"}]}}`),
+	)
+	got := make(chan string, 1)
+	e.OnFlagCandidate = func(_ context.Context, _, flag string) { got <- flag }
+
+	g, _ := st.CreateGoal(ctx, "bench:f2-01", "o", "obj")
+	st.AddHumanFact(ctx, g.ID, "seed", "t")
+	e.decide(ctx, g.ID, "initial")
+	select {
+	case f := <-got:
+		if f != "FLAG{d3c0d3_th3_k3y}" {
+			t.Fatalf("unexpected candidate: %s", f)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a flag inside a declared step description must be harvested")
+	}
+}
+
+func TestReleaseContainerRetries(t *testing.T) {
+	// The stop-time release is the fast path; a failed POST must retry.
+	ctx := context.Background()
+	e, st, _ := newEngine(t, ok(`{}`))
+	e.releaseBackoff = []time.Duration{0, time.Millisecond, time.Millisecond}
+	calls := 0
+	e.ReleaseContainer = func(context.Context, string) error {
+		calls++
+		if calls < 3 {
+			return errors.New("gateway 502")
+		}
+		return nil
+	}
+	g, _ := st.CreateGoal(ctx, "retry", "o", "obj")
+	e.releaseStoppedContainer(g.ID)
+	e.wg.Wait()
+	if calls != 3 {
+		t.Fatalf("release must retry until success: calls=%d", calls)
+	}
+}
+
+func TestEndgameRankPrefersPartialFlagProgress(t *testing.T) {
+	ctx := context.Background()
+	e, st, _ := newEngine(t, ok(`{}`))
+	e.cfg.Runtime.RunDeadline = cfg.Duration(350 * time.Minute)
+	e.cfg.Runtime.EndgameAfter = cfg.Duration(320 * time.Minute)
+	fake := time.Date(2026, 10, 31, 18, 21, 0, 0, time.UTC) // t+331m: endgame
+	e.now = func() time.Time { return fake }
+	e.startedAt = fake.Add(-331 * time.Minute)
+	e.FlagProgress = func(title string) (int, int, bool) {
+		switch {
+		case strings.Contains(title, "partial"):
+			return 2, 4, true
+		case strings.Contains(title, "multi"):
+			return 0, 6, true
+		case strings.Contains(title, "plain"):
+			return 0, 1, true
+		}
+		return 0, 0, false
+	}
+	partial, _ := st.CreateGoal(ctx, "bench:partial", "o", "obj")
+	multi, _ := st.CreateGoal(ctx, "bench:multi", "o", "obj")
+	plain, _ := st.CreateGoal(ctx, "bench:plain", "o", "obj")
+
+	if !e.inEndgame() {
+		t.Fatal("t+331m of a 350m run with an 80m window is endgame")
+	}
+	rank := e.endgameRank([]fgs.Goal{{ID: partial.ID, Title: "bench:partial"}, {ID: multi.ID, Title: "bench:multi"}, {ID: plain.ID, Title: "bench:plain"}})
+	if !(rank[partial.ID] > rank[multi.ID] && rank[multi.ID] > rank[plain.ID]) {
+		t.Fatalf("partial-flag > untouched multi-flag > plain: %v", rank)
+	}
+	_ = ctx
 }

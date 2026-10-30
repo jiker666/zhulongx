@@ -44,6 +44,7 @@ Finding review may be combined with steps. If no action is warranted, return:
 
 - First review findings. Promotion makes their content a permanent fact — promote only observations you judge correct and useful; discard the rest.
 - Complete requires verified facts. `complete.from` must reference existing fact ids (see Valid facts). Explain in `complete.description` why they suffice. Findings alone are never sufficient — promote first.
+- **The objective is "all flags", not "a flag".** A challenge is complete only when the platform reports `is_completed=true` (`correct_flag_count == flag_count`). One banked flag is progress to build on, never a stopping point: if facts show a flag landed but the challenge is not fully credited, the next steps must attack the remaining surfaces.
 - If there are no open steps (none pending or running) and the objective is not met, you MUST declare new steps.
 - Declare at most {max_steps} high-value, non-overlapping steps. Each step is an independent, parallelizable direction; it may originate from multiple facts.
 - Steps must depend on existing fact ids.

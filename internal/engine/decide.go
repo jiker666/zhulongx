@@ -128,10 +128,15 @@ func (e *Engine) applyDecide(ctx context.Context, goalID, why string, answer *co
 			e.log.Error("decide: complete write failed", "goal", goalID, "err", err)
 			return
 		}
+		e.harvestFlags(ctx, goalID, answer.Complete.Description)
 		e.log.Info("decide: goal completed", "goal", goalID, "from", strings.Join(answer.Complete.From, ","), "trigger", why)
 	case contract.KindSteps:
 		created := 0
 		for _, spec := range answer.Steps {
+			// A declared step can itself carry the victory action — run
+			// 42361's f2-01 ended with "本步执行: POST submit
+			// FLAG{...}" in exactly this field, and the step never ran.
+			e.harvestFlags(ctx, goalID, spec.Description)
 			if _, err := e.store.CreateStep(ctx, goalID, spec.Description, spec.From, fgs.ActorDecide); err != nil {
 				// Per-step create failures are tolerated (lost races/inactive goals) and
 				// continues; mirror that.

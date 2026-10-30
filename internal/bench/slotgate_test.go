@@ -177,3 +177,48 @@ func TestSlotGatePermissiveBeforeFirstPoll(t *testing.T) {
 		t.Fatal("before the first successful poll the gate must stay permissive")
 	}
 }
+
+func TestSlotGateSweepReapsIdleContainerOfQueuedPass2(t *testing.T) {
+	// run 42361's leak class: the goal was budget-stopped, its pass-2
+	// successor is active but queued behind hours of work, and the stop-time
+	// release failed. The active successor must NOT keep the idle container
+	// alive past the sweep TTL.
+	f := newFixture(t, 1)
+	f.challenges = []Challenge{{UniqueCode: "a-16", ContainerStatus: "available"}}
+	f.goal(t, "a-16", fgs.GoalStopped)
+	f.goal(t, "a-16", fgs.GoalActive) // queued pass-2 successor
+	other := f.goal(t, "a-02", fgs.GoalActive)
+
+	ctx := context.Background()
+	if f.gate.Allow(ctx, other) {
+		t.Fatal("the running container must still occupy the slot on first sight")
+	}
+	if len(f.closed) != 0 {
+		t.Fatalf("first sight must start the idle clock, not reap: %v", f.closed)
+	}
+	f.now = f.now.Add(6 * time.Minute) // past sweepTTL, no work ever arrived
+	if f.gate.Allow(ctx, other) {
+		t.Fatal("the slot must still be occupied by the leaked container on this call")
+	}
+	if len(f.closed) != 1 || f.closed[0] != "a-16" {
+		t.Fatalf("the idle container must be swept: %v", f.closed)
+	}
+	if !f.gate.Allow(ctx, other) {
+		t.Fatal("after the sweep the slot must be free")
+	}
+}
+
+func TestSlotGateProgressReportsFlagCounts(t *testing.T) {
+	f := newFixture(t, 1)
+	f.challenges = []Challenge{{UniqueCode: "b-01", ContainerStatus: "stopped", FlagCount: 4, CorrectFlagCount: 2}}
+	a := f.goal(t, "a-01", fgs.GoalActive)
+
+	f.gate.Allow(context.Background(), a) // forces the first poll
+	cur, total, ok := f.gate.Progress("b-01")
+	if !ok || cur != 2 || total != 4 {
+		t.Fatalf("progress must come from the platform snapshot: cur=%d total=%d ok=%v", cur, total, ok)
+	}
+	if _, _, ok := f.gate.Progress("zz-99"); ok {
+		t.Fatal("unknown codes must report ok=false")
+	}
+}

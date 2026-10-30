@@ -2,6 +2,7 @@ package bench
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -22,10 +23,10 @@ import (
 // token budget. With the gate, a slot-less goal's steps simply stay
 // pending at zero model cost.
 //
-// The gate also reaps leaked containers: a challenge whose goal is
-// completed or stopped (terminal — it will never run again) but whose
-// container still shows running gets closed, so a dead goal cannot hold a
-// slot hostage.
+// The gate also sweeps leaked containers: a running container whose
+// challenge has no in-flight step (and had none within the sweep TTL) gets
+// closed, so neither a stopped goal nor a one-shot release failure can
+// hold a slot hostage.
 type SlotGate struct {
 	st      *store.Store
 	client  *Client
@@ -34,6 +35,7 @@ type SlotGate struct {
 
 	pollTTL    time.Duration // platform-list cache lifetime
 	reserveTTL time.Duration // how long an admission reservation holds
+	sweepTTL   time.Duration // how long a running container may go without in-flight work
 	now        func() time.Time
 	listOnce   func(ctx context.Context) ([]Challenge, error)
 	closeCode  func(ctx context.Context, code string) error
@@ -43,7 +45,10 @@ type SlotGate struct {
 	polledOnce bool
 	status     map[string]string // code -> container_status
 	completed  map[string]bool   // code -> platform is_completed
+	correct    map[string]int    // code -> correct_flag_count (progress / endgame priority)
+	total      map[string]int    // code -> flag_count
 	reserved   map[string]time.Time
+	lastWork   map[string]time.Time // code -> last time a running step used its container
 }
 
 // NewSlotGate builds a gate for at most maxSlots concurrent containers.
@@ -55,11 +60,30 @@ func NewSlotGate(st *store.Store, c *Client, maxSlots int, log *slog.Logger) *Sl
 		maxSlot:   maxSlots,
 		pollTTL:   8 * time.Second,
 		reserveTTL: 4 * time.Minute,
+		sweepTTL:  5 * time.Minute,
 		now:       time.Now,
 		listOnce:  c.List,
 		closeCode: c.Close,
 		reserved:  map[string]time.Time{},
+		lastWork:  map[string]time.Time{},
 	}
+}
+
+// Progress reports the platform's cached flag progress for a challenge:
+// correct and total flag counts. ok=false when nothing has been polled for
+// the code. The engine uses it to refuel the wall budget of goals whose
+// flags are actually being banked, and to order the endgame harvest.
+func (g *SlotGate) Progress(code string) (cur, total int, ok bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.correct == nil {
+		return 0, 0, false
+	}
+	cur, total, ok = g.correct[code], g.total[code], g.polledOnce && g.status != nil
+	if _, has := g.status[code]; !has {
+		ok = false
+	}
+	return
 }
 
 // Allow reports whether the goal may claim an Execute step right now.
@@ -132,12 +156,18 @@ func (g *SlotGate) refreshLocked(ctx context.Context) []string {
 	g.polledOnce = true
 	status := make(map[string]string, len(challenges))
 	completed := make(map[string]bool, len(challenges))
+	correct := make(map[string]int, len(challenges))
+	total := make(map[string]int, len(challenges))
 	for _, ch := range challenges {
 		status[ch.UniqueCode] = ch.ContainerStatus
 		completed[ch.UniqueCode] = ch.IsCompleted
+		correct[ch.UniqueCode] = ch.CorrectFlagCount
+		total[ch.UniqueCode] = ch.FlagCount
 	}
 	g.status = status
 	g.completed = completed
+	g.correct = correct
+	g.total = total
 
 	// Drop reservations that expired or materialized into real containers.
 	for code, at := range g.reserved {
@@ -146,33 +176,68 @@ func (g *SlotGate) refreshLocked(ctx context.Context) []string {
 		}
 	}
 
-	// Terminal goal + running container = a slot held hostage — unless a
-	// successor goal still carries the title: the immediate pass-2 requeue
-	// creates one for every budget/noop stop, it is admitted through
-	// runningLocked, and reaping under it would kill the container pass-2
-	// is actively working. The engine's ReleaseContainer hook frees the
-	// slot at stop time instead; this scan is the backstop for goals with
-	// no successor at all.
+	// Idle sweep: a running container is justified only by in-flight work.
+	// The historical leak (run 42361: a-16 held a slot 2h10m, c-08 1h54m
+	// after their goals were budget-stopped) came from the stop-time
+	// ReleaseContainer hook being one-shot — when its single POST failed,
+	// the successor pass-2 goal made the old terminal-goal reaper skip the
+	// title forever. The sweep judges the container, not the goal: keep it
+	// while a running step works this challenge (or did within sweepTTL —
+	// covers the gap between two execute steps of one pass), reap it
+	// otherwise, whatever the goal table says.
 	goals, err := g.st.ListGoals(ctx)
 	if err != nil {
-		g.log.Warn("bench: slot gate reaper scan failed", "err", err)
+		g.log.Warn("bench: slot gate sweep scan failed", "err", err)
 		return nil
 	}
-	live := make(map[string]bool, len(goals))
+	runningGoals, err := g.st.RunningGoalIDs(ctx)
+	if err != nil {
+		g.log.Warn("bench: slot gate running-step scan failed", "err", err)
+		return nil
+	}
+	working := make(map[string]bool)
 	for _, gl := range goals {
-		if gl.Status != fgs.GoalCompleted && gl.Status != fgs.GoalStopped {
+		if !runningGoals[gl.ID] {
+			continue
+		}
+		if code2, ok := CodeOfTitle(gl.Title); ok {
+			working[code2] = true
+		}
+	}
+	for code2 := range working {
+		g.lastWork[code2] = now
+	}
+	hasActive := make(map[string]bool)
+	for _, gl := range goals {
+		if gl.Status == fgs.GoalActive {
 			if code2, ok := CodeOfTitle(gl.Title); ok {
-				live[code2] = true
+				hasActive[code2] = true
 			}
 		}
 	}
 	var reap []string
-	for _, gl := range goals {
-		if gl.Status != fgs.GoalCompleted && gl.Status != fgs.GoalStopped {
-			continue
+	for code2 := range status {
+		if !isRunning(status[code2]) || completed[code2] {
+			continue // already gone, or platform credits the challenge in full
 		}
-		code2, ok := CodeOfTitle(gl.Title)
-		if !ok || !isRunning(status[code2]) || live[code2] {
+		if working[code2] {
+			continue // a running step is using this container right now
+		}
+		if now.Sub(g.reserved[code2]) <= g.reserveTTL {
+			continue // admission in progress
+		}
+		// An active-but-queued pass-2 goal does NOT protect its container
+		// forever: the goal may sit behind the whole queue for hours (42361:
+		// a-16 2h10m, c-08 1h54m). The container stays only while in-flight
+		// work used it recently.
+		if last, ok := g.lastWork[code2]; ok && now.Sub(last) <= g.sweepTTL {
+			continue // step finished moments ago; the pass is between steps
+		}
+		if _, ok := g.lastWork[code2]; !ok && hasActive[code2] {
+			// First sight of a running container that an active goal may
+			// still claim (engine restart mid-run): start the idle clock
+			// instead of killing on arrival.
+			g.lastWork[code2] = now
 			continue
 		}
 		reap = append(reap, code2)
@@ -180,8 +245,8 @@ func (g *SlotGate) refreshLocked(ctx context.Context) []string {
 	return reap
 }
 
-// reap closes leaked containers of terminal goals (outside g.mu — Close
-// is a network call).
+// reap closes containers the sweep found idle (outside g.mu — Close is a
+// network call).
 func (g *SlotGate) reap(ctx context.Context, codes []string) {
 	for _, code := range codes {
 		if err := g.closeCode(ctx, code); err != nil {
@@ -193,29 +258,28 @@ func (g *SlotGate) reap(ctx context.Context, codes []string) {
 			g.status[code] = "stopped"
 		}
 		g.mu.Unlock()
-		g.log.Info("bench: slot gate reaped container of terminal goal", "code", code)
+		g.log.Info("bench: slot gate swept idle container", "code", code)
 	}
 }
 
-// ForceRelease closes a challenge container now, bypassing the terminal-goal
-// scan. The engine asks for this the moment it stops a goal: the immediate
-// pass-2 requeue keeps the title non-terminal (so the reaper would leave the
-// container holding a slot until the pass-2 goal reaches the queue front,
-// hours later), yet nothing is working the challenge anymore. A challenge
-// the platform already credits needs no container, so it is skipped.
-func (g *SlotGate) ForceRelease(ctx context.Context, code string) {
+// ForceRelease closes a challenge container now, bypassing the idle sweep.
+// The engine asks for this the moment it stops a goal: the pass-2 requeue
+// keeps a live goal on the title, but nothing is working the challenge
+// anymore, and the sweep would only catch it sweepTTL later. A challenge
+// the platform already credits needs no container, so it is skipped. The
+// error return lets the engine's release retry tell failure from success.
+func (g *SlotGate) ForceRelease(ctx context.Context, code string) error {
 	if code == "" {
-		return
+		return nil
 	}
 	g.mu.Lock()
 	completed := g.completed[code]
 	g.mu.Unlock()
 	if completed {
-		return
+		return nil
 	}
 	if err := g.closeCode(ctx, code); err != nil {
-		g.log.Warn("bench: slot gate force release failed", "code", code, "err", err)
-		return
+		return fmt.Errorf("close %s: %w", code, err)
 	}
 	g.mu.Lock()
 	if g.status != nil {
@@ -223,6 +287,7 @@ func (g *SlotGate) ForceRelease(ctx context.Context, code string) {
 	}
 	g.mu.Unlock()
 	g.log.Info("bench: slot gate released container of stopped goal", "code", code)
+	return nil
 }
 
 func (g *SlotGate) runningLocked(code string) bool {

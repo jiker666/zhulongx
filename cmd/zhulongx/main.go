@@ -5,12 +5,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -568,14 +570,61 @@ func wireStepGate(e *engine.Engine, st *store.Store, log *slog.Logger) {
 	const maxContainers = 3
 	gate := bench.NewSlotGate(st, bc, maxContainers, log)
 	e.StepGate = gate.Allow
-	e.ReleaseContainer = func(ctx context.Context, goalID string) {
+	e.ReleaseContainer = func(ctx context.Context, goalID string) error {
 		goal, err := st.GetGoal(ctx, goalID)
 		if err != nil {
+			return fmt.Errorf("release: load goal: %w", err)
+		}
+		code, ok := bench.CodeOfTitle(goal.Title)
+		if !ok {
+			return nil // not a benchmark goal: nothing to release
+		}
+		return gate.ForceRelease(ctx, code)
+	}
+	e.FlagProgress = func(title string) (int, int, bool) {
+		code, ok := bench.CodeOfTitle(title)
+		if !ok {
+			return 0, 0, false
+		}
+		return gate.Progress(code)
+	}
+	wireFlagFastLane(e, bc, gate, log)
+	log.Info("bench: step gate armed (slot-paced execute, max concurrent containers)", "max", maxContainers)
+}
+
+// wireFlagFastLane connects the engine's flag harvest to the platform
+// submit API. Every flag-shaped string the engine sees land in the graph is
+// submitted immediately — once per unique value — so a derived flag never
+// waits for a future step to carry it (run 42361: f2-01's fully computed
+// flag sat unsubmitted for the run's final 54 minutes). Duplicates are
+// answered by the platform anyway (409 duplicate), but not asking twice
+// keeps the submit log honest.
+func wireFlagFastLane(e *engine.Engine, bc *bench.Client, gate *bench.SlotGate, log *slog.Logger) {
+	var mu sync.Mutex
+	submitted := map[string]bool{}
+	e.OnFlagCandidate = func(ctx context.Context, title, flag string) {
+		code, ok := bench.CodeOfTitle(title)
+		if !ok {
 			return
 		}
-		if code, ok := bench.CodeOfTitle(goal.Title); ok {
-			gate.ForceRelease(ctx, code)
+		mu.Lock()
+		if submitted[flag] {
+			mu.Unlock()
+			return
+		}
+		submitted[flag] = true
+		mu.Unlock()
+		res, err := bc.Submit(ctx, code, flag)
+		var ae *bench.APIError
+		switch {
+		case errors.As(err, &ae) && ae.Code == bench.CodeDuplicate:
+			log.Info("bench: fast-lane flag already banked by the agent", "code", code)
+		case err != nil:
+			log.Warn("bench: fast-lane submit failed", "code", code, "err", err)
+		case res.Correct:
+			log.Info("bench: fast-lane FLAG BANKED", "code", code, "progress", fmt.Sprintf("%d/%d", res.CorrectFlagCount, res.TotalFlagCount))
+		default:
+			log.Info("bench: fast-lane submit not correct", "code", code)
 		}
 	}
-	log.Info("bench: step gate armed (slot-paced execute, max concurrent containers)", "max", maxContainers)
 }

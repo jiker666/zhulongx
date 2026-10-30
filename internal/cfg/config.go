@@ -64,6 +64,12 @@ type Runtime struct {
 	// a split made at the moment of least information). Decide enters after
 	// the bootstrap finding lands, with real intel. Empty = legacy behavior.
 	BootstrapStep string `yaml:"bootstrap_step"`
+	// EndgameAfter, when > 0, switches the scheduler to harvest mode once
+	// RunDeadline minus this window remains: goals with banked-but-unfinished
+	// flag progress are scheduled before untouched ones. Completion rate is
+	// won in the tail — a goal that already holds 2 of 4 flags converts a
+	// free slot into score far cheaper than a fresh first pass. 0 disables.
+	EndgameAfter Duration `yaml:"endgame_after"`
 }
 
 // Pi describes how to launch the agent runtime.

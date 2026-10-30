@@ -423,6 +423,27 @@ func (s *Store) OpenStepCount(ctx context.Context, goalID string) (pending, runn
 	return
 }
 
+// RunningGoalIDs returns the ids of every goal that currently has a step in
+// flight. The slot gate uses it to tell "this challenge container is being
+// worked" from "this challenge container is sitting idle on a stopped goal"
+// when deciding what to reap.
+func (s *Store) RunningGoalIDs(ctx context.Context) (map[string]bool, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT goal_id FROM steps WHERE status = 'running'`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = true
+	}
+	return out, rows.Err()
+}
+
 func loadStepForUpdate(tx *sql.Tx, goalID, stepID string) (*fgs.Step, error) {
 	row := tx.QueryRow(`SELECT `+stepCols+` FROM steps WHERE goal_id = ? AND id = ?`, goalID, stepID)
 	return scanStep(row, nil, "")

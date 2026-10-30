@@ -222,6 +222,8 @@ func (e *Engine) finishAnswer(ctx context.Context, log *slog.Logger, goalID, ste
 		e.failStep(ctx, goalID, stepID, "finish failed: "+err.Error(), true)
 		return
 	}
+	e.noteStepFinish(goalID)
+	e.harvestFlags(ctx, goalID, answer.Content)
 	log.Info("execute: step done", "finding", fd.ID, "tools", res.ToolCalls)
 	e.noteRunnerSuccess()
 }
@@ -246,8 +248,18 @@ func (e *Engine) finishPartial(ctx context.Context, log *slog.Logger, goalID, st
 		}
 		return
 	}
+	e.noteStepFinish(goalID)
+	e.harvestFlags(ctx, goalID, res.Text) // the kill can land mid-report, flag and all
 	log.Info("execute: step done with partial finding (deadline salvage)", "finding", fd.ID, "tools", res.ToolCalls)
 	e.noteRunnerSuccess()
+}
+
+// noteStepFinish records when a step last landed, feeding the wall-budget
+// active grace: a goal whose steps keep finishing is mid-flow, not wedged.
+func (e *Engine) noteStepFinish(goalID string) {
+	e.mu.Lock()
+	e.lastFinish[goalID] = e.now()
+	e.mu.Unlock()
 }
 
 // failStep records the failure and the retry decision.

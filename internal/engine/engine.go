@@ -19,6 +19,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
+	"sort"
 	"sync"
 	"time"
 
@@ -59,12 +61,29 @@ type Engine struct {
 	firstClaim map[string]time.Time // goalID → first claimed step time
 	requeues   map[string]int       // title → requeues spent (cap 2)
 
+	// Flag-progress budget refuel: a goal whose challenge banked flags
+	// during the current pass is demonstrably converting slot time into
+	// score — its wall budget refuels instead of expiring (run 42361:
+	// b-01 was killed at 2/4 flags with the third in reach). Capped at two
+	// refuels per goal; the baseline correct-count is captured at first
+	// claim so the refuel only pays on NEW progress.
+	flagBase    map[string]int
+	flagRefills map[string]int
+	// Active grace: a goal whose last step finished within graceWindow of
+	// the wall deadline is mid-flow, not wedged — one +10m extension per
+	// goal (run 42361: c-07's IAC breakthrough died exactly at the bell).
+	graceUsed  map[string]bool
+	lastFinish map[string]time.Time
+
 	// Runner breaker: N consecutive infra failures (launch, process exit,
 	// protocol) open a cooldown during which no steps are claimed and no
 	// Decide rounds run — pending steps wait at zero attempt cost instead of
 	// burning attempts on a dead runtime.
 	failStreak    int
 	cooldownUntil time.Time
+
+	// releaseBackoff paces the container-release retries; tests shorten it.
+	releaseBackoff []time.Duration
 
 	// NoopRescue, when set, fires once per goal at the edge of the noop
 	// guard — the moment the agent has exhausted its own ideas across
@@ -83,12 +102,26 @@ type Engine struct {
 	StepGate func(ctx context.Context, goalID string) bool
 
 	// ReleaseContainer, when set, is asked to close a stopped goal's
-	// challenge container. The immediate pass-2 requeue keeps the title
-	// non-terminal, so the slot gate's reaper will not free the slot —
-	// without this an idle container pins one of three slots until the
-	// pass-2 goal reaches the front of the queue, hours later (run 42176:
-	// a-05 held a slot ~29 min past its budget stop this way).
-	ReleaseContainer func(ctx context.Context, goalID string)
+	// challenge container; a nil return means the platform confirmed the
+	// close (or nothing needed closing). The immediate pass-2 requeue keeps
+	// the title non-terminal, so the slot gate's idle sweep is the backstop
+	// — but the stop-time release is still the fast path, and it retries: a
+	// single failed POST used to pin one of three slots for hours (run
+	// 42361: a-16 2h10m, c-08 1h54m).
+	ReleaseContainer func(ctx context.Context, goalID string) error
+
+	// FlagProgress, when set, reports the platform's cached flag progress
+	// for a goal's title (correct, total). It feeds the wall-budget refuel
+	// and the endgame harvest ordering. ok=false for non-benchmark goals.
+	FlagProgress func(title string) (cur, total int, ok bool)
+
+	// OnFlagCandidate, when set, receives every flag-shaped string the
+	// engine sees land in the graph (execute reports, timeout partials,
+	// decide step declarations). Wire it to the benchmark submit API: a
+	// derived flag must not wait for a future step to carry it — run
+	// 42361's f2-01 had the fully computed flag in a decide round and its
+	// submit step was never scheduled in the 54 remaining minutes.
+	OnFlagCandidate func(ctx context.Context, title, flag string)
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -119,6 +152,13 @@ func New(st *store.Store, c *cfg.Config, log *slog.Logger, factory RunnerFactory
 		now:        time.Now,
 		firstClaim: map[string]time.Time{},
 		requeues:   map[string]int{},
+
+		flagBase:    map[string]int{},
+		flagRefills: map[string]int{},
+		graceUsed:   map[string]bool{},
+		lastFinish:  map[string]time.Time{},
+
+		releaseBackoff: []time.Duration{0, 5 * time.Second, 15 * time.Second, 30 * time.Second},
 	}
 }
 
@@ -216,15 +256,59 @@ func (e *Engine) tick(ctx context.Context) {
 		e.log.Error("list goals", "err", err)
 		return
 	}
+	actives := make([]fgs.Goal, 0, len(goals))
 	for _, g := range goals {
+		if g.Status == fgs.GoalActive {
+			actives = append(actives, g)
+		}
+	}
+	// Endgame harvest: in the final window the scheduler stops being fair.
+	// A goal holding banked-but-unfinished flag progress converts a free
+	// slot into completion far cheaper than a fresh first pass (run 42361:
+	// b-01 died at 2/4 flags while untouched queue-tail goals burned the
+	// last hour). Stable sort — creation order stays the tiebreaker.
+	if e.inEndgame() {
+		rank := e.endgameRank(actives)
+		sort.SliceStable(actives, func(i, j int) bool { return rank[actives[i].ID] > rank[actives[j].ID] })
+	}
+	for _, g := range actives {
 		if ctx.Err() != nil {
 			return
 		}
-		if g.Status != "active" {
-			continue
-		}
 		e.scheduleGoal(ctx, g.ID)
 	}
+}
+
+// inEndgame reports whether the run is inside its final harvest window.
+func (e *Engine) inEndgame() bool {
+	d, w := e.cfg.Runtime.RunDeadline.D(), e.cfg.Runtime.EndgameAfter.D()
+	if d <= 0 || w <= 0 || e.startedAt.IsZero() {
+		return false
+	}
+	return e.now().Sub(e.startedAt) >= d-w
+}
+
+// endgameRank scores goals for the harvest window: partial flag progress
+// first, multi-flag challenges with nothing banked yet second, the rest
+// last.
+func (e *Engine) endgameRank(goals []fgs.Goal) map[string]int {
+	rank := make(map[string]int, len(goals))
+	if e.FlagProgress == nil {
+		return rank
+	}
+	for _, g := range goals {
+		cur, total, ok := e.FlagProgress(g.Title)
+		if !ok {
+			continue
+		}
+		switch {
+		case cur > 0 && cur < total:
+			rank[g.ID] = 3 // banked progress — cheapest conversion in the fleet
+		case total > 1 && cur == 0:
+			rank[g.ID] = 1 // multi-flag challenge, nothing banked yet
+		}
+	}
+	return rank
 }
 
 // requeuePass2 immediately recreates a just-stopped goal for its second
@@ -258,7 +342,7 @@ func (e *Engine) requeuePass2(ctx context.Context, g *fgs.Goal) {
 	}
 	pass := done + 2
 	if _, err := e.store.AddHumanFact(ctx, ng.ID,
-		fmt.Sprintf("此题进入第 %d 遍进攻:前面每一遍的完整过程与结论都已写入 attack/ 目录下本题的 work.md 台账。开局第一动作是读台账(及 attack/notes.md),只做台账里标记为【未测】或【差一步】的假设,严禁从零重扫已排除的方向;若台账显示上一遍按 hint 方向也没走通,先拉下一个 hint 再动手。flag 目标与提交方式不变。", pass),
+		fmt.Sprintf("此题进入第 %d 遍进攻:前面每一遍的完整过程与结论都已写入 attack/ 目录下本题的 work.md 台账。开局第一动作是读台账(及 attack/notes.md),只做台账里标记为【未测】或【差一步】的假设,严禁从零重扫已排除的方向。完成率优先于分值:上一遍没有新 flag 进账(平台 correct_flag_count 未增长),本遍开局第二动作就是拉下一个 hint,按 hint 定向进攻,严禁把 hint 留到\"主攻面穷尽\"才拉。多 flag 题拿到任何一个 flag 立即提交,然后继续下一个攻击面,完成标准是平台 is_completed=true(correct_flag_count=flag_count),拿到一个 flag 绝不等于解完。flag 候选一旦在手,当轮立即提交,不要留到下一轮。", pass),
 		"engine:pass2"); err != nil {
 		e.log.Error("requeue: seed fact", "goal", ng.ID, "err", err)
 	}
@@ -332,10 +416,23 @@ func (e *Engine) scheduleGoal(ctx context.Context, goalID string) {
 		}
 		e.mu.Lock()
 		e.running++
+		firstClaimed := false
 		if _, ok := e.firstClaim[goalID]; !ok {
 			e.firstClaim[goalID] = e.now()
+			firstClaimed = true
 		}
 		e.mu.Unlock()
+		if firstClaimed && e.FlagProgress != nil {
+			// baseline for the flag refuel: what the platform credited
+			// before this pass began
+			if g, err := e.store.GetGoal(ctx, goalID); err == nil {
+				if cur, _, ok := e.FlagProgress(g.Title); ok {
+					e.mu.Lock()
+					e.flagBase[goalID] = cur
+					e.mu.Unlock()
+				}
+			}
+		}
 		e.wg.Add(1)
 		go func(st *stepRef) {
 			defer e.wg.Done()
@@ -380,11 +477,96 @@ func (e *Engine) goalOverBudget(ctx context.Context, goalID string) (bool, strin
 		first, ok := e.firstClaim[goalID]
 		e.mu.Unlock()
 		if ok && e.now().Sub(first) > wb {
-			return true, fmt.Sprintf("wall budget exhausted (%s in flight)", e.now().Sub(first).Round(time.Second))
+			if reason := e.refuelBudget(ctx, goalID, wb); reason != "" {
+				e.log.Info("budget: wall budget extended", "goal", goalID, "reason", reason)
+			} else {
+				return true, fmt.Sprintf("wall budget exhausted (%s in flight)", e.now().Sub(first).Round(time.Second))
+			}
 		}
 	}
 	return false, ""
 }
+
+// refuelBudget gives an expiring wall budget one more lease when the goal
+// has earned it. Two independent earn conditions:
+//
+//   - flag refuel: the challenge banked a NEW correct flag since this pass
+//     began (baseline captured at first claim). Score landing mid-pass is
+//     the hardest progress signal there is; two refuels per goal cap it.
+//   - active grace: the last step finished within graceWindow of the
+//     deadline — the goal is mid-flow (a Decide round between two execute
+//     steps), not wedged. One 10-minute extension per goal.
+//
+// Returns the reason when the deadline was pushed, "" when the budget
+// stays exhausted.
+func (e *Engine) refuelBudget(ctx context.Context, goalID string, wb time.Duration) string {
+	const graceWindow = 3 * time.Minute
+	now := e.now()
+
+	if e.FlagProgress != nil {
+		if g, err := e.store.GetGoal(ctx, goalID); err == nil {
+			if cur, _, ok := e.FlagProgress(g.Title); ok {
+				e.mu.Lock()
+				base := e.flagBase[goalID]
+				refills := e.flagRefills[goalID]
+				e.mu.Unlock()
+				if _, seen := e.flagBase[goalID]; !seen {
+					// first observation — record the baseline, judge later
+					e.mu.Lock()
+					e.flagBase[goalID] = cur
+					e.mu.Unlock()
+				} else if cur > base && refills < 2 {
+					e.mu.Lock()
+					e.flagBase[goalID] = cur
+					e.flagRefills[goalID] = refills + 1
+					e.firstClaim[goalID] = now // fresh full window
+					e.mu.Unlock()
+					return fmt.Sprintf("flag refuel: correct count %d → %d", base, cur)
+				}
+			}
+		}
+	}
+
+	e.mu.Lock()
+	last, finished := e.lastFinish[goalID]
+	graced := e.graceUsed[goalID]
+	e.mu.Unlock()
+	if finished && !graced && now.Sub(last) <= graceWindow {
+		e.mu.Lock()
+		e.graceUsed[goalID] = true
+		e.firstClaim[goalID] = e.firstClaim[goalID].Add(10 * time.Minute)
+		e.mu.Unlock()
+		return "active grace: step landed moments before the deadline"
+	}
+	return ""
+}
+
+// harvestFlags scans text that just landed in the graph for concrete
+// flag-shaped values and hands each to the submit hook. The model derives
+// flags in the strangest places — run 42361's f2-01 computed its full flag
+// inside a DECIDE round's step declaration — so every landing site calls
+// this. Cheap charset guard keeps brief examples (flag{...}, flag{uuid})
+// out.
+func (e *Engine) harvestFlags(ctx context.Context, goalID, text string) {
+	if e.OnFlagCandidate == nil {
+		return
+	}
+	g, err := e.store.GetGoal(ctx, goalID)
+	if err != nil {
+		return
+	}
+	for _, m := range flagPattern.FindAllString(text, 3) {
+		e.wg.Add(1)
+		go func(flag string) {
+			defer e.wg.Done()
+			cctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			e.OnFlagCandidate(cctx, g.Title, flag)
+		}(m)
+	}
+}
+
+var flagPattern = regexp.MustCompile(`(?i)flag\{[0-9a-z_-]{8,80}\}`)
 
 // stopGoalForBudget stops a zombie goal and requeues it for the second
 // pass immediately. Findings stay in the graph; the agent-maintained attack
@@ -404,8 +586,12 @@ func (e *Engine) stopGoalForBudget(ctx context.Context, goalID string, why strin
 }
 
 // releaseStoppedContainer closes the stopped goal's challenge container off
-// the tick path. The requeued pass-2 goal sits at the back of the queue and
-// will not reuse the container for hours; an idle one must not hold a slot.
+// the tick path, with retries. The requeued pass-2 goal sits at the back of
+// the queue and will not reuse the container for hours; an idle one must
+// not hold a slot. A single failed POST used to leak the container for the
+// rest of the run (42361: two leaks ≈ a quarter of the fleet's slot
+// capacity) — the hook's own ForceRelease is one-shot, so the engine
+// retries it. The slot gate's idle sweep remains the backstop.
 func (e *Engine) releaseStoppedContainer(goalID string) {
 	if e.ReleaseContainer == nil {
 		return
@@ -413,9 +599,19 @@ func (e *Engine) releaseStoppedContainer(goalID string) {
 	e.wg.Add(1)
 	go func() {
 		defer e.wg.Done()
-		cctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		e.ReleaseContainer(cctx, goalID)
+		for _, wait := range e.releaseBackoff {
+			if wait > 0 {
+				time.Sleep(wait)
+			}
+			cctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			err := e.ReleaseContainer(cctx, goalID)
+			cancel()
+			if err == nil {
+				return
+			}
+			e.log.Warn("budget: container release failed — retrying", "goal", goalID, "err", err)
+		}
+		e.log.Error("budget: container release failed after all retries", "goal", goalID)
 	}()
 }
 
