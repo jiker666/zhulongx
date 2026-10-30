@@ -342,7 +342,7 @@ func (e *Engine) requeuePass2(ctx context.Context, g *fgs.Goal) {
 	}
 	pass := done + 2
 	if _, err := e.store.AddHumanFact(ctx, ng.ID,
-		fmt.Sprintf("此题进入第 %d 遍进攻:前面每一遍的完整过程与结论都已写入 attack/ 目录下本题的 work.md 台账。开局第一动作是读台账(及 attack/notes.md),只做台账里标记为【未测】或【差一步】的假设,严禁从零重扫已排除的方向。完成率优先于分值:上一遍没有新 flag 进账(平台 correct_flag_count 未增长),本遍开局第二动作就是拉下一个 hint,按 hint 定向进攻,严禁把 hint 留到\"主攻面穷尽\"才拉。多 flag 题拿到任何一个 flag 立即提交,然后继续下一个攻击面,完成标准是平台 is_completed=true(correct_flag_count=flag_count),拿到一个 flag 绝不等于解完。flag 候选一旦在手,当轮立即提交,不要留到下一轮。", pass),
+		fmt.Sprintf("此题进入第 %d 遍进攻:前面每一遍的完整过程与结论都已写入 attack/ 目录下本题的 work.md 台账。开局第一动作是读台账(及 attack/notes.md),只做台账里标记为【未测】或【差一步】的假设,严禁从零重扫已排除的方向。完成率优先于分值:上一遍没有新 flag 进账(平台 correct_flag_count 未增长)且台账主攻面已穷尽时,本遍开局拉下一个 hint 按其定向进攻;此后每条 hint 必须隔≥20 分钟且上一条 hint 指向的方向已打到有结论——没打完上一条 hint 就不许拉下一条,hint 是弹药不是侦察。多 flag 题拿到任何一个 flag 立即提交,然后继续下一个攻击面,完成标准是平台 is_completed=true(correct_flag_count=flag_count),拿到一个 flag 绝不等于解完。flag 候选一旦在手,当轮立即提交,不要留到下一轮。", pass),
 		"engine:pass2"); err != nil {
 		e.log.Error("requeue: seed fact", "goal", ng.ID, "err", err)
 	}
