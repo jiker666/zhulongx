@@ -73,7 +73,27 @@ func (e *Engine) executeStep(ctx context.Context, goalID, stepID string) {
 		runner.Close()
 	}()
 
-	rctx, cancel := context.WithTimeout(hbCtx, e.cfg.Runtime.ExecuteTimeout.D())
+	// A step must not outlive its goal's wall budget. goalOverBudget only
+	// fires between steps (it never races an in-flight step's finish write),
+	// so an uncapped mega-step overruns the budget freely while pinning a
+	// container slot: with ExecuteTimeout 90m > GoalWallBudget 45m, run 42176
+	// saw three goals hold slots 93–110 min. Cap the step at the wall budget
+	// still remaining (+2m grace for terminal writes).
+	timeout := e.cfg.Runtime.ExecuteTimeout.D()
+	if wb := e.cfg.Runtime.GoalWallBudget.D(); wb > 0 {
+		e.mu.Lock()
+		first, ok := e.firstClaim[goalID]
+		e.mu.Unlock()
+		if ok {
+			if capped := first.Add(wb).Sub(e.now()) + 2*time.Minute; capped < timeout {
+				timeout = capped
+			}
+		}
+	}
+	if timeout < time.Minute {
+		timeout = time.Minute
+	}
+	rctx, cancel := context.WithTimeout(hbCtx, timeout)
 	defer cancel()
 	res, err := runner.Prompt(rctx, p)
 

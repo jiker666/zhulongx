@@ -159,6 +159,7 @@ func (e *Engine) countNoop(ctx context.Context, goalID string, openStepsEmpty bo
 			e.log.Error("decide: noop guard stop failed", "goal", goalID, "err", err)
 			return
 		}
+		e.releaseStoppedContainer(goalID)
 		if e.cfg.Runtime.RunDeadline > 0 {
 			// Idealess goals also earn a second pass: with a fresh attack
 			// surface instruction and the on-disk ledger they sometimes crack.

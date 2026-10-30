@@ -354,6 +354,124 @@ func TestRequeueRespectsDeadline(t *testing.T) {
 	}
 }
 
+// deadlineRunner answers the first Prompt (Decide) with a valid steps
+// script, then records the deadline its Execute context carries before
+// timing out at once — proving the wall-budget cap without waiting it out.
+type deadlineRunner struct {
+	calls int
+	mu    sync.Mutex
+	dl    time.Time
+	has   bool
+}
+
+func (d *deadlineRunner) Prompt(ctx context.Context, _ string) (*pi.PromptResult, error) {
+	d.calls++
+	if d.calls == 1 {
+		return &pi.PromptResult{Text: `{"accepted":true,"data":{"steps":[{"from":["f_0001"],"description":"s1"}]}}`}, nil
+	}
+	if dl, ok := ctx.Deadline(); ok {
+		d.mu.Lock()
+		d.dl, d.has = dl, true
+		d.mu.Unlock()
+	}
+	return nil, pi.ErrTimeout
+}
+
+func (d *deadlineRunner) Close() error { return nil }
+
+func TestStepTimeoutCappedByWallBudget(t *testing.T) {
+	// goalOverBudget never fires while a step runs, so the step's own
+	// deadline is the wall budget's only teeth: it must be capped at the
+	// budget remaining (plus the terminal-write grace), not left at the
+	// full ExecuteTimeout (run 42176: 90m mega-steps pinned three slots
+	// 93–110 min against a 45m wall).
+	ctx := context.Background()
+	st, err := store.OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	c := cfg.Default()
+	c.Runtime.TickInterval = cfg.Duration(5 * time.Millisecond)
+	c.Runtime.ExecuteTimeout = cfg.Duration(30 * time.Minute)
+	c.Runtime.GoalWallBudget = cfg.Duration(10 * time.Minute)
+	dr := &deadlineRunner{}
+	e := New(st, c, slog.New(slog.NewTextHandler(&strings.Builder{}, nil)),
+		func() (Runner, error) { return dr, nil })
+	e.now = func() time.Time { return time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC) }
+
+	g, _ := st.CreateGoal(ctx, "cap", "o", "obj")
+	st.AddHumanFact(ctx, g.ID, "seed", "t")
+	e.decide(ctx, g.ID, "initial")
+	e.scheduleGoal(ctx, g.ID) // claims at fake T0, spawns the capped step
+	e.wg.Wait()
+
+	dr.mu.Lock()
+	has, dl := dr.has, dr.dl
+	dr.mu.Unlock()
+	if !has {
+		t.Fatal("execute context must carry a deadline")
+	}
+	if rem := dl.Sub(time.Now()); rem > 13*time.Minute || rem < 9*time.Minute {
+		t.Fatalf("step deadline must be capped at wall budget + grace (~12m), got %s", rem)
+	}
+}
+
+func TestBudgetStopReleasesContainer(t *testing.T) {
+	// Stopping a goal for budget must free its slot at once: the immediate
+	// pass-2 requeue keeps the title non-terminal, so the gate's reaper
+	// alone would not close it (run 42176: a-05's container idled ~29 min
+	// past its stop).
+	ctx := context.Background()
+	e, st, _ := newEngine(t,
+		ok(`{"accepted":true,"data":{"steps":[{"from":["f_0001"],"description":"s1"}]}}`),
+		ok(`{"accepted":true,"data":{"finding":{"content":"done","evidence":"e"}}}`),
+	)
+	e.cfg.Runtime.GoalStepBudget = 1
+	rel := make(chan string, 1)
+	e.ReleaseContainer = func(_ context.Context, goalID string) { rel <- goalID }
+
+	g, _ := st.CreateGoal(ctx, "rel", "o", "obj")
+	st.AddHumanFact(ctx, g.ID, "seed", "t")
+	e.decide(ctx, g.ID, "initial")
+	e.scheduleGoal(ctx, g.ID) // runs the one budgeted step
+	e.wg.Wait()
+	e.scheduleGoal(ctx, g.ID) // step budget exhausted → stop → release
+
+	got, _ := st.GetGoal(ctx, g.ID)
+	if got.Status != fgs.GoalStopped {
+		t.Fatalf("step budget must stop the goal: %s", got.Status)
+	}
+	select {
+	case gid := <-rel:
+		if gid != g.ID {
+			t.Fatalf("release must name the stopped goal: %s", gid)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("budget stop must release the challenge container")
+	}
+}
+
+func TestNoopStopReleasesContainer(t *testing.T) {
+	ctx := context.Background()
+	e, _, _ := newEngine(t, ok(`{}`), ok(`{}`))
+	rel := make(chan string, 1)
+	e.ReleaseContainer = func(_ context.Context, goalID string) { rel <- goalID }
+
+	g, _ := e.store.CreateGoal(ctx, "nooprel", "o", "obj")
+	e.decide(ctx, g.ID, "initial")
+	e.decide(ctx, g.ID, "tick")
+
+	select {
+	case gid := <-rel:
+		if gid != g.ID {
+			t.Fatalf("release must name the stopped goal: %s", gid)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("noop stop must release the challenge container")
+	}
+}
+
 func TestExecuteWaitingSlotDefersStep(t *testing.T) {
 	// A WAITING_SLOT report is scheduling state: the step returns to pending
 	// at zero attempt cost, produces no finding, and stays claimable — the

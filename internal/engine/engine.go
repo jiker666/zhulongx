@@ -75,6 +75,14 @@ type Engine struct {
 	// agent loop to burn turns waiting for one.
 	StepGate func(ctx context.Context, goalID string) bool
 
+	// ReleaseContainer, when set, is asked to close a stopped goal's
+	// challenge container. The immediate pass-2 requeue keeps the title
+	// non-terminal, so the slot gate's reaper will not free the slot —
+	// without this an idle container pins one of three slots until the
+	// pass-2 goal reaches the front of the queue, hours later (run 42176:
+	// a-05 held a slot ~29 min past its budget stop this way).
+	ReleaseContainer func(ctx context.Context, goalID string)
+
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 }
@@ -313,8 +321,25 @@ func (e *Engine) stopGoalForBudget(ctx context.Context, goalID string, why strin
 		e.log.Error("budget stop: set status", "goal", goalID, "err", err)
 		return
 	}
+	e.releaseStoppedContainer(goalID)
 	e.requeuePass2(ctx, g)
 	e.log.Warn("budget: goal stopped, slot released", "goal", goalID, "title", g.Title, "reason", why)
+}
+
+// releaseStoppedContainer closes the stopped goal's challenge container off
+// the tick path. The requeued pass-2 goal sits at the back of the queue and
+// will not reuse the container for hours; an idle one must not hold a slot.
+func (e *Engine) releaseStoppedContainer(goalID string) {
+	if e.ReleaseContainer == nil {
+		return
+	}
+	e.wg.Add(1)
+	go func() {
+		defer e.wg.Done()
+		cctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		e.ReleaseContainer(cctx, goalID)
+	}()
 }
 
 // decideTrigger: run Decide on first sight,

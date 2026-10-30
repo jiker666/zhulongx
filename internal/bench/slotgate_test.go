@@ -130,6 +130,43 @@ func TestSlotGateReapsTerminalGoalContainer(t *testing.T) {
 	}
 }
 
+func TestSlotGateForceReleaseBypassesTerminalScan(t *testing.T) {
+	// A stopped goal whose pass-2 requeue keeps the title non-terminal is
+	// invisible to the reaper; ForceRelease must free the slot anyway —
+	// and skip challenges the platform already credits (no container needed).
+	f := newFixture(t, 2)
+	f.challenges = []Challenge{
+		{UniqueCode: "a-01", ContainerStatus: "available"},
+		{UniqueCode: "a-02", IsCompleted: true, ContainerStatus: "available"},
+	}
+	f.goal(t, "a-01", fgs.GoalStopped)
+	f.goal(t, "a-01", fgs.GoalActive) // pass-2 successor: title is live
+	b := f.goal(t, "a-02", fgs.GoalActive)
+	c := f.goal(t, "a-03", fgs.GoalActive)
+
+	ctx := context.Background()
+	if !f.gate.Allow(ctx, b) {
+		t.Fatal("completed challenge needs no slot")
+	}
+	if f.gate.Allow(ctx, c) {
+		t.Fatal("two running containers saturate the task")
+	}
+	if len(f.closed) != 0 {
+		t.Fatalf("a title with a live successor must not be reaped: %v", f.closed)
+	}
+	f.gate.ForceRelease(ctx, "a-01")
+	if len(f.closed) != 1 || f.closed[0] != "a-01" {
+		t.Fatalf("force release must close the stopped goal's container: %v", f.closed)
+	}
+	f.gate.ForceRelease(ctx, "a-02") // completed → no close
+	if len(f.closed) != 1 {
+		t.Fatalf("completed challenges need no container: %v", f.closed)
+	}
+	if !f.gate.Allow(ctx, c) {
+		t.Fatal("after force release the slot must be free")
+	}
+}
+
 func TestSlotGatePermissiveBeforeFirstPoll(t *testing.T) {
 	f := newFixture(t, 1)
 	f.gate.listOnce = func(context.Context) ([]Challenge, error) {

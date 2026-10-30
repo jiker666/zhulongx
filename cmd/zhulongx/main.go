@@ -568,5 +568,14 @@ func wireStepGate(e *engine.Engine, st *store.Store, log *slog.Logger) {
 	const maxContainers = 3
 	gate := bench.NewSlotGate(st, bc, maxContainers, log)
 	e.StepGate = gate.Allow
+	e.ReleaseContainer = func(ctx context.Context, goalID string) {
+		goal, err := st.GetGoal(ctx, goalID)
+		if err != nil {
+			return
+		}
+		if code, ok := bench.CodeOfTitle(goal.Title); ok {
+			gate.ForceRelease(ctx, code)
+		}
+	}
 	log.Info("bench: step gate armed (slot-paced execute, max concurrent containers)", "max", maxContainers)
 }

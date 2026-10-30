@@ -146,19 +146,33 @@ func (g *SlotGate) refreshLocked(ctx context.Context) []string {
 		}
 	}
 
-	// Terminal goal + running container = a slot held hostage.
-	var reap []string
+	// Terminal goal + running container = a slot held hostage — unless a
+	// successor goal still carries the title: the immediate pass-2 requeue
+	// creates one for every budget/noop stop, it is admitted through
+	// runningLocked, and reaping under it would kill the container pass-2
+	// is actively working. The engine's ReleaseContainer hook frees the
+	// slot at stop time instead; this scan is the backstop for goals with
+	// no successor at all.
 	goals, err := g.st.ListGoals(ctx)
 	if err != nil {
 		g.log.Warn("bench: slot gate reaper scan failed", "err", err)
 		return nil
 	}
+	live := make(map[string]bool, len(goals))
+	for _, gl := range goals {
+		if gl.Status != fgs.GoalCompleted && gl.Status != fgs.GoalStopped {
+			if code2, ok := CodeOfTitle(gl.Title); ok {
+				live[code2] = true
+			}
+		}
+	}
+	var reap []string
 	for _, gl := range goals {
 		if gl.Status != fgs.GoalCompleted && gl.Status != fgs.GoalStopped {
 			continue
 		}
 		code2, ok := CodeOfTitle(gl.Title)
-		if !ok || !isRunning(status[code2]) {
+		if !ok || !isRunning(status[code2]) || live[code2] {
 			continue
 		}
 		reap = append(reap, code2)
@@ -181,6 +195,34 @@ func (g *SlotGate) reap(ctx context.Context, codes []string) {
 		g.mu.Unlock()
 		g.log.Info("bench: slot gate reaped container of terminal goal", "code", code)
 	}
+}
+
+// ForceRelease closes a challenge container now, bypassing the terminal-goal
+// scan. The engine asks for this the moment it stops a goal: the immediate
+// pass-2 requeue keeps the title non-terminal (so the reaper would leave the
+// container holding a slot until the pass-2 goal reaches the queue front,
+// hours later), yet nothing is working the challenge anymore. A challenge
+// the platform already credits needs no container, so it is skipped.
+func (g *SlotGate) ForceRelease(ctx context.Context, code string) {
+	if code == "" {
+		return
+	}
+	g.mu.Lock()
+	completed := g.completed[code]
+	g.mu.Unlock()
+	if completed {
+		return
+	}
+	if err := g.closeCode(ctx, code); err != nil {
+		g.log.Warn("bench: slot gate force release failed", "code", code, "err", err)
+		return
+	}
+	g.mu.Lock()
+	if g.status != nil {
+		g.status[code] = "stopped"
+	}
+	g.mu.Unlock()
+	g.log.Info("bench: slot gate released container of stopped goal", "code", code)
 }
 
 func (g *SlotGate) runningLocked(code string) bool {
