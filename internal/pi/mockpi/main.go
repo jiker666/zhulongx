@@ -89,6 +89,15 @@ func main() {
 			case "no_settled":
 				resp(cmd.ID, "prompt", true, nil, "")
 				continue // never settles
+			case "stream_then_hang":
+				// streams one text delta, then never settles: the deadline
+				// path must salvage the partial text instead of discarding it
+				resp(cmd.ID, "prompt", true, nil, "")
+				emit(map[string]any{
+					"type":                  "message_update",
+					"assistantMessageEvent": map[string]any{"type": "text_delta", "delta": "partial streamed output"},
+				})
+				continue
 			case "exit_late":
 				resp(cmd.ID, "prompt", true, nil, "")
 				time.Sleep(delay)

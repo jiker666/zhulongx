@@ -761,3 +761,181 @@ func TestNoopGuardRescueHint(t *testing.T) {
 		t.Fatalf("goal should stop after the guided round, got %s", got.Status)
 	}
 }
+
+func TestBootstrapDirectAttackSkipsFirstDecide(t *testing.T) {
+	// A brand-new goal with bootstrap_step configured gets an engine-declared
+	// direct-attack step and NO initial Decide round — the first runner turn
+	// is Execute. Decide only enters after the bootstrap finding lands, with
+	// real intel instead of a split made at the moment of least information.
+	ctx := context.Background()
+	e, st, fr := newEngine(t,
+		ok(`{"accepted":true,"data":{"finding":{"content":"direct hit: flag captured","evidence":"e"}}}`),
+		ok(`{"accepted":true,"data":{"findings":{"promote":["fd_0001"],"discard":[]},"complete":{"from":["f_0001"],"description":"objective met"}}}`),
+	)
+	e.cfg.Runtime.BootstrapStep = "direct attack"
+	g, _ := st.CreateGoal(ctx, "boot", "o", "obj")
+
+	e.scheduleGoal(ctx, g.ID) // declares the bootstrap step, claims it, runs it
+	e.wg.Wait()
+	steps, _ := st.ListSteps(ctx, g.ID)
+	if len(steps) != 1 || steps[0].Producer != "engine:bootstrap" || steps[0].Status != fgs.StepDone {
+		t.Fatalf("bootstrap step must be declared by the engine and run first: %+v", steps)
+	}
+
+	e.scheduleGoal(ctx, g.ID) // steps drained → Decide reviews the finding and completes
+	e.wg.Wait()
+	got, _ := st.GetGoal(ctx, g.ID)
+	if got.Status != fgs.GoalCompleted {
+		t.Fatalf("goal should complete after bootstrap finding review: %s", got.Status)
+	}
+	if len(fr.queue) != 0 {
+		t.Fatalf("script must be fully consumed (no Decide-first waste), left: %d", len(fr.queue))
+	}
+}
+
+func TestBootstrapDisabledKeepsDecideFirst(t *testing.T) {
+	ctx := context.Background()
+	e, st, _ := newEngine(t,
+		ok(`{"accepted":true,"data":{"steps":[{"from":["f_0001"],"description":"classic decomposition"}]}}`),
+	)
+	g, _ := st.CreateGoal(ctx, "classic", "o", "obj")
+	st.AddHumanFact(ctx, g.ID, "seed", "t")
+	e.scheduleGoal(ctx, g.ID)
+	e.wg.Wait()
+	steps, _ := st.ListSteps(ctx, g.ID)
+	if len(steps) != 1 || steps[0].Producer != fgs.ActorDecide {
+		t.Fatalf("without bootstrap_step the first step must come from Decide: %+v", steps)
+	}
+}
+
+func TestExecuteTimeoutSalvagesFullReport(t *testing.T) {
+	// The report streamed out just before the deadline: it must finish the
+	// step normally — no failure cycle, no retry attempt burned.
+	ctx := context.Background()
+	e, st, _ := newEngine(t,
+		ok(`{"accepted":true,"data":{"steps":[{"from":["f_0001"],"description":"s"}]}}`),
+		func(string) (*pi.PromptResult, error) {
+			return &pi.PromptResult{
+				Text:      `{"accepted":true,"data":{"finding":{"content":"flag captured at the bell","evidence":"e"}}}`,
+				ToolCalls: 12,
+			}, pi.ErrTimeout
+		},
+	)
+	g, _ := st.CreateGoal(ctx, "salvage", "o", "obj")
+	st.AddHumanFact(ctx, g.ID, "seed", "t")
+	e.decide(ctx, g.ID, "initial")
+	steps, _ := st.ListSteps(ctx, g.ID)
+	st.ClaimNextStep(ctx, g.ID, "zhulongx")
+	e.executeStep(ctx, g.ID, steps[0].ID)
+
+	steps, _ = st.ListSteps(ctx, g.ID)
+	if steps[0].Status != fgs.StepDone || steps[0].Attempts != 1 {
+		t.Fatalf("salvaged report must finish the step on attempt 1: %+v", steps[0])
+	}
+	fds, _ := st.ListFindings(ctx, g.ID, false)
+	if len(fds) != 1 || !strings.Contains(fds[0].Content, "flag captured at the bell") {
+		t.Fatalf("salvaged finding: %+v", fds)
+	}
+}
+
+func TestExecuteTimeoutPartialBecomesFinding(t *testing.T) {
+	// No parseable report before the deadline: the streamed tail becomes a
+	// TIMEOUT_PARTIAL finding and the step is DONE — the partial work enters
+	// the graph and no attempt is burned on a from-zero retry.
+	ctx := context.Background()
+	e, st, _ := newEngine(t,
+		ok(`{"accepted":true,"data":{"steps":[{"from":["f_0001"],"description":"s"}]}}`),
+		func(string) (*pi.PromptResult, error) {
+			return &pi.PromptResult{
+				Text:    "mid-run narrative: got admin session, exfil in progress",
+				Events:  []string{"ev1", "ev2"},
+			}, pi.ErrTimeout
+		},
+	)
+	g, _ := st.CreateGoal(ctx, "partial", "o", "obj")
+	st.AddHumanFact(ctx, g.ID, "seed", "t")
+	e.decide(ctx, g.ID, "initial")
+	steps, _ := st.ListSteps(ctx, g.ID)
+	st.ClaimNextStep(ctx, g.ID, "zhulongx")
+	e.executeStep(ctx, g.ID, steps[0].ID)
+
+	steps, _ = st.ListSteps(ctx, g.ID)
+	if steps[0].Status != fgs.StepDone || steps[0].Attempts != 1 {
+		t.Fatalf("partial salvage must finish (not fail) the step: %+v", steps[0])
+	}
+	fds, _ := st.ListFindings(ctx, g.ID, false)
+	if len(fds) != 1 || !strings.HasPrefix(fds[0].Content, "TIMEOUT_PARTIAL:") || !strings.Contains(fds[0].Content, "admin session") {
+		t.Fatalf("partial finding: %+v", fds)
+	}
+	if !strings.Contains(fds[0].Evidence, "events:") {
+		t.Fatalf("partial finding must carry the event trace: %+v", fds[0])
+	}
+}
+
+func TestDecideTimeoutSalvagesVerdict(t *testing.T) {
+	ctx := context.Background()
+	e, st, _ := newEngine(t,
+		func(string) (*pi.PromptResult, error) {
+			return &pi.PromptResult{Text: `{"accepted":true,"data":{"steps":[{"from":["f_0001"],"description":"late verdict"}]}}`}, pi.ErrTimeout
+		},
+	)
+	g, _ := st.CreateGoal(ctx, "dsalv", "o", "obj")
+	st.AddHumanFact(ctx, g.ID, "seed", "t")
+	e.decide(ctx, g.ID, "initial")
+	steps, _ := st.ListSteps(ctx, g.ID)
+	if len(steps) != 1 || steps[0].Description != "late verdict" {
+		t.Fatalf("salvaged verdict must be applied to the graph: %+v", steps)
+	}
+}
+
+func TestRunnerBreakerPausesClaims(t *testing.T) {
+	// Three consecutive launch failures open the breaker: further ticks must
+	// not claim (attempts stop growing) until the cooldown expires. Without
+	// the breaker every tick burns one attempt on a dead runtime.
+	ctx := context.Background()
+	st, err := store.OpenMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	c := cfg.Default()
+	c.Runtime.TickInterval = cfg.Duration(5 * time.Millisecond)
+	c.Runtime.StepMaxAttempts = 99 // let the breaker, not exhaustion, stop it
+	e := New(st, c, slog.New(slog.NewTextHandler(&strings.Builder{}, nil)),
+		func() (Runner, error) { return nil, errors.New("spawn dead") })
+	g, _ := st.CreateGoal(ctx, "brk", "o", "obj")
+	if _, err := st.CreateStep(ctx, g.ID, "step", nil, fgs.ActorDecide); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 5; i++ {
+		e.scheduleGoal(ctx, g.ID)
+		e.wg.Wait()
+	}
+	steps, _ := st.ListSteps(ctx, g.ID)
+	if steps[0].Attempts != breakerThreshold {
+		t.Fatalf("breaker must stop claims at %d attempts, got %d", breakerThreshold, steps[0].Attempts)
+	}
+	if !e.breakerOpen() {
+		t.Fatal("breaker should be open after 3 consecutive launch failures")
+	}
+}
+
+func TestRunnerBreakerResetsOnSuccess(t *testing.T) {
+	e, _, _ := newEngine(t)
+	e.noteRunnerFailure("test")
+	e.noteRunnerFailure("test")
+	if e.breakerOpen() {
+		t.Fatal("two failures must not open the breaker")
+	}
+	e.noteRunnerSuccess()
+	e.mu.Lock()
+	streak := e.failStreak
+	e.mu.Unlock()
+	if streak != 0 {
+		t.Fatalf("streak must reset on success, got %d", streak)
+	}
+	if e.breakerOpen() {
+		t.Fatal("breaker must stay closed after a success reset")
+	}
+}

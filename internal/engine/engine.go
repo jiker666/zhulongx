@@ -59,6 +59,13 @@ type Engine struct {
 	firstClaim map[string]time.Time // goalID → first claimed step time
 	requeues   map[string]int       // title → requeues spent (cap 2)
 
+	// Runner breaker: N consecutive infra failures (launch, process exit,
+	// protocol) open a cooldown during which no steps are claimed and no
+	// Decide rounds run — pending steps wait at zero attempt cost instead of
+	// burning attempts on a dead runtime.
+	failStreak    int
+	cooldownUntil time.Time
+
 	// NoopRescue, when set, fires once per goal at the edge of the noop
 	// guard — the moment the agent has exhausted its own ideas across
 	// DecideNoopLimit empty rounds. Returning a non-empty hint writes it
@@ -155,6 +162,48 @@ func (e *Engine) Stop() {
 // the whole engine) died mid-flight and its slot is stuck.
 const stepWatchdogTTL = 3 * time.Minute
 
+// breakerThreshold / breakerCooldown: three consecutive infra runner
+// failures (spawn crash, process exit, protocol refusal) pause all claims
+// and Decide rounds briefly — a dead runtime must not eat attempt budgets
+// while steps sit pending (run 42298 class deaths burn one attempt per
+// tick otherwise). Any successful runner turn resets the streak.
+const (
+	breakerThreshold = 3
+	breakerCooldown  = 3 * time.Minute
+)
+
+// noteRunnerFailure counts an infrastructure failure (the runtime is sick,
+// not the model being slow — timeouts never count). Crossing the threshold
+// opens (or, after expiry, re-arms) the cooldown.
+func (e *Engine) noteRunnerFailure(stage string) {
+	e.mu.Lock()
+	e.failStreak++
+	open := e.failStreak >= breakerThreshold && !e.now().Before(e.cooldownUntil)
+	if open {
+		e.cooldownUntil = e.now().Add(breakerCooldown)
+	}
+	e.mu.Unlock()
+	if open {
+		e.log.Warn("engine: runner breaker open — claims paused", "streak", e.failStreak, "cooldown", breakerCooldown.String(), "stage", stage)
+	}
+}
+
+// noteRunnerSuccess resets the failure streak: any completed runner turn
+// proves the runtime is alive.
+func (e *Engine) noteRunnerSuccess() {
+	e.mu.Lock()
+	e.failStreak = 0
+	e.mu.Unlock()
+}
+
+// breakerOpen reports whether the engine is pausing work because the
+// runner infrastructure keeps failing.
+func (e *Engine) breakerOpen() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.now().Before(e.cooldownUntil)
+}
+
 // tick is one scheduling pass over all goals.
 func (e *Engine) tick(ctx context.Context) {
 	if n, err := e.store.ReclaimStaleSteps(ctx, stepWatchdogTTL, e.cfg.Runtime.StepMaxAttempts, "heartbeat lease expired"); err != nil {
@@ -227,10 +276,33 @@ func (e *Engine) scheduleGoal(ctx context.Context, goalID string) {
 		return
 	}
 
+	// Runner breaker: a runtime that keeps dying must not eat attempt
+	// budgets — wait out the cooldown with everything left pending.
+	if e.breakerOpen() {
+		return
+	}
+
 	e.mu.Lock()
 	snap, hasSnap := e.snapshot[goalID]
 	deciding := e.deciding != ""
 	e.mu.Unlock()
+
+	// Bootstrap: a brand-new goal with no steps skips its first Decide
+	// round — the engine itself declares the configured direct-attack step.
+	// Easy objectives then cost one Execute pass instead of the full
+	// Decide→decompose→Execute cycle, and when the direct attack fails its
+	// finding is exactly the intel Decide needs for a good first split.
+	// Requeued pass-2/3 goals are brand-new goals too: their bootstrap step
+	// is a one-shot "read the ledger, attack the flagged hypothesis" pass.
+	if bs := e.cfg.Runtime.BootstrapStep; bs != "" && !hasSnap {
+		if steps, err := e.store.ListSteps(ctx, goalID); err == nil && len(steps) == 0 {
+			if _, err := e.store.CreateStep(ctx, goalID, bs, nil, "engine:bootstrap"); err != nil {
+				e.log.Error("bootstrap: create step", "goal", goalID, "err", err)
+			} else {
+				e.log.Info("bootstrap: direct-attack step declared", "goal", goalID)
+			}
+		}
+	}
 
 	// Decide trigger: first round, graph growth, or drained steps. Decide
 	// is globally serial — one round across all goals at a time.
@@ -356,6 +428,16 @@ func (e *Engine) decideTrigger(ctx context.Context, goalID string, prev store.Sn
 		return false, ""
 	}
 	if !hasPrev {
+		// A goal that already has steps (engine bootstrap or externally
+		// declared) needs no initial round: Decide enters when those steps
+		// drain, with real intel instead of a split made at the moment of
+		// least information.
+		if steps, err := e.store.ListSteps(ctx, goalID); err == nil && len(steps) > 0 {
+			if cur.OpenSteps == 0 {
+				return true, "steps drained"
+			}
+			return false, ""
+		}
 		return true, "initial"
 	}
 	if cur.Facts > prev.Facts {

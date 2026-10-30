@@ -135,18 +135,32 @@ func Start(cfg LaunchConfig) (*Adapter, error) {
 // Prompt sends a prompt and blocks until the agent settles, then fetches
 // the final assistant text. ctx cancellation aborts the run and kills the
 // process after a grace period; a tool-policy violation aborts the same
-// way but preserves its diagnostic message.
+// way but preserves its diagnostic message. On deadline the killed process's
+// partial result (text streamed so far) is returned together with
+// ErrTimeout, so callers can salvage work instead of losing everything.
 func (a *Adapter) Prompt(ctx context.Context, message string) (*PromptResult, error) {
 	res, err := a.prompt(ctx, message)
 	if err != nil {
 		switch {
 		case errors.Is(err, context.DeadlineExceeded):
+			// Deadline salvage: snapshot what the agent streamed before the
+			// deadline — its final report may already be complete, and the
+			// tail still beats nothing. The process is still aborted (the
+			// deadline is hard); callers recover the partial from the result.
+			a.mu.Lock()
+			part := &PromptResult{
+				Disposition: "started",
+				Text:        a.streamText.String(),
+				ToolCalls:   a.toolCalls,
+				Events:      append([]string(nil), a.events...),
+			}
+			a.mu.Unlock()
 			// best-effort graceful abort, then hard kill
 			abortCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			_, _ = a.send(abortCtx, Command{Type: "abort"})
 			cancel()
 			_ = a.Close()
-			return nil, ErrTimeout
+			return part, ErrTimeout
 		case errors.Is(err, ErrPolicyViolation):
 			// the run is poisoned: no graceful drain, kill immediately
 			a.killNow()

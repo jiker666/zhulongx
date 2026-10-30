@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -64,7 +65,11 @@ func (e *Engine) executeStep(ctx context.Context, goalID, stepID string) {
 		<-hbDone
 		fctx, fcancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer fcancel()
-		e.failStep(fctx, goalID, stepID, err.Error(), false)
+		// Launch failures are transient infra (spawn crash / dead gateway):
+		// retryable, with the runner breaker — not the attempt policy — as
+		// the guard against a dead runtime churning through attempts.
+		e.noteRunnerFailure("execute:launch")
+		e.failStep(fctx, goalID, stepID, err.Error(), true)
 		return
 	}
 	defer func() {
@@ -104,6 +109,22 @@ func (e *Engine) executeStep(ctx context.Context, goalID, stepID string) {
 	defer dcancel()
 
 	if err != nil {
+		// Deadline salvage: the adapter returns the agent's streamed text
+		// together with ErrTimeout. A report that landed just before the
+		// deadline finishes the step normally; anything else becomes a
+		// TIMEOUT_PARTIAL finding — the partial work enters the graph, the
+		// step is DONE, and no attempt is burned on a from-zero retry.
+		if errors.Is(err, pi.ErrTimeout) && res != nil {
+			if payload, _ := contract.ExtractJSONObject(res.Text); payload != nil {
+				if answer, verr := contract.ValidateExecute(payload); verr == nil {
+					log.Info("execute: deadline hit after the report — salvaged")
+					e.finishAnswer(dctx, log, goalID, stepID, answer, res)
+					return
+				}
+			}
+			e.finishPartial(dctx, log, goalID, stepID, res)
+			return
+		}
 		retryable := true
 		var msg string
 		switch {
@@ -126,6 +147,9 @@ func (e *Engine) executeStep(ctx context.Context, goalID, stepID string) {
 		}
 		if classifyPermanent(msg) {
 			retryable = false
+		}
+		if errors.Is(err, pi.ErrProcessExit) || errors.Is(err, pi.ErrProtocol) {
+			e.noteRunnerFailure("execute") // infra sick, not model slow
 		}
 		log.Error("execute: runner failed", "err", msg, "retryable", retryable)
 		e.failStep(dctx, goalID, stepID, msg, retryable)
@@ -159,20 +183,28 @@ func (e *Engine) executeStep(ctx context.Context, goalID, stepID string) {
 		}
 	}
 
+	e.finishAnswer(dctx, log, goalID, stepID, answer, res)
+}
+
+// finishAnswer is the shared tail of both execute paths (live report and
+// deadline-salvaged report): WAITING_SLOT deferral, evidence fallback, and
+// the finding write.
+func (e *Engine) finishAnswer(ctx context.Context, log *slog.Logger, goalID, stepID string, answer *contract.ExecuteAnswer, res *pi.PromptResult) {
 	// A WAITING_SLOT report is scheduling state, not work output: return
 	// the step to pending at zero attempt cost — no finding, no Decide
 	// round, no re-declared steps. The gate re-admits the goal when a
 	// container slot actually frees (run 41925: d-02 burned model rounds
 	// narrating waits and never re-entered).
 	if strings.HasPrefix(strings.TrimSpace(answer.Content), "WAITING_SLOT:") {
-		if err := e.store.UnclaimStep(dctx, goalID, stepID, "zhulongx", "waiting for container slot"); err != nil {
+		if err := e.store.UnclaimStep(ctx, goalID, stepID, "zhulongx", "waiting for container slot"); err != nil {
 			if !errors.Is(err, store.ErrClaimLost) {
 				e.log.Error("execute: unclaim write failed", "err", err)
-				e.failStep(dctx, goalID, stepID, "unclaim failed: "+err.Error(), true)
+				e.failStep(ctx, goalID, stepID, "unclaim failed: "+err.Error(), true)
 			}
 			return
 		}
 		e.log.Info("execute: step deferred — no slot yet", "goal", goalID, "step", stepID)
+		e.noteRunnerSuccess()
 		return
 	}
 
@@ -180,17 +212,42 @@ func (e *Engine) executeStep(ctx context.Context, goalID, stepID string) {
 	if evidence == "" && len(res.Events) > 0 {
 		evidence = "events: " + strings.Join(res.Events[:min(8, len(res.Events))], " ⏎ ")
 	}
-	fd, err := e.store.FinishStepWithFinding(dctx, goalID, stepID, "zhulongx", answer.Content, evidence)
+	fd, err := e.store.FinishStepWithFinding(ctx, goalID, stepID, "zhulongx", answer.Content, evidence)
 	if err != nil {
 		if errors.Is(err, store.ErrClaimLost) {
 			log.Warn("execute: claim lost at finish", "err", err)
 			return
 		}
 		log.Error("execute: finish write failed", "err", err)
-		e.failStep(dctx, goalID, stepID, "finish failed: "+err.Error(), true)
+		e.failStep(ctx, goalID, stepID, "finish failed: "+err.Error(), true)
 		return
 	}
 	log.Info("execute: step done", "finding", fd.ID, "tools", res.ToolCalls)
+	e.noteRunnerSuccess()
+}
+
+// finishPartial converts a deadline-killed run into a TIMEOUT_PARTIAL
+// finding: the agent demonstrably worked (its streamed tail and event trace
+// enter the graph for the next Decide round to build on), so the step is
+// DONE — no attempt is burned on a from-zero retry.
+func (e *Engine) finishPartial(ctx context.Context, log *slog.Logger, goalID, stepID string, res *pi.PromptResult) {
+	r := []rune(strings.TrimSpace(res.Text))
+	if len(r) > 400 {
+		r = r[len(r)-400:] // keep the tail — the most recent reasoning
+	}
+	evidence := ""
+	if len(res.Events) > 0 {
+		evidence = "events: " + strings.Join(res.Events[:min(8, len(res.Events))], " ⏎ ")
+	}
+	fd, err := e.store.FinishStepWithFinding(ctx, goalID, stepID, "zhulongx", "TIMEOUT_PARTIAL: "+string(r), evidence)
+	if err != nil {
+		if !errors.Is(err, store.ErrClaimLost) {
+			log.Error("execute: partial write failed", "err", err)
+		}
+		return
+	}
+	log.Info("execute: step done with partial finding (deadline salvage)", "finding", fd.ID, "tools", res.ToolCalls)
+	e.noteRunnerSuccess()
 }
 
 // failStep records the failure and the retry decision.

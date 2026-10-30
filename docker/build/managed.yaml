@@ -13,6 +13,7 @@ runtime:
   goal_step_budget: 6
   goal_wall_budget: 30m
   run_deadline: 350m
+  bootstrap_step: "Bootstrap direct attack: attempt to solve this challenge in ONE pass — read the brief and any existing attack ledger (attack/<题号>/work.md), recon, exploit, capture the flag, submit it, then report. Partial progress is a valid finding too. Only if the challenge clearly needs staged work, sketch the decomposition in your report."
 
 pi:
   command: pi

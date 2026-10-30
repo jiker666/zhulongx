@@ -57,6 +57,13 @@ type Runtime struct {
 	// goals are requeued for a second pass once the whole queue drains,
 	// until the deadline nears. 0 disables requeueing.
 	RunDeadline Duration `yaml:"run_deadline"`
+	// BootstrapStep, when non-empty, becomes the description of an
+	// engine-declared first step on a brand-new goal and the initial Decide
+	// round is skipped: easy objectives are solved by one direct Execute
+	// pass instead of paying the decomposition tax (a model round-trip plus
+	// a split made at the moment of least information). Decide enters after
+	// the bootstrap finding lands, with real intel. Empty = legacy behavior.
+	BootstrapStep string `yaml:"bootstrap_step"`
 }
 
 // Pi describes how to launch the agent runtime.

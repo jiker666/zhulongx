@@ -2,11 +2,13 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	"zhulongx/internal/contract"
 	"zhulongx/internal/fgs"
+	"zhulongx/internal/pi"
 	"zhulongx/internal/prompt"
 )
 
@@ -42,6 +44,7 @@ func (e *Engine) decide(ctx context.Context, goalID, why string) {
 	runner, err := e.launchRunner()
 	if err != nil {
 		e.log.Error("decide: launch runner", "goal", goalID, "err", err)
+		e.noteRunnerFailure("decide:launch")
 		return
 	}
 	defer runner.Close()
@@ -50,9 +53,25 @@ func (e *Engine) decide(ctx context.Context, goalID, why string) {
 	defer cancel()
 	res, err := runner.Prompt(rctx, p)
 	if err != nil {
+		// Deadline salvage: a verdict that streamed out just before the
+		// deadline must not die with the process.
+		if errors.Is(err, pi.ErrTimeout) && res != nil {
+			if payload, _ := contract.ExtractJSONObject(res.Text); payload != nil {
+				if a, verr := contract.ValidateDecide(payload, openStepsEmpty, e.cfg.Runtime.MaxStepsPerDecide); verr == nil {
+				e.log.Info("decide: deadline hit after the verdict — salvaged", "goal", goalID)
+				e.noteRunnerSuccess()
+				e.applyDecide(ctx, goalID, why, a, openStepsEmpty)
+				return
+				}
+			}
+		}
+		if errors.Is(err, pi.ErrProcessExit) || errors.Is(err, pi.ErrProtocol) {
+			e.noteRunnerFailure("decide") // infra sick, not model slow
+		}
 		e.log.Error("decide: runner failed", "goal", goalID, "err", err)
 		return
 	}
+	e.noteRunnerSuccess()
 
 	payload, _ := contract.ExtractJSONObject(res.Text)
 	if payload == nil {
@@ -81,6 +100,13 @@ func (e *Engine) decide(ctx context.Context, goalID, why string) {
 		}
 	}
 
+	e.applyDecide(ctx, goalID, why, answer, openStepsEmpty)
+}
+
+// applyDecide writes a validated verdict into the graph: finding review
+// first (a complete/steps verdict may reference facts that only exist after
+// promotion), then the verdict itself.
+func (e *Engine) applyDecide(ctx context.Context, goalID, why string, answer *contract.DecideAnswer, openStepsEmpty bool) {
 	// Finding review is applied FIRST: a complete/steps verdict may
 	// reference facts that only exist after promotion (e.g. complete.from
 	// names the fact produced by promoting a finding this round), and

@@ -154,6 +154,28 @@ func TestTimeoutCancelsAndKills(t *testing.T) {
 	}
 }
 
+func TestTimeoutReturnsPartialResult(t *testing.T) {
+	// Deadline salvage at the adapter: text streamed before the deadline
+	// comes back WITH ErrTimeout instead of being discarded with the process
+	// (the engine turns it into a TIMEOUT_PARTIAL finding).
+	bin := buildMock(t)
+	a := launch(t, bin, "stream_then_hang")
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	res, err := a.Prompt(ctx, "go")
+	if !errors.Is(err, ErrTimeout) {
+		t.Fatalf("want ErrTimeout, got %v", err)
+	}
+	if res == nil || !strings.Contains(res.Text, "partial streamed output") {
+		t.Fatalf("partial result must carry the streamed text: %+v", res)
+	}
+	select {
+	case <-a.exited:
+	case <-time.After(6 * time.Second):
+		t.Fatal("process not killed after timeout")
+	}
+}
+
 func TestSecondPromptReusesProcess(t *testing.T) {
 	bin := buildMock(t)
 	a := launch(t, bin, "normal")
