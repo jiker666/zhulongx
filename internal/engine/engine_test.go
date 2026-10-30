@@ -265,6 +265,8 @@ func TestGoalStepBudgetStopsAndRequeuesPass2(t *testing.T) {
 		ok(`{"accepted":true,"data":{"finding":{"content":"did s1","evidence":"e"}}}`),
 		ok(`{"accepted":true,"data":{"steps":[{"from":["f_0001"],"description":"p2 step"}]}}`),
 		ok(`{"accepted":true,"data":{"finding":{"content":"did p2","evidence":"e"}}}`),
+		ok(`{"accepted":true,"data":{"steps":[{"from":["f_0001"],"description":"p3 step"}]}}`),
+		ok(`{"accepted":true,"data":{"finding":{"content":"did p3","evidence":"e"}}}`),
 	)
 	e.cfg.Runtime.GoalStepBudget = 1
 	e.cfg.Runtime.RunDeadline = cfg.Duration(time.Hour)
@@ -287,19 +289,29 @@ func TestGoalStepBudgetStopsAndRequeuesPass2(t *testing.T) {
 		t.Fatalf("pass-2 goal missing right after stop: %+v", goals)
 	}
 	facts, _ := st.ListFacts(ctx, goals[1].ID)
-	if len(facts) == 0 || !strings.Contains(facts[len(facts)-1].Content, "第二遍") {
+	if len(facts) == 0 || !strings.Contains(facts[len(facts)-1].Content, "遍进攻") {
 		t.Fatalf("pass-2 seed fact missing: %+v", facts)
 	}
 
-	// Pass-2 goal exhausting its budget must NOT spawn a pass 3.
+	// Pass-2 goal exhausting its budget spawns a pass 3 (the hardest
+	// challenges need three looks), but a pass-3 stop is final.
 	e.decide(ctx, goals[1].ID, "initial")
 	steps2, _ := st.ListSteps(ctx, goals[1].ID)
 	st.ClaimNextStep(ctx, goals[1].ID, "zhulongx")
 	e.executeStep(ctx, goals[1].ID, steps2[0].ID)
 	e.scheduleGoal(ctx, goals[1].ID)
 	goals, _ = st.ListGoals(ctx)
-	if len(goals) != 2 {
-		t.Fatalf("no third pass allowed: %d goals", len(goals))
+	if len(goals) != 3 {
+		t.Fatalf("pass-3 goal missing after pass-2 stop: %d goals", len(goals))
+	}
+	e.decide(ctx, goals[2].ID, "initial")
+	steps3, _ := st.ListSteps(ctx, goals[2].ID)
+	st.ClaimNextStep(ctx, goals[2].ID, "zhulongx")
+	e.executeStep(ctx, goals[2].ID, steps3[0].ID)
+	e.scheduleGoal(ctx, goals[2].ID)
+	goals, _ = st.ListGoals(ctx)
+	if len(goals) != 3 {
+		t.Fatalf("no fourth pass allowed: %d goals", len(goals))
 	}
 }
 

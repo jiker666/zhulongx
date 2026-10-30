@@ -4,7 +4,7 @@ log_level: info
 runtime:
   tick_interval: 2s
   decide_timeout: 15m
-  execute_timeout: 90m
+  execute_timeout: 35m
   max_concurrent_steps: 4
   max_steps_per_decide: 4
   step_max_attempts: 3

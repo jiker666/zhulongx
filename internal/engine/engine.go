@@ -57,7 +57,7 @@ type Engine struct {
 	now        func() time.Time    // injectable clock
 	startedAt  time.Time           // set in Run; RunDeadline counts from here
 	firstClaim map[string]time.Time // goalID → first claimed step time
-	requeued   map[string]bool      // title → already requeued once
+	requeues   map[string]int       // title → requeues spent (cap 2)
 
 	// NoopRescue, when set, fires once per goal at the edge of the noop
 	// guard — the moment the agent has exhausted its own ideas across
@@ -111,7 +111,7 @@ func New(st *store.Store, c *cfg.Config, log *slog.Logger, factory RunnerFactory
 		rescued:    map[string]bool{},
 		now:        time.Now,
 		firstClaim: map[string]time.Time{},
-		requeued:   map[string]bool{},
+		requeues:   map[string]int{},
 	}
 }
 
@@ -186,32 +186,37 @@ func (e *Engine) tick(ctx context.Context) {
 // run — so the requeue must be immediate. One requeue per title; a goal
 // whose second pass also exhausts its budget stays stopped for good.
 func (e *Engine) requeuePass2(ctx context.Context, g *fgs.Goal) {
+	// Up to two requeues: pass-2 continues the ledger, pass-3 is the last
+	// fresh look for challenges that need it (42176: the hardest tier was
+	// still mid-derivation when pass-2 died to infra churn).
+	const maxRequeues = 2
 	if e.cfg.Runtime.RunDeadline <= 0 || ctx.Err() != nil {
 		return
 	}
 	e.mu.Lock()
-	already := e.requeued[g.Title]
+	done := e.requeues[g.Title]
 	e.mu.Unlock()
-	if already {
+	if done >= maxRequeues {
 		return
 	}
 	if e.now().Add(10 * time.Minute).After(e.startedAt.Add(e.cfg.Runtime.RunDeadline.D())) {
-		return // too late for a meaningful second pass
+		return // too late for a meaningful another pass
 	}
 	ng, err := e.store.CreateGoal(ctx, g.Title, g.Origin, g.Objective)
 	if err != nil {
 		e.log.Error("requeue: create goal", "title", g.Title, "err", err)
 		return
 	}
+	pass := done + 2
 	if _, err := e.store.AddHumanFact(ctx, ng.ID,
-		"此题进入第二遍进攻:上一遍的完整过程与结论已写入 attack/ 目录下本题的 work.md 台账。开局第一动作是读台账(及 attack/notes.md),在其结论之上换一个攻击面继续,严禁从零重扫已排除的方向。flag 目标与提交方式不变。",
+		fmt.Sprintf("此题进入第 %d 遍进攻:前面每一遍的完整过程与结论都已写入 attack/ 目录下本题的 work.md 台账。开局第一动作是读台账(及 attack/notes.md),只做台账里标记为【未测】或【差一步】的假设,严禁从零重扫已排除的方向;若台账显示上一遍按 hint 方向也没走通,先拉下一个 hint 再动手。flag 目标与提交方式不变。", pass),
 		"engine:pass2"); err != nil {
 		e.log.Error("requeue: seed fact", "goal", ng.ID, "err", err)
 	}
 	e.mu.Lock()
-	e.requeued[g.Title] = true
+	e.requeues[g.Title] = done + 1
 	e.mu.Unlock()
-	e.log.Info("requeue: goal requeued for a second pass", "title", g.Title, "goal", ng.ID)
+	e.log.Info("requeue: goal requeued for another pass", "title", g.Title, "goal", ng.ID, "pass", pass)
 }
 
 func (e *Engine) scheduleGoal(ctx context.Context, goalID string) {
