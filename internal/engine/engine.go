@@ -262,6 +262,21 @@ func (e *Engine) tick(ctx context.Context) {
 			actives = append(actives, g)
 		}
 	}
+	// First-touch fairness (pre-endgame): a goal the run has never claimed
+	// a step for is visited ahead of every goal already worked, so a
+	// refueled siege cannot starve the queue tail (run 42416: b-01 held
+	// slots across three passes for 147 minutes while e3-02 — created at
+	// t+0 — first saw a container at t+358, past the deadline, for a
+	// 30-second window). Creation order stays the tiebreaker.
+	if !e.inEndgame() {
+		sort.SliceStable(actives, func(i, j int) bool {
+			ci, cj := e.claimedOnce(actives[i].ID), e.claimedOnce(actives[j].ID)
+			if ci != cj {
+				return !ci
+			}
+			return false
+		})
+	}
 	// Endgame harvest: in the final window the scheduler stops being fair.
 	// A goal holding banked-but-unfinished flag progress converts a free
 	// slot into completion far cheaper than a fresh first pass (run 42361:
@@ -277,6 +292,15 @@ func (e *Engine) tick(ctx context.Context) {
 		}
 		e.scheduleGoal(ctx, g.ID)
 	}
+}
+
+// claimedOnce reports whether the run has ever claimed a step for the
+// goal — the first-touch fairness signal.
+func (e *Engine) claimedOnce(goalID string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	_, ok := e.firstClaim[goalID]
+	return ok
 }
 
 // inEndgame reports whether the run is inside its final harvest window.

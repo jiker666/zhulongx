@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -1117,4 +1118,35 @@ func TestEndgameRankPrefersPartialFlagProgress(t *testing.T) {
 		t.Fatalf("partial-flag > untouched multi-flag > plain: %v", rank)
 	}
 	_ = ctx
+}
+
+func TestNeverStartedGoalsSortAheadOfWorkedGoals(t *testing.T) {
+	// Run 42416: refueled sieges (b-01, 147 slot-minutes) starved the
+	// queue tail — e3-02 first saw a container past the deadline. Pre-
+	// endgame ticks must visit never-claimed goals first so a freed slot
+	// reaches the tail before another pass on a worked goal.
+	ctx := context.Background()
+	e, st, _ := newEngine(t, ok(`{}`))
+	fake := time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)
+	e.now = func() time.Time { return fake }
+
+	touched, _ := st.CreateGoal(ctx, "b-01", "o", "obj")
+	fresh, _ := st.CreateGoal(ctx, "e3-02", "o", "obj")
+	e.mu.Lock()
+	e.firstClaim[touched.ID] = fake // b-01 already had its pass
+	e.mu.Unlock()
+
+	actives := []fgs.Goal{{ID: touched.ID}, {ID: fresh.ID}}
+	if !e.inEndgame() {
+		sort.SliceStable(actives, func(i, j int) bool {
+			ci, cj := e.claimedOnce(actives[i].ID), e.claimedOnce(actives[j].ID)
+			if ci != cj {
+				return !ci
+			}
+			return false
+		})
+	}
+	if actives[0].ID != fresh.ID {
+		t.Fatalf("never-started goal must be visited first: got %s", actives[0].ID)
+	}
 }
