@@ -245,3 +245,39 @@ func TestSlotGateProgressReportsFlagCounts(t *testing.T) {
 		t.Fatal("unknown codes must report ok=false")
 	}
 }
+
+func TestSlotGateRefreshSeesCloseDespiteStaleCache(t *testing.T) {
+	// Run 42778: c-08's banked value went out 7s after its container close
+	// because Submittable read a snapshot from before the close. A forced
+	// Refresh must observe the close even when pollTTL has not elapsed.
+	f := newFixture(t, 1)
+	f.challenges = []Challenge{{UniqueCode: "a-01", ContainerStatus: "running", FlagCount: 1}}
+	a := f.goal(t, "a-01", fgs.GoalActive)
+	f.gate.Allow(context.Background(), a) // first poll: running
+
+	f.now = f.now.Add(2 * time.Second) // inside pollTTL: a plain poll would reuse the cache
+	f.challenges = []Challenge{{UniqueCode: "a-01", ContainerStatus: "stopped", FlagCount: 1}}
+	f.gate.Refresh(context.Background())
+	if f.gate.Submittable("a-01") {
+		t.Fatal("Refresh must bypass pollTTL and observe the close before a one-shot submit fires")
+	}
+}
+
+func TestSlotGateOnSnapshotFiresAfterRefresh(t *testing.T) {
+	f := newFixture(t, 1)
+	f.challenges = []Challenge{{UniqueCode: "a-01", ContainerStatus: "running", FlagCount: 1}}
+	a := f.goal(t, "a-01", fgs.GoalActive)
+
+	fired := 0
+	f.gate.OnSnapshot(func(context.Context) { fired++ })
+	f.gate.Allow(context.Background(), a) // first poll
+	if fired < 1 {
+		t.Fatal("a successful refresh must fire the on-snapshot callback (fast-lane pending pump)")
+	}
+	before := fired
+	f.now = f.now.Add(9 * time.Second) // past pollTTL
+	f.gate.Allow(context.Background(), a)
+	if fired <= before {
+		t.Fatal("each stale-expired Allow must re-poll and re-fire the callback")
+	}
+}

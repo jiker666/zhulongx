@@ -49,6 +49,8 @@ type SlotGate struct {
 	total      map[string]int    // code -> flag_count
 	reserved   map[string]time.Time
 	lastWork   map[string]time.Time // code -> last time a running step used its container
+
+	onSnapshot func(ctx context.Context) // optional: fired after each successful refresh (fast-lane pending flush)
 }
 
 // NewSlotGate builds a gate for at most maxSlots concurrent containers.
@@ -93,6 +95,12 @@ func (g *SlotGate) Progress(code string) (cur, total int, ok bool) {
 // a previously banked value scores as WRONG (run 42416: the flag fast lane
 // re-submitted the agent's own banked flag 7 seconds after its close), and a
 // completed challenge needs nothing.
+//
+// Submittable reads the cached snapshot and never refreshes — callers about
+// to fire a one-shot submit must Refresh first or they may act on a snapshot
+// that predates a close (run 42778: c-08's banked value went out 7s after
+// its close anyway, straight through this gate, because the cache was 8s
+// stale and nothing forced a poll).
 func (g *SlotGate) Submittable(code string) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -103,6 +111,26 @@ func (g *SlotGate) Submittable(code string) bool {
 		return false
 	}
 	return isRunning(g.status[code])
+}
+
+// Refresh forces one platform snapshot poll now, bypassing pollTTL, so a
+// caller making an irreversible decision (flag submission) judges container
+// state as of now instead of as of the last Allow-driven poll.
+func (g *SlotGate) Refresh(ctx context.Context) {
+	g.mu.Lock()
+	g.lastPoll = time.Time{} // zero forces refreshLocked to poll
+	reap := g.refreshLocked(ctx)
+	g.mu.Unlock()
+	g.reap(ctx, reap)
+}
+
+// OnSnapshot registers a callback fired after each successful platform
+// snapshot refresh (after reap, outside g.mu). The fast lane uses it to
+// flush deferred flags the moment their containers come back live.
+func (g *SlotGate) OnSnapshot(cb func(ctx context.Context)) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.onSnapshot = cb
 }
 
 // Allow reports whether the goal may claim an Execute step right now.
@@ -265,7 +293,8 @@ func (g *SlotGate) refreshLocked(ctx context.Context) []string {
 }
 
 // reap closes containers the sweep found idle (outside g.mu — Close is a
-// network call).
+// network call), then fires the on-snapshot callback so dependents on the
+// fresh platform state (the fast lane's deferred flags) can act.
 func (g *SlotGate) reap(ctx context.Context, codes []string) {
 	for _, code := range codes {
 		if err := g.closeCode(ctx, code); err != nil {
@@ -278,6 +307,12 @@ func (g *SlotGate) reap(ctx context.Context, codes []string) {
 		}
 		g.mu.Unlock()
 		g.log.Info("bench: slot gate swept idle container", "code", code)
+	}
+	g.mu.Lock()
+	cb := g.onSnapshot
+	g.mu.Unlock()
+	if cb != nil {
+		cb(ctx)
 	}
 }
 

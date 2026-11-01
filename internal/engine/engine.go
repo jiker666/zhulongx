@@ -59,6 +59,7 @@ type Engine struct {
 	now        func() time.Time    // injectable clock
 	startedAt  time.Time           // set in Run; RunDeadline counts from here
 	firstClaim map[string]time.Time // goalID → first claimed step time
+	firstTouch map[string]bool      // title → any goal with this title has claimed a step (first-touch fairness signal)
 	requeues   map[string]int       // title → requeues spent (cap 2)
 
 	// Flag-progress budget refuel: a goal whose challenge banked flags
@@ -151,6 +152,7 @@ func New(st *store.Store, c *cfg.Config, log *slog.Logger, factory RunnerFactory
 		rescued:    map[string]bool{},
 		now:        time.Now,
 		firstClaim: map[string]time.Time{},
+		firstTouch: map[string]bool{},
 		requeues:   map[string]int{},
 
 		flagBase:    map[string]int{},
@@ -262,17 +264,22 @@ func (e *Engine) tick(ctx context.Context) {
 			actives = append(actives, g)
 		}
 	}
-	// First-touch fairness (pre-endgame): a goal the run has never claimed
-	// a step for is visited ahead of every goal already worked, so a
-	// refueled siege cannot starve the queue tail (run 42416: b-01 held
-	// slots across three passes for 147 minutes while e3-02 — created at
-	// t+0 — first saw a container at t+358, past the deadline, for a
-	// 30-second window). Creation order stays the tiebreaker.
+	// First-touch fairness (pre-endgame): a goal whose TITLE the run has
+	// never claimed a step for is visited ahead of every title already
+	// worked, so a refueled siege cannot starve the queue tail (run 42416:
+	// b-01 held slots across three passes for 147 minutes while e3-02 —
+	// created at t+0 — first saw a container at t+358, past the deadline,
+	// for a 30-second window). The signal is TITLE-keyed, not ID-keyged:
+	// requeuePass2 mints a fresh goal ID per retry pass, so an ID-keyed
+	// lookup let every requeued dud (run 42778: f2-01 pass-2 relaunched at
+	// t+59 while ~50 titles had never seen a container) front-run the
+	// untouched tail the sort exists to protect. Creation order stays the
+	// tiebreaker.
 	if !e.inEndgame() {
 		sort.SliceStable(actives, func(i, j int) bool {
-			ci, cj := e.claimedOnce(actives[i].ID), e.claimedOnce(actives[j].ID)
-			if ci != cj {
-				return !ci
+			ti, tj := e.titleTouched(actives[i].Title), e.titleTouched(actives[j].Title)
+			if ti != tj {
+				return !ti
 			}
 			return false
 		})
@@ -294,13 +301,15 @@ func (e *Engine) tick(ctx context.Context) {
 	}
 }
 
-// claimedOnce reports whether the run has ever claimed a step for the
-// goal — the first-touch fairness signal.
-func (e *Engine) claimedOnce(goalID string) bool {
+// titleTouched reports whether any goal with this title — this pass or a
+// requeued earlier one — has ever claimed a step. Keyed by title, not goal
+// ID: requeuePass2 mints a fresh ID per pass, so an ID-keyed lookup would
+// let every retry pass front-run the untouched tail it exists to defer
+// (run 42778: f2-01 pass-2 outranked ~50 never-started titles).
+func (e *Engine) titleTouched(title string) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	_, ok := e.firstClaim[goalID]
-	return ok
+	return e.firstTouch[title]
 }
 
 // inEndgame reports whether the run is inside its final harvest window.
@@ -336,12 +345,14 @@ func (e *Engine) endgameRank(goals []fgs.Goal) map[string]int {
 }
 
 // requeuePass2 immediately recreates a just-stopped goal for its second
-// pass. The pass-2 goal lands at the BACK of the scheduling queue
-// (creation order), so untouched first-pass challenges keep priority and
-// retries fill the remaining time. Run 41925 proved a drain-gated requeue
-// never fires on a 63-challenge queue — the first pass alone outlives the
-// run — so the requeue must be immediate. One requeue per title; a goal
-// whose second pass also exhausts its budget stays stopped for good.
+// pass. The pass-2 goal must yield to untouched first-pass challenges in
+// the pre-endgame first-touch sort — it gets that by marking its title
+// touched at creation (an ID-keyed fairness signal would see a fresh ID and
+// front-run the tail; run 42778 did exactly that). Run 41925 proved a
+// drain-gated requeue never fires on a 63-challenge queue — the first pass
+// alone outlives the run — so the requeue must be immediate. One requeue
+// per title; a goal whose second pass also exhausts its budget stays
+// stopped for good.
 func (e *Engine) requeuePass2(ctx context.Context, g *fgs.Goal) {
 	// Up to two requeues: pass-2 continues the ledger, pass-3 is the last
 	// fresh look for challenges that need it (42176: the hardest tier was
@@ -372,6 +383,10 @@ func (e *Engine) requeuePass2(ctx context.Context, g *fgs.Goal) {
 	}
 	e.mu.Lock()
 	e.requeues[g.Title] = done + 1
+	// A retry pass is not a first touch: the title has already had its
+	// turn, so the fresh goal ID must not front-run untouched titles in
+	// the first-touch sort (run 42778: f2-01 pass-2 did exactly that).
+	e.firstTouch[g.Title] = true
 	e.mu.Unlock()
 	e.log.Info("requeue: goal requeued for another pass", "title", g.Title, "goal", ng.ID, "pass", pass)
 }
@@ -446,14 +461,20 @@ func (e *Engine) scheduleGoal(ctx context.Context, goalID string) {
 			firstClaimed = true
 		}
 		e.mu.Unlock()
-		if firstClaimed && e.FlagProgress != nil {
-			// baseline for the flag refuel: what the platform credited
-			// before this pass began
+		if firstClaimed {
+			// Record the title for first-touch fairness, and capture the
+			// flag baseline for the budget refuel: what the platform
+			// credited before this pass began.
 			if g, err := e.store.GetGoal(ctx, goalID); err == nil {
-				if cur, _, ok := e.FlagProgress(g.Title); ok {
-					e.mu.Lock()
-					e.flagBase[goalID] = cur
-					e.mu.Unlock()
+				e.mu.Lock()
+				e.firstTouch[g.Title] = true
+				e.mu.Unlock()
+				if e.FlagProgress != nil {
+					if cur, _, ok := e.FlagProgress(g.Title); ok {
+						e.mu.Lock()
+						e.flagBase[goalID] = cur
+						e.mu.Unlock()
+					}
 				}
 			}
 		}

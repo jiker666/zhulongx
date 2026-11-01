@@ -1123,7 +1123,7 @@ func TestEndgameRankPrefersPartialFlagProgress(t *testing.T) {
 func TestNeverStartedGoalsSortAheadOfWorkedGoals(t *testing.T) {
 	// Run 42416: refueled sieges (b-01, 147 slot-minutes) starved the
 	// queue tail — e3-02 first saw a container past the deadline. Pre-
-	// endgame ticks must visit never-claimed goals first so a freed slot
+	// endgame ticks must visit never-claimed titles first so a freed slot
 	// reaches the tail before another pass on a worked goal.
 	ctx := context.Background()
 	e, st, _ := newEngine(t, ok(`{}`))
@@ -1132,21 +1132,69 @@ func TestNeverStartedGoalsSortAheadOfWorkedGoals(t *testing.T) {
 
 	touched, _ := st.CreateGoal(ctx, "b-01", "o", "obj")
 	fresh, _ := st.CreateGoal(ctx, "e3-02", "o", "obj")
+	pass2, _ := st.CreateGoal(ctx, "f2-01", "o", "obj") // requeuePass2 minted this ID after f2-01's first pass
 	e.mu.Lock()
 	e.firstClaim[touched.ID] = fake // b-01 already had its pass
+	e.firstTouch[touched.Title] = true
+	e.firstTouch[pass2.Title] = true // requeuePass2 marks the title touched at creation
 	e.mu.Unlock()
 
-	actives := []fgs.Goal{{ID: touched.ID}, {ID: fresh.ID}}
+	actives := []fgs.Goal{{ID: touched.ID, Title: touched.Title}, {ID: pass2.ID, Title: pass2.Title}, {ID: fresh.ID, Title: fresh.Title}}
 	if !e.inEndgame() {
 		sort.SliceStable(actives, func(i, j int) bool {
-			ci, cj := e.claimedOnce(actives[i].ID), e.claimedOnce(actives[j].ID)
-			if ci != cj {
-				return !ci
+			ti, tj := e.titleTouched(actives[i].Title), e.titleTouched(actives[j].Title)
+			if ti != tj {
+				return !ti
 			}
 			return false
 		})
 	}
 	if actives[0].ID != fresh.ID {
 		t.Fatalf("never-started goal must be visited first: got %s", actives[0].ID)
+	}
+}
+
+func TestRequeuedPassDoesNotFrontRunUntouchedTitles(t *testing.T) {
+	// Run 42778: first-touch fairness was keyed by goal ID, and
+	// requeuePass2 mints a fresh ID per retry pass — so f2-01's pass-2
+	// (relaunched t+59 after 32 fruitless minutes) counted as "never
+	// claimed" and outranked ~50 titles that had never seen a container.
+	// The fairness signal must be title-keyed, and requeuePass2 must mark
+	// the title touched at creation.
+	ctx := context.Background()
+	e, st, _ := newEngine(t, ok(`{}`))
+	fake := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	e.now = func() time.Time { return fake }
+	e.startedAt = fake.Add(-1 * time.Hour)
+	e.cfg.Runtime.RunDeadline = cfg.Duration(6 * time.Hour)
+
+	dudPass1, _ := st.CreateGoal(ctx, "f2-01", "o", "obj") // burned its full wall budget, no flag
+	dudPass2, _ := st.CreateGoal(ctx, "f2-01", "o", "obj") // requeuePass2's fresh goal
+	untouched, _ := st.CreateGoal(ctx, "a-06", "o", "obj")
+
+	// pass-1 claimed steps; pass-2 was just created by requeuePass2, which
+	// marks the title touched (the fix under test).
+	e.mu.Lock()
+	e.firstClaim[dudPass1.ID] = fake.Add(-30 * time.Minute)
+	e.mu.Unlock()
+	e.requeuePass2(ctx, dudPass1) // creates pass-2 + marks title touched
+
+	e.mu.Lock()
+	touched := e.firstTouch["f2-01"]
+	e.mu.Unlock()
+	if !touched {
+		t.Fatal("requeuePass2 must mark the title touched so the retry cannot front-run")
+	}
+
+	actives := []fgs.Goal{{ID: dudPass2.ID, Title: dudPass2.Title}, {ID: untouched.ID, Title: untouched.Title}}
+	sort.SliceStable(actives, func(i, j int) bool {
+		ti, tj := e.titleTouched(actives[i].Title), e.titleTouched(actives[j].Title)
+		if ti != tj {
+			return !ti
+		}
+		return false
+	})
+	if actives[0].ID != untouched.ID {
+		t.Fatalf("untouched title must outrank a requeued pass: got %s", actives[0].ID)
 	}
 }

@@ -599,28 +599,21 @@ func wireStepGate(e *engine.Engine, st *store.Store, log *slog.Logger) {
 // flag sat unsubmitted for the run's final 54 minutes). Duplicates are
 // answered by the platform anyway (409 duplicate), but not asking twice
 // keeps the submit log honest.
+//
+// A value that lands while its challenge has no live container is DEFERRED,
+// not dropped and not fired blind: the platform judges a submission against
+// the current instance, so a submit against a stopped container scores
+// wrong (run 42416: the agent's own banked value, 7s after close), but the
+// value itself must survive until the container is live again (run 42778's
+// first cut of this gate marked the value submitted BEFORE deciding, so a
+// deferred flag was lost forever). Deferred values flush on every fresh
+// gate snapshot and on every later candidate arrival.
 func wireFlagFastLane(e *engine.Engine, bc *bench.Client, gate *bench.SlotGate, log *slog.Logger) {
 	var mu sync.Mutex
 	submitted := map[string]bool{}
-	e.OnFlagCandidate = func(ctx context.Context, title, flag string) {
-		code, ok := bench.CodeOfTitle(title)
-		if !ok {
-			return
-		}
-		mu.Lock()
-		if submitted[flag] {
-			mu.Unlock()
-			return
-		}
-		submitted[flag] = true
-		mu.Unlock()
-		// Post-close re-submission of the agent's own banked flag scores as
-		// wrong (the platform re-evaluates against the closed instance), so
-		// only fire while the container is live and the challenge unfinished.
-		if !gate.Submittable(code) {
-			log.Info("bench: fast-lane skips closed/finished challenge", "code", code)
-			return
-		}
+	pending := map[string]map[string]bool{} // code → values deferred while no container was live
+
+	submit := func(ctx context.Context, code, flag string) {
 		res, err := bc.Submit(ctx, code, flag)
 		var ae *bench.APIError
 		switch {
@@ -634,4 +627,77 @@ func wireFlagFastLane(e *engine.Engine, bc *bench.Client, gate *bench.SlotGate, 
 			log.Info("bench: fast-lane submit not correct", "code", code)
 		}
 	}
+
+	// flushPending drains every pending value whose challenge is now
+	// submittable. Codes are snapshotted first and skipped — never
+	// re-scanned — when still not submittable: a re-scan loop re-selects
+	// the same deferred entry forever and livelocks the pump (caught as a
+	// 10-minute test timeout while the only pending code could never go
+	// live).
+	flushPending := func(ctx context.Context) {
+		mu.Lock()
+		codes := make([]string, 0, len(pending))
+		for c := range pending {
+			codes = append(codes, c)
+		}
+		mu.Unlock()
+		for _, code := range codes {
+			for {
+				if !gate.Submittable(code) {
+					break // stays deferred until a later snapshot
+				}
+				mu.Lock()
+				var flag string
+				for f := range pending[code] {
+					flag = f
+					break
+				}
+				if flag == "" {
+					mu.Unlock()
+					break
+				}
+				delete(pending[code], flag)
+				if len(pending[code]) == 0 {
+					delete(pending, code)
+				}
+				submitted[flag] = true
+				mu.Unlock()
+				submit(ctx, code, flag)
+			}
+		}
+	}
+
+	e.OnFlagCandidate = func(ctx context.Context, title, flag string) {
+		code, ok := bench.CodeOfTitle(title)
+		if !ok {
+			return
+		}
+		flushPending(ctx) // every arrival pumps the deferred queue
+		mu.Lock()
+		if submitted[flag] {
+			mu.Unlock()
+			return
+		}
+		mu.Unlock()
+		// Decide on a live snapshot: the cached one may predate a close by
+		// up to pollTTL, and Submittable never refreshes on its own.
+		gate.Refresh(ctx)
+		if !gate.Submittable(code) {
+			mu.Lock()
+			if pending[code] == nil {
+				pending[code] = map[string]bool{}
+			}
+			pending[code][flag] = true
+			mu.Unlock()
+			log.Info("bench: fast-lane defers flag until its container is live", "code", code)
+			return
+		}
+		mu.Lock()
+		submitted[flag] = true
+		mu.Unlock()
+		submit(ctx, code, flag)
+	}
+
+	// Fresh snapshots (engine ticks poll the platform) pump deferred flags.
+	gate.OnSnapshot(func(ctx context.Context) { flushPending(ctx) })
 }
