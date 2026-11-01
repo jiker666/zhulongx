@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -82,6 +83,40 @@ func goalByTitle(t *testing.T, st *store.Store, title string) *fgs.Goal {
 	}
 	t.Fatalf("goal %q not found", title)
 	return nil
+}
+
+func TestImportQueuesLowLevelsFirst(t *testing.T) {
+	st := openStore(t)
+	// Platform returns a hard grinder first; the queue must open with the
+	// easy title so slots free fast, and a priority code still jumps ahead.
+	p := newPlatformStub(t, `[
+	 {"unique_code":"hard_1","description":"h","difficulty":"hard","level":3,
+	  "total_score":300,"flag_count":1,"correct_flag_count":0,"is_completed":false,
+	  "container_status":"stopped","container_addr":[]},
+	 {"unique_code":"easy_1","description":"e","difficulty":"easy","level":1,
+	  "total_score":100,"flag_count":1,"correct_flag_count":0,"is_completed":false,
+	  "container_status":"stopped","container_addr":[]},
+	 {"unique_code":"mid_1","description":"m","difficulty":"medium","level":2,
+	  "total_score":200,"flag_count":1,"correct_flag_count":0,"is_completed":false,
+	  "container_status":"stopped","container_addr":[]}
+	]`)
+	if _, err := Import(context.Background(), st, client(t, p.srv.URL), []string{"hard_1"}); err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	goals, err := st.ListGoals(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Slice(goals, func(i, j int) bool { return goals[i].ID < goals[j].ID })
+	want := []string{"bench:hard_1", "bench:easy_1", "bench:mid_1"}
+	if len(goals) != len(want) {
+		t.Fatalf("want %d goals, got %d", len(want), len(goals))
+	}
+	for i, w := range want {
+		if goals[i].Title != w {
+			t.Errorf("goal %d = %s; want %s (creation order = schedule order)", i, goals[i].Title, w)
+		}
+	}
 }
 
 func TestImportCreatesGoalsWithBriefAndIsIdempotent(t *testing.T) {

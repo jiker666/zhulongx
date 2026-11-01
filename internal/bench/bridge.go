@@ -201,6 +201,12 @@ func sortByPriority(challenges []Challenge, priority []string) []Challenge {
 		}
 	}
 	sort.SliceStable(head, func(i, j int) bool { return rank[head[i].UniqueCode] < rank[head[j].UniqueCode] })
+	// Non-priority titles queue by the platform's own difficulty ordinal
+	// ascending (stable, platform order within a level): easy titles open
+	// first and free slots in minutes, so long sieges start with the slot
+	// budget intact instead of behind three grinders. Difficulty is live
+	// platform metadata applied uniformly — no per-challenge history.
+	sort.SliceStable(tail, func(i, j int) bool { return tail[i].Level < tail[j].Level })
 	return append(head, tail...)
 }
 
