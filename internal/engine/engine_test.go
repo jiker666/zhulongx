@@ -1198,3 +1198,47 @@ func TestRequeuedPassDoesNotFrontRunUntouchedTitles(t *testing.T) {
 		t.Fatalf("untouched title must outrank a requeued pass: got %s", actives[0].ID)
 	}
 }
+
+func TestZeroProgressTitleEarnsSingleRequeue(t *testing.T) {
+	// Run 42416/42778 economics: a title with zero banked flags re-buys
+	// recon its ledger already ruled out — c-03/a-05 burned 60m slots each,
+	// f2-01 took a second 36m helping with three wrong submits. Zero
+	// progress earns ONE requeue; banked progress keeps both retries
+	// (42361: b-01 died at 2/4 with the third flag in reach).
+	ctx := context.Background()
+	e, st, _ := newEngine(t, ok(`{}`))
+	e.cfg.Runtime.RunDeadline = cfg.Duration(6 * time.Hour)
+	e.startedAt = e.now()
+	correct := 0
+	e.FlagProgress = func(string) (int, int, bool) { return correct, 4, true }
+
+	dud, _ := st.CreateGoal(ctx, "bench:c-03", "o", "obj")
+	e.requeuePass2(ctx, dud)
+	e.requeuePass2(ctx, dud) // zero progress: the second requeue must be refused
+	n := 0
+	goals, _ := st.ListGoals(ctx)
+	for _, g := range goals {
+		if g.Title == "bench:c-03" {
+			n++
+		}
+	}
+	if n != 2 { // original + ONE requeue
+		t.Fatalf("zero-progress title must earn exactly one requeue, got %d goals", n)
+	}
+
+	// A title with banked flags keeps the second retry.
+	milker, _ := st.CreateGoal(ctx, "bench:b-01", "o", "obj")
+	correct = 2
+	e.requeuePass2(ctx, milker)
+	e.requeuePass2(ctx, milker)
+	n = 0
+	goals, _ = st.ListGoals(ctx)
+	for _, g := range goals {
+		if g.Title == "bench:b-01" {
+			n++
+		}
+	}
+	if n != 3 { // original + two requeues
+		t.Fatalf("banked-progress title must keep both requeues, got %d goals", n)
+	}
+}

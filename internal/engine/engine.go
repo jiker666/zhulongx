@@ -357,14 +357,27 @@ func (e *Engine) requeuePass2(ctx context.Context, g *fgs.Goal) {
 	// Up to two requeues: pass-2 continues the ledger, pass-3 is the last
 	// fresh look for challenges that need it (42176: the hardest tier was
 	// still mid-derivation when pass-2 died to infra churn).
+	//
+	// Zero-progress titles earn ONE requeue, not two: a dud's pass-2/3
+	// re-buys recon the ledger already ruled out, and run 42416 burned
+	// whole slots on it (c-03/a-05 60m each in hour one; 42778's f2-01
+	// took a second 36m helping with three wrong submits). A title with
+	// banked flags keeps both retries — its pass-2 is conversion, not
+	// exploration (42361: b-01 killed at 2/4 with the third in reach).
 	const maxRequeues = 2
+	maxFor := maxRequeues
+	if e.FlagProgress != nil {
+		if cur, _, ok := e.FlagProgress(g.Title); ok && cur == 0 {
+			maxFor = 1
+		}
+	}
 	if e.cfg.Runtime.RunDeadline <= 0 || ctx.Err() != nil {
 		return
 	}
 	e.mu.Lock()
 	done := e.requeues[g.Title]
 	e.mu.Unlock()
-	if done >= maxRequeues {
+	if done >= maxFor {
 		return
 	}
 	if e.now().Add(10 * time.Minute).After(e.startedAt.Add(e.cfg.Runtime.RunDeadline.D())) {
