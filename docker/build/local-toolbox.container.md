@@ -22,7 +22,7 @@ description: 本机(断网 Linux 容器)已装工具清单。开题第一步清�
 - `secrets/flask-secret-keys.txt`:Flask SECRET_KEY 专用(5.6 万条)
 
 ## 公开 CVE 武器库(/opt/zhx/arsenal/)
-- 15 件公开知名 Web 利用 PoC(2017-2025 谱系:Next.js/React、PHP-CGI、Apache、Spring/Java 系、Struts、Shiro、fastjson、ThinkPHP、Openfire、log4j、Gradio、LangChain),每件自带指纹注释与用法
+- 16 件公开知名 Web 利用 PoC(2017-2025 谱系:Next.js/React、PHP-CGI、Apache、HugeGraph、Spring/Java 系、Struts、Shiro、fastjson、ThinkPHP、Openfire、log4j、Gradio、LangChain),每件自带指纹注释与用法
 - **用法纪律见库内 README**:先手工侦察打实指纹,命中武器的 fingerprint 后按默认参数原样复现,失败才改编;`[VERIFIED]`=真实靶验证过原样可用,`[REFERENCE]`=公开 advisory 复写,先打无害探针确认前提再上攻击 payload。断网环境下 JNDI/LDAP/DNS 外带类 payload 只用于确认存在,利用转本地回显面。严禁拿武器库当第一步盲扫。
 
 ## 系统工具

@@ -23,6 +23,7 @@
 | 武器 | 族 | 可信度 |
 |---|---|---|
 | cve-2025-55182-react-flight-rce.py | Next.js / React Server Functions 反序列化 RCE | VERIFIED |
+| apache-hugegraph-gremlin-rce.py | Apache HugeGraph-Server 无鉴权 Gremlin 沙箱逃逸（线程改名 main 绕 HugeSecurityManager） | REFERENCE |
 | cve-2025-29927-nextjs-middleware-bypass.py | Next.js 中间件认证绕过 | REFERENCE |
 | cve-2024-4577-php-cgi-arg-injection.py | Windows php-cgi 参数注入 RCE | REFERENCE |
 | cve-2021-41713-apache-traversal-rce.py | Apache 2.4.49/50 路径穿越 + mod_cgi RCE | REFERENCE |
