@@ -35,6 +35,7 @@ COPY build/pi-settings.json /opt/zhx/pi-settings.json
 COPY build/pi-models.gw.json /opt/zhx/pi-models.gw.json
 COPY build/pi-models.local.json /opt/zhx/pi-models.local.json
 COPY build/local-toolbox.container.md /opt/zhx/local-toolbox.container.md
+COPY build/arsenal /opt/zhx/arsenal
 RUN chmod +x /opt/zhx/zhulongx /opt/zhx/entrypoint.sh /opt/zhx/inject-facts.sh
 
 # skills land in the pi config dir at build time; entrypoint swaps local-toolbox
