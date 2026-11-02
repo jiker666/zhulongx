@@ -1199,6 +1199,74 @@ func TestRequeuedPassDoesNotFrontRunUntouchedTitles(t *testing.T) {
 	}
 }
 
+func TestEndgameTopUpRefeedsIdleSlots(t *testing.T) {
+	// Run 42838: hour-5 utilization collapsed to 1.17/3 slots — every title
+	// had burned its requeue cap, the queue emptied, and stopped partials
+	// (b-02 at 2/6 flags) watched idle slots from the bench. In the harvest
+	// window the fleet must be re-fed past the caps, banked progress first.
+	ctx := context.Background()
+	e, st, _ := newEngine(t, ok(`{}`))
+	e.cfg.Runtime.RunDeadline = cfg.Duration(6 * time.Hour)
+	e.cfg.Runtime.EndgameAfter = cfg.Duration(5 * time.Hour)
+	e.cfg.Runtime.EndgameMinActive = 3
+	e.startedAt = e.now().Add(-2 * time.Hour) // inside the harvest window
+	e.FlagProgress = func(title string) (int, int, bool) {
+		if title == "bench:b-01" {
+			return 2, 4, true
+		}
+		return 0, 1, true
+	}
+
+	act, _ := st.CreateGoal(ctx, "bench:a-01", "o", "obj")
+	partial, _ := st.CreateGoal(ctx, "bench:b-01", "o", "obj")
+	if err := st.SetGoalStatus(ctx, partial.ID, fgs.GoalStopped, fgs.ActorEngine); err != nil {
+		t.Fatal(err)
+	}
+	dud, _ := st.CreateGoal(ctx, "bench:c-02", "o", "obj")
+	if err := st.SetGoalStatus(ctx, dud.ID, fgs.GoalStopped, fgs.ActorEngine); err != nil {
+		t.Fatal(err)
+	}
+	// Both stopped titles burned their full mid-run caps.
+	e.requeues["bench:b-01"] = 2
+	e.requeues["bench:c-02"] = 2
+
+	goals, err := st.ListGoals(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var actives []fgs.Goal
+	for _, g := range goals {
+		if g.Status == fgs.GoalActive {
+			actives = append(actives, g)
+		}
+	}
+	out := e.endgameTopUp(ctx, goals, actives)
+	if len(out) != 3 {
+		t.Fatalf("fleet must be fed to 3 actives, got %d", len(out))
+	}
+	if out[1].Title != "bench:b-01" {
+		t.Fatalf("banked-progress partial must be requeued first, got %s", out[1].Title)
+	}
+	if out[2].Title != "bench:c-02" {
+		t.Fatalf("expected the dud as the third slot, got %s", out[2].Title)
+	}
+	if out[0].ID != act.ID {
+		t.Fatalf("the already-active goal must keep its slot, got %s", out[0].ID)
+	}
+
+	// Mid-run the caps still hold: the same burned-out dud earns nothing.
+	e2, st2, _ := newEngine(t, ok(`{}`))
+	e2.cfg.Runtime.RunDeadline = cfg.Duration(6 * time.Hour)
+	e2.cfg.Runtime.EndgameMinActive = 0
+	e2.startedAt = e2.now()
+	e2.FlagProgress = func(string) (int, int, bool) { return 0, 1, true }
+	d2, _ := st2.CreateGoal(ctx, "bench:c-02", "o", "obj")
+	e2.requeues["bench:c-02"] = 1 // zero-progress cap already used
+	if _, ok := e2.requeuePass2(ctx, d2); ok {
+		t.Fatal("zero-progress title must not earn a second requeue mid-run")
+	}
+}
+
 func TestZeroProgressTitleEarnsSingleRequeue(t *testing.T) {
 	// Run 42416/42778 economics: a title with zero banked flags re-buys
 	// recon its ledger already ruled out — c-03/a-05 burned 60m slots each,

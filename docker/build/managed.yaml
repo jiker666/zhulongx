@@ -14,6 +14,7 @@ runtime:
   goal_wall_budget: 30m
   run_deadline: 350m
   endgame_after: 4h30m
+  endgame_min_active: 3
   bootstrap_step: "Bootstrap direct attack: work this challenge directly — read the brief and any existing attack ledger (attack/<题号>/work.md), then recon briefly, hypothesize, exploit, capture flags, submit each flag the moment it lands. A step is ONE bounded unit of work: wrap up and report at the first natural milestone (a flag submitted, a foothold established, a surface verdict reached, or after ~12 minutes of work) — later steps continue from your ledger, so never grind one step for the whole goal budget. Flag discipline: any flag candidate in hand is submitted THIS round, never deferred; on multi-flag challenges keep hunting the remaining attack surfaces until the platform reports is_completed=true (correct_flag_count=flag_count) — one flag is not done. Partial progress is a valid finding too. Only if the challenge clearly needs staged work, sketch the decomposition in your report."
 
 pi:

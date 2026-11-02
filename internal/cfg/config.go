@@ -70,6 +70,14 @@ type Runtime struct {
 	// won in the tail — a goal that already holds 2 of 4 flags converts a
 	// free slot into score far cheaper than a fresh first pass. 0 disables.
 	EndgameAfter Duration `yaml:"endgame_after"`
+	// EndgameMinActive keeps the harvest window fed: once in endgame, if
+	// fewer than this many goals are active the scheduler requeues the best
+	// stopped titles (banked progress first) past the normal requeue cap.
+	// Run 42838: hour-5 utilization collapsed to 1.17 slots because every
+	// title had burned its 2 requeues — the queue emptied while partial
+	// multi-flag goals sat stopped. An idle endgame slot is worth exactly
+	// zero. 0 disables the top-up.
+	EndgameMinActive int `yaml:"endgame_min_active"`
 }
 
 // Pi describes how to launch the agent runtime.

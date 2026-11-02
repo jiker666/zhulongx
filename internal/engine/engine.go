@@ -292,6 +292,7 @@ func (e *Engine) tick(ctx context.Context) {
 	if e.inEndgame() {
 		rank := e.endgameRank(actives)
 		sort.SliceStable(actives, func(i, j int) bool { return rank[actives[i].ID] > rank[actives[j].ID] })
+		actives = e.endgameTopUp(ctx, goals, actives)
 	}
 	for _, g := range actives {
 		if ctx.Err() != nil {
@@ -299,6 +300,43 @@ func (e *Engine) tick(ctx context.Context) {
 		}
 		e.scheduleGoal(ctx, g.ID)
 	}
+}
+
+// endgameTopUp feeds the harvest window. The requeue caps that keep mid-run
+// fairness drain the queue in the final hour (run 42838: hour 5 ran at 1.17
+// of 3 slots with every cap burned while stopped partials waited on the
+// bench). If the fleet is under EndgameMinActive, the best stopped titles
+// are requeued past the normal cap — banked progress first, creation order
+// as tiebreak, never a title that already has an active goal. An idle
+// endgame slot is worth exactly zero.
+func (e *Engine) endgameTopUp(ctx context.Context, goals []fgs.Goal, actives []fgs.Goal) []fgs.Goal {
+	if e.cfg.Runtime.EndgameMinActive <= 0 || len(actives) >= e.cfg.Runtime.EndgameMinActive {
+		return actives
+	}
+	activeTitles := make(map[string]bool, len(actives))
+	for _, a := range actives {
+		activeTitles[a.Title] = true
+	}
+	stopped := make([]fgs.Goal, 0, len(goals))
+	for _, g := range goals {
+		if g.Status == fgs.GoalStopped && !activeTitles[g.Title] {
+			stopped = append(stopped, g)
+		}
+	}
+	srank := e.endgameRank(stopped)
+	sort.SliceStable(stopped, func(i, j int) bool { return srank[stopped[i].ID] > srank[stopped[j].ID] })
+	for _, g := range stopped {
+		if len(actives) >= e.cfg.Runtime.EndgameMinActive {
+			break
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		if ng, ok := e.requeuePass2(ctx, &g); ok {
+			actives = append(actives, *ng)
+		}
+	}
+	return actives
 }
 
 // titleTouched reports whether any goal with this title — this pass or a
@@ -353,7 +391,7 @@ func (e *Engine) endgameRank(goals []fgs.Goal) map[string]int {
 // alone outlives the run — so the requeue must be immediate. One requeue
 // per title; a goal whose second pass also exhausts its budget stays
 // stopped for good.
-func (e *Engine) requeuePass2(ctx context.Context, g *fgs.Goal) {
+func (e *Engine) requeuePass2(ctx context.Context, g *fgs.Goal) (*fgs.Goal, bool) {
 	// Up to two requeues: pass-2 continues the ledger, pass-3 is the last
 	// fresh look for challenges that need it (42176: the hardest tier was
 	// still mid-derivation when pass-2 died to infra churn).
@@ -365,28 +403,37 @@ func (e *Engine) requeuePass2(ctx context.Context, g *fgs.Goal) {
 	// banked flags keeps both retries — its pass-2 is conversion, not
 	// exploration (42361: b-01 killed at 2/4 with the third in reach).
 	const maxRequeues = 2
+	const endgameMaxRequeues = 6
 	maxFor := maxRequeues
 	if e.FlagProgress != nil {
 		if cur, _, ok := e.FlagProgress(g.Title); ok && cur == 0 {
 			maxFor = 1
 		}
 	}
+	if e.inEndgame() {
+		// Harvest-window lift (run 42838: hour-5 slot utilization collapsed
+		// to 1.17/3 because every title had burned its requeue cap — the
+		// queue emptied while partials sat stopped). An idle endgame slot is
+		// worth exactly zero; every stopped title stays requeueable under a
+		// hard pass fuse, and endgameRank feeds banked progress first.
+		maxFor = endgameMaxRequeues
+	}
 	if e.cfg.Runtime.RunDeadline <= 0 || ctx.Err() != nil {
-		return
+		return nil, false
 	}
 	e.mu.Lock()
 	done := e.requeues[g.Title]
 	e.mu.Unlock()
 	if done >= maxFor {
-		return
+		return nil, false
 	}
 	if e.now().Add(10 * time.Minute).After(e.startedAt.Add(e.cfg.Runtime.RunDeadline.D())) {
-		return // too late for a meaningful another pass
+		return nil, false // too late for a meaningful another pass
 	}
 	ng, err := e.store.CreateGoal(ctx, g.Title, g.Origin, g.Objective)
 	if err != nil {
 		e.log.Error("requeue: create goal", "title", g.Title, "err", err)
-		return
+		return nil, false
 	}
 	pass := done + 2
 	if _, err := e.store.AddHumanFact(ctx, ng.ID,
@@ -402,6 +449,7 @@ func (e *Engine) requeuePass2(ctx context.Context, g *fgs.Goal) {
 	e.firstTouch[g.Title] = true
 	e.mu.Unlock()
 	e.log.Info("requeue: goal requeued for another pass", "title", g.Title, "goal", ng.ID, "pass", pass)
+	return ng, true
 }
 
 func (e *Engine) scheduleGoal(ctx context.Context, goalID string) {
