@@ -12,6 +12,8 @@ runtime:
   repair_timeout: 4m
   goal_step_budget: 6
   goal_wall_budget: 30m
+  flag_refill_max: 4
+  flag_step_bonus: 3
   run_deadline: 350m
   endgame_after: 4h30m
   endgame_min_active: 3

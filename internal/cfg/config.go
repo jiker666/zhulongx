@@ -88,6 +88,17 @@ type Runtime struct {
 	// breadth no longer trades against depth.
 	EndgameStepBudget int          `yaml:"endgame_step_budget"`
 	EndgameWallBudget Duration     `yaml:"endgame_wall_budget"`
+	// FlagRefillMax caps how many times banking a NEW correct flag may refuel
+	// one goal's budgets in a pass: the wall window resets AND FlagStepBonus
+	// extra Execute steps are granted. Multi-flag intranets legitimately
+	// convert for hours; the old hard cap of two refueled the clock but the
+	// step budget still cut the goal mid-harvest (a 6-flag intranet burned
+	// 31% of one run's slot capacity across seven restarts and never
+	// finished). 0 = code default (4).
+	FlagRefillMax int `yaml:"flag_refill_max"`
+	// FlagStepBonus is how many extra Execute steps each flag refuel grants
+	// on top of the step-budget reset. 0 = code default (3).
+	FlagStepBonus int `yaml:"flag_step_bonus"`
 }
 
 // Pi describes how to launch the agent runtime.

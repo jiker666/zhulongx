@@ -1024,6 +1024,71 @@ func TestFlagRefuelExtendsWallBudget(t *testing.T) {
 	}
 }
 
+func TestFlagRefuelGrantsStepBudget(t *testing.T) {
+	// Run 43065 anatomy: a multi-flag intranet banked flags mid-pass but the
+	// STEP budget (checked before the wall refuel ever helped) still cut the
+	// harvest short across seven container restarts. A flag refuel must now
+	// grant FlagStepBonus extra steps (code default 3) alongside the wall
+	// reset, and the step check must consume them.
+	ctx := context.Background()
+	e, st, _ := newEngine(t, ok(`{}`))
+	e.cfg.Runtime.GoalStepBudget = 2
+	e.cfg.Runtime.GoalWallBudget = 0 // wall off: isolate the step-budget path
+	e.cfg.Runtime.FlagRefillMax = 0  // 0 = code default (4)
+	e.cfg.Runtime.FlagStepBonus = 0  // 0 = code default (3)
+	correct := 0
+	e.FlagProgress = func(string) (int, int, bool) { return correct, 6, true }
+
+	g, _ := st.CreateGoal(ctx, "refuel-steps", "o", "obj")
+	done := 0
+	for i := 0; i < 2; i++ {
+		s, _ := st.CreateStep(ctx, g.ID, fmt.Sprintf("s%d", i), nil, fgs.ActorDecide)
+		st.ClaimNextStep(ctx, g.ID, "zhulongx")
+		if _, err := st.FinishStepWithFinding(ctx, g.ID, s.ID, "zhulongx", "done", "ev"); err != nil {
+			t.Fatalf("finish step: %v", err)
+		}
+		done++
+	}
+	e.mu.Lock()
+	e.flagBase[g.ID] = 0
+	e.mu.Unlock()
+
+	correct = 1 // flag banked during the pass
+	if over, _ := e.goalOverBudget(ctx, g.ID); over {
+		t.Fatal("a step-drained goal with fresh flag progress must be refueled, not stopped")
+	}
+	e.mu.Lock()
+	bonus := e.stepBonus[g.ID]
+	e.mu.Unlock()
+	if bonus != 3 {
+		t.Fatalf("refuel must grant the default 3-step bonus, got %d", bonus)
+	}
+
+	// Steps within the granted headroom (2 base + 3 bonus = 5 allowed):
+	// 3 and 4 DONE stay alive.
+	for i := 2; i < 4; i++ {
+		s, _ := st.CreateStep(ctx, g.ID, fmt.Sprintf("s%d", i), nil, fgs.ActorDecide)
+		st.ClaimNextStep(ctx, g.ID, "zhulongx")
+		if _, err := st.FinishStepWithFinding(ctx, g.ID, s.ID, "zhulongx", "done", "ev"); err != nil {
+			t.Fatalf("finish step: %v", err)
+		}
+		if over, _ := e.goalOverBudget(ctx, g.ID); over {
+			t.Fatalf("step %d within refuel-granted headroom must not stop the goal", i+1)
+		}
+	}
+
+	// The 5th DONE step exhausts base+bonus; with NO new flag since the
+	// refuel the budget bites.
+	s, _ := st.CreateStep(ctx, g.ID, "s4", nil, fgs.ActorDecide)
+	st.ClaimNextStep(ctx, g.ID, "zhulongx")
+	if _, err := st.FinishStepWithFinding(ctx, g.ID, s.ID, "zhulongx", "done", "ev"); err != nil {
+		t.Fatalf("finish step: %v", err)
+	}
+	if over, _ := e.goalOverBudget(ctx, g.ID); !over {
+		t.Fatal("without new flag progress the step budget must bite after the bonus is spent")
+	}
+}
+
 func TestActiveGraceExtendsWallBudgetOnce(t *testing.T) {
 	// A step that landed moments before the deadline means the goal is
 	// mid-flow, not wedged: one 10-minute extension, never two.

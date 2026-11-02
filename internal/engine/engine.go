@@ -65,11 +65,17 @@ type Engine struct {
 	// Flag-progress budget refuel: a goal whose challenge banked flags
 	// during the current pass is demonstrably converting slot time into
 	// score — its wall budget refuels instead of expiring (run 42361:
-	// b-01 was killed at 2/4 flags with the third in reach). Capped at two
-	// refuels per goal; the baseline correct-count is captured at first
-	// claim so the refuel only pays on NEW progress.
+	// b-01 was killed at 2/4 flags with the third in reach). The step
+	// budget must refuel with it: run 43065's six-flag intranet had its
+	// clock refueled twice but was still step-capped mid-harvest, burning
+	// 31% of the run's slot capacity across seven container restarts.
+	// Capped at FlagRefillMax refuels per goal; the baseline correct-count
+	// is captured at first claim so the refuel only pays on NEW progress.
 	flagBase    map[string]int
 	flagRefills map[string]int
+	// stepBonus is the extra Execute-step headroom granted by flag refuels
+	// (FlagStepBonus each, on top of the base GoalStepBudget).
+	stepBonus map[string]int
 	// Active grace: a goal whose last step finished within graceWindow of
 	// the wall deadline is mid-flow, not wedged — one +10m extension per
 	// goal (run 42361: c-07's IAC breakthrough died exactly at the bell).
@@ -157,6 +163,7 @@ func New(st *store.Store, c *cfg.Config, log *slog.Logger, factory RunnerFactory
 
 		flagBase:    map[string]int{},
 		flagRefills: map[string]int{},
+		stepBonus:   map[string]int{},
 		graceUsed:   map[string]bool{},
 		lastFinish:  map[string]time.Time{},
 
@@ -598,8 +605,20 @@ func (e *Engine) goalOverBudget(ctx context.Context, goalID string) (bool, strin
 					done++
 				}
 			}
-			if done >= sb {
-				return true, fmt.Sprintf("step budget exhausted (%d done steps)", done)
+			e.mu.Lock()
+			bonus := e.stepBonus[goalID]
+			e.mu.Unlock()
+			if done >= sb+bonus {
+				// A goal banking flags while draining its steps is
+				// mid-harvest, not spent: give the flag refuel a chance
+				// to grant more steps before stopping the pass. Grace is
+				// deliberately NOT offered here — it extends wall time,
+				// which is not what a step-exhausted goal lacks.
+				if reason := e.flagRefuel(ctx, goalID); reason != "" {
+					e.log.Info("budget: step budget extended", "goal", goalID, "reason", reason)
+				} else {
+					return true, fmt.Sprintf("step budget exhausted (%d done steps)", done)
+				}
 			}
 		}
 	}
@@ -618,51 +637,26 @@ func (e *Engine) goalOverBudget(ctx context.Context, goalID string) (bool, strin
 	return false, ""
 }
 
-// refuelBudget gives an expiring wall budget one more lease when the goal
-// has earned it. Two independent earn conditions:
-//
-//   - flag refuel: the challenge banked a NEW correct flag since this pass
-//     began (baseline captured at first claim). Score landing mid-pass is
-//     the hardest progress signal there is; two refuels per goal cap it.
-//   - active grace: the last step finished within graceWindow of the
-//     deadline — the goal is mid-flow (a Decide round between two execute
-//     steps), not wedged. One 10-minute extension per goal.
+// refuelBudget gives an expiring WALL budget one more lease when the goal
+// has earned it: the flag refuel first, then active grace (the last step
+// finished within graceWindow of the deadline — the goal is mid-flow, a
+// Decide round between two execute steps, not wedged; one 10-minute
+// extension per goal).
 //
 // Returns the reason when the deadline was pushed, "" when the budget
 // stays exhausted.
 func (e *Engine) refuelBudget(ctx context.Context, goalID string, wb time.Duration) string {
 	const graceWindow = 3 * time.Minute
-	now := e.now()
 
-	if e.FlagProgress != nil {
-		if g, err := e.store.GetGoal(ctx, goalID); err == nil {
-			if cur, _, ok := e.FlagProgress(g.Title); ok {
-				e.mu.Lock()
-				base := e.flagBase[goalID]
-				refills := e.flagRefills[goalID]
-				e.mu.Unlock()
-				if _, seen := e.flagBase[goalID]; !seen {
-					// first observation — record the baseline, judge later
-					e.mu.Lock()
-					e.flagBase[goalID] = cur
-					e.mu.Unlock()
-				} else if cur > base && refills < 2 {
-					e.mu.Lock()
-					e.flagBase[goalID] = cur
-					e.flagRefills[goalID] = refills + 1
-					e.firstClaim[goalID] = now // fresh full window
-					e.mu.Unlock()
-					return fmt.Sprintf("flag refuel: correct count %d → %d", base, cur)
-				}
-			}
-		}
+	if reason := e.flagRefuel(ctx, goalID); reason != "" {
+		return reason
 	}
 
 	e.mu.Lock()
 	last, finished := e.lastFinish[goalID]
 	graced := e.graceUsed[goalID]
 	e.mu.Unlock()
-	if finished && !graced && now.Sub(last) <= graceWindow {
+	if finished && !graced && e.now().Sub(last) <= graceWindow {
 		e.mu.Lock()
 		e.graceUsed[goalID] = true
 		e.firstClaim[goalID] = e.firstClaim[goalID].Add(10 * time.Minute)
@@ -670,6 +664,58 @@ func (e *Engine) refuelBudget(ctx context.Context, goalID string, wb time.Durati
 		return "active grace: step landed moments before the deadline"
 	}
 	return ""
+}
+
+// flagRefuel re-arms both budgets when the goal's challenge banked a NEW
+// correct flag since this pass began (baseline captured at first claim).
+// Score landing mid-pass is the hardest progress signal there is. Each
+// refuel resets the wall window AND grants FlagStepBonus extra Execute
+// steps — refueling the clock alone still let the step cap cut a
+// multi-flag intranet mid-harvest (run 43065: seven restarts, 31% of the
+// run's slot capacity, four of six flags). FlagRefillMax refuels per goal
+// cap it. "" = no refuel (also when no flag progress is wired, so the
+// step-exhausted path stays a clean stop for flag-less runs).
+func (e *Engine) flagRefuel(ctx context.Context, goalID string) string {
+	if e.FlagProgress == nil {
+		return ""
+	}
+	g, err := e.store.GetGoal(ctx, goalID)
+	if err != nil {
+		return ""
+	}
+	cur, _, ok := e.FlagProgress(g.Title)
+	if !ok {
+		return ""
+	}
+	maxRefills := e.cfg.Runtime.FlagRefillMax
+	if maxRefills <= 0 {
+		maxRefills = 4
+	}
+	stepBonus := e.cfg.Runtime.FlagStepBonus
+	if stepBonus <= 0 {
+		stepBonus = 3
+	}
+	e.mu.Lock()
+	base, seen := e.flagBase[goalID]
+	refills := e.flagRefills[goalID]
+	e.mu.Unlock()
+	if !seen {
+		// first observation — record the baseline, judge later
+		e.mu.Lock()
+		e.flagBase[goalID] = cur
+		e.mu.Unlock()
+		return ""
+	}
+	if cur <= base || refills >= maxRefills {
+		return ""
+	}
+	e.mu.Lock()
+	e.flagBase[goalID] = cur
+	e.flagRefills[goalID] = refills + 1
+	e.stepBonus[goalID] += stepBonus
+	e.firstClaim[goalID] = e.now() // fresh full window
+	e.mu.Unlock()
+	return fmt.Sprintf("flag refuel: correct count %d → %d (+%d steps)", base, cur, stepBonus)
 }
 
 // harvestFlags scans text that just landed in the graph for concrete
