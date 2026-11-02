@@ -181,26 +181,44 @@ func completeFromPlatform(ctx context.Context, st *store.Store, goalID string, c
 	return nil
 }
 
+// difficultyRank normalizes the platform's difficulty label to an ordinal.
+// Tolerant on purpose: the API's label set has drifted between runs
+// (English forms sorted correctly on 11-01, produced raw-order groups on
+// 11-02), so unknown labels — including Chinese ones — map explicitly and
+// anything unrecognized queues LAST, never first.
+func difficultyRank(s string) int {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "easy", "简单", "入门":
+		return 0
+	case "medium", "mid", "中等", "进阶":
+		return 1
+	case "hard", "困难", "高难":
+		return 2
+	}
+	return 3
+}
+
 // sortByPriority moves the listed codes to the front (in list order);
-// everything else queues by the platform's own difficulty ordinal.
+// everything else queues by (difficulty, level, code) — computed HERE, in
+// Go, from the typed challenge list Import fetched itself. Run 43065: the
+// shell-side jq sort degraded to raw-API order inside difficulty groups
+// (sort key field stopped matching), a 6-flag intranet siege fed at
+// position 4, and 7 titles never saw a container. Ordering lives in the
+// engine now; the priority file is only a head-of-queue override.
 func sortByPriority(challenges []Challenge, priority []string) []Challenge {
+	less := func(a, b Challenge) bool {
+		if ra, rb := difficultyRank(a.Difficulty), difficultyRank(b.Difficulty); ra != rb {
+			return ra < rb
+		}
+		if a.Level != b.Level {
+			return a.Level < b.Level
+		}
+		return a.UniqueCode < b.UniqueCode
+	}
 	if len(priority) == 0 {
-		// Run 43003: the entrypoint's priority derivation failed silently
-		// (a degraded first API response wrote an empty file without
-		// failing the script) and every title queued in RAW platform
-		// order — the hardest tier reached the front at t+20 and burned a
-		// slot for the rest of the window while convertible easy titles
-		// waited. An empty priority list now falls back to the same
-		// deterministic difficulty ordering the entrypoint derives, from
-		// the live challenge list Import fetched for itself.
 		out := make([]Challenge, len(challenges))
 		copy(out, challenges)
-		sort.SliceStable(out, func(i, j int) bool {
-			if out[i].Level != out[j].Level {
-				return out[i].Level < out[j].Level
-			}
-			return out[i].UniqueCode < out[j].UniqueCode
-		})
+		sort.SliceStable(out, func(i, j int) bool { return less(out[i], out[j]) })
 		return out
 	}
 	rank := make(map[string]int, len(priority))
@@ -217,12 +235,12 @@ func sortByPriority(challenges []Challenge, priority []string) []Challenge {
 		}
 	}
 	sort.SliceStable(head, func(i, j int) bool { return rank[head[i].UniqueCode] < rank[head[j].UniqueCode] })
-	// Non-priority titles queue by the platform's own difficulty ordinal
-	// ascending (stable, platform order within a level): easy titles open
-	// first and free slots in minutes, so long sieges start with the slot
-	// budget intact instead of behind three grinders. Difficulty is live
-	// platform metadata applied uniformly — no per-challenge history.
-	sort.SliceStable(tail, func(i, j int) bool { return tail[i].Level < tail[j].Level })
+	// Non-priority titles queue (difficulty, level, code) ascending: easy
+	// titles open first and free slots in minutes, so long sieges start
+	// with the slot budget intact instead of behind three grinders.
+	// Difficulty is live platform metadata applied uniformly — no
+	// per-challenge history.
+	sort.SliceStable(tail, func(i, j int) bool { return less(tail[i], tail[j]) })
 	return append(head, tail...)
 }
 

@@ -1146,19 +1146,29 @@ func TestEndgameRankPrefersPartialFlagProgress(t *testing.T) {
 			return 0, 6, true
 		case strings.Contains(title, "plain"):
 			return 0, 1, true
+		case strings.Contains(title, "fresh"):
+			return 0, 1, true
 		}
 		return 0, 0, false
 	}
 	partial, _ := st.CreateGoal(ctx, "bench:partial", "o", "obj")
 	multi, _ := st.CreateGoal(ctx, "bench:multi", "o", "obj")
 	plain, _ := st.CreateGoal(ctx, "bench:plain", "o", "obj")
+	fresh, _ := st.CreateGoal(ctx, "bench:fresh", "o", "obj")
+	// multi and plain were worked in an earlier pass (zero-flag regrinds);
+	// fresh never saw a container.
+	e.mu.Lock()
+	e.firstTouch["bench:multi"] = true
+	e.firstTouch["bench:plain"] = true
+	e.mu.Unlock()
 
 	if !e.inEndgame() {
 		t.Fatal("t+331m of a 350m run with an 80m window is endgame")
 	}
-	rank := e.endgameRank([]fgs.Goal{{ID: partial.ID, Title: "bench:partial"}, {ID: multi.ID, Title: "bench:multi"}, {ID: plain.ID, Title: "bench:plain"}})
-	if !(rank[partial.ID] > rank[multi.ID] && rank[multi.ID] > rank[plain.ID]) {
-		t.Fatalf("partial-flag > untouched multi-flag > plain: %v", rank)
+	rank := e.endgameRank([]fgs.Goal{{ID: partial.ID, Title: "bench:partial"}, {ID: multi.ID, Title: "bench:multi"}, {ID: plain.ID, Title: "bench:plain"}, {ID: fresh.ID, Title: "bench:fresh"}})
+	// partial(3) > never-touched(2) > worked multi-zero(1) > worked plain-zero(0)
+	if !(rank[partial.ID] > rank[fresh.ID] && rank[fresh.ID] > rank[multi.ID] && rank[multi.ID] > rank[plain.ID]) {
+		t.Fatalf("partial > never-touched > worked multi-zero > worked plain-zero: %v", rank)
 	}
 	_ = ctx
 }

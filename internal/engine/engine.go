@@ -394,6 +394,12 @@ func (e *Engine) endgameRank(goals []fgs.Goal) map[string]int {
 		switch {
 		case cur > 0 && cur < total:
 			rank[g.ID] = 3 // banked progress — cheapest conversion in the fleet
+		case !e.titleTouched(g.Title):
+			// Never worked beats regrinding a zero-flag multi (run 43065:
+			// a-15/e1-04/e2-02 converted the MOMENT they were finally fed
+			// at t+339-343, while zero-flag regrinds held slots through
+			// the same window and 7 titles never saw a container at all).
+			rank[g.ID] = 2
 		case total > 1 && cur == 0:
 			rank[g.ID] = 1 // multi-flag challenge, nothing banked yet
 		}
