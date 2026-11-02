@@ -182,10 +182,26 @@ func completeFromPlatform(ctx context.Context, st *store.Store, goalID string, c
 }
 
 // sortByPriority moves the listed codes to the front (in list order);
-// everything else keeps the platform order.
+// everything else queues by the platform's own difficulty ordinal.
 func sortByPriority(challenges []Challenge, priority []string) []Challenge {
 	if len(priority) == 0 {
-		return challenges
+		// Run 43003: the entrypoint's priority derivation failed silently
+		// (a degraded first API response wrote an empty file without
+		// failing the script) and every title queued in RAW platform
+		// order — the hardest tier reached the front at t+20 and burned a
+		// slot for the rest of the window while convertible easy titles
+		// waited. An empty priority list now falls back to the same
+		// deterministic difficulty ordering the entrypoint derives, from
+		// the live challenge list Import fetched for itself.
+		out := make([]Challenge, len(challenges))
+		copy(out, challenges)
+		sort.SliceStable(out, func(i, j int) bool {
+			if out[i].Level != out[j].Level {
+				return out[i].Level < out[j].Level
+			}
+			return out[i].UniqueCode < out[j].UniqueCode
+		})
+		return out
 	}
 	rank := make(map[string]int, len(priority))
 	for i, code := range priority {

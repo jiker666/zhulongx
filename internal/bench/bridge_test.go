@@ -119,6 +119,45 @@ func TestImportQueuesLowLevelsFirst(t *testing.T) {
 	}
 }
 
+func TestImportEmptyPriorityFallsBackToDifficultyOrder(t *testing.T) {
+	// Run 43003: the entrypoint wrote an empty priority.txt after a
+	// degraded API response and the queue degenerated to raw platform
+	// order — the hardest tier fed at t+20. An empty priority list must
+	// fall back to deterministic (level, code) order, not API order.
+	st := openStore(t)
+	p := newPlatformStub(t, `[
+	 {"unique_code":"f2-05","description":"x","difficulty":"hard","level":3,
+	  "total_score":300,"flag_count":1,"correct_flag_count":0,"is_completed":false,
+	  "container_status":"stopped","container_addr":[]},
+	 {"unique_code":"c-02","description":"x","difficulty":"medium","level":2,
+	  "total_score":200,"flag_count":1,"correct_flag_count":0,"is_completed":false,
+	  "container_status":"stopped","container_addr":[]},
+	 {"unique_code":"e1-03","description":"x","difficulty":"easy","level":1,
+	  "total_score":100,"flag_count":1,"correct_flag_count":0,"is_completed":false,
+	  "container_status":"stopped","container_addr":[]},
+	 {"unique_code":"d-01","description":"x","difficulty":"easy","level":1,
+	  "total_score":100,"flag_count":1,"correct_flag_count":0,"is_completed":false,
+	  "container_status":"stopped","container_addr":[]}
+	]`)
+	if _, err := Import(context.Background(), st, client(t, p.srv.URL), nil); err != nil {
+		t.Fatalf("Import: %v", err)
+	}
+	goals, err := st.ListGoals(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Slice(goals, func(i, j int) bool { return goals[i].ID < goals[j].ID })
+	want := []string{"bench:d-01", "bench:e1-03", "bench:c-02", "bench:f2-05"}
+	if len(goals) != len(want) {
+		t.Fatalf("want %d goals, got %d", len(want), len(goals))
+	}
+	for i, w := range want {
+		if goals[i].Title != w {
+			t.Errorf("goal %d = %s; want %s (empty priority must still sort easy-first)", i, goals[i].Title, w)
+		}
+	}
+}
+
 func TestImportCreatesGoalsWithBriefAndIsIdempotent(t *testing.T) {
 	st := openStore(t)
 	p := newPlatformStub(t, twoChallenges)
