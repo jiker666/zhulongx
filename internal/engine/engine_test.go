@@ -1199,6 +1199,54 @@ func TestRequeuedPassDoesNotFrontRunUntouchedTitles(t *testing.T) {
 	}
 }
 
+func TestExecuteNoFootholdRotatesGoal(t *testing.T) {
+	// Run 42984: the agent honored the zero-foothold wall by closing its
+	// container, but the engine didn't know — the goal stayed active and
+	// the next step relaunched the same title 2 seconds later. The wall
+	// was container churn, not slot rotation; three grinders pinned every
+	// slot for a full wall budget. A step report starting NOFOOTHOLD: must
+	// stop the pass and hand the slot back to the untouched queue.
+	ctx := context.Background()
+	e, st, _ := newEngine(t,
+		ok(`{"accepted":true,"data":{"steps":[{"from":["f_0001"],"description":"the step"}]}}`),
+		ok(`{"accepted":true,"data":{"finding":{"content":"NOFOOTHOLD: 15m zero-foothold wall — no confirmed primitive, ledger written, container closed","evidence":"e"}}}`),
+	)
+	e.cfg.Runtime.RunDeadline = cfg.Duration(6 * time.Hour)
+	e.startedAt = e.now()
+	g, _ := st.CreateGoal(ctx, "bench:c-05", "o", "obj")
+	st.AddHumanFact(ctx, g.ID, "seed", "t")
+	e.decide(ctx, g.ID, "initial")
+	claimed, err := st.ClaimNextStep(ctx, g.ID, "zhulongx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.executeStep(ctx, g.ID, claimed.ID)
+
+	goals, _ := st.ListGoals(ctx)
+	if len(goals) != 2 {
+		t.Fatalf("NOFOOTHOLD must rotate the goal into a requeued pass, got %d goals", len(goals))
+	}
+	stopped := 0
+	active := 0
+	for _, gg := range goals {
+		switch gg.Status {
+		case fgs.GoalStopped:
+			stopped++
+		case fgs.GoalActive:
+			active++
+		}
+	}
+	if stopped != 1 || active != 1 {
+		t.Fatalf("want 1 stopped + 1 requeued active, got stopped=%d active=%d", stopped, active)
+	}
+	// The reporting step itself lands DONE with its ledger finding — the
+	// wall costs the goal its slot, never the agent its report.
+	after, _ := st.ListSteps(ctx, g.ID)
+	if after[0].Status != fgs.StepDone || after[0].FindingID == "" {
+		t.Fatalf("the reporting step must land DONE with a finding: %+v", after[0])
+	}
+}
+
 func TestEndgameTopUpRefeedsIdleSlots(t *testing.T) {
 	// Run 42838: hour-5 utilization collapsed to 1.17/3 slots — every title
 	// had burned its requeue cap, the queue emptied, and stopped partials

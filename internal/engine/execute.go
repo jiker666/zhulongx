@@ -226,6 +226,17 @@ func (e *Engine) finishAnswer(ctx context.Context, log *slog.Logger, goalID, ste
 	e.harvestFlags(ctx, goalID, answer.Content)
 	log.Info("execute: step done", "finding", fd.ID, "tools", res.ToolCalls)
 	e.noteRunnerSuccess()
+	// Zero-foothold rotation (run 42984): the wall doctrine lives in the
+	// prompt, but an agent-side wall only churned containers — the goal
+	// stayed active and the next step relaunched the SAME title seconds
+	// later, pinning all three slots on head-of-queue grinders for a full
+	// wall budget while zero new titles flowed (32 minutes, 4 titles seen,
+	// t+16.8 onward nothing new). The marker makes the wall real: the
+	// engine stops the pass, the slot rotates to an untouched title, and
+	// the challenge requeues into the fairness tail with its ledger.
+	if strings.HasPrefix(strings.TrimSpace(answer.Content), "NOFOOTHOLD:") {
+		e.stopGoalForBudget(ctx, goalID, "zero-foothold wall: step reported NOFOOTHOLD — rotating slot")
+	}
 }
 
 // finishPartial converts a deadline-killed run into a TIMEOUT_PARTIAL
