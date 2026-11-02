@@ -359,6 +359,25 @@ func (e *Engine) inEndgame() bool {
 	return e.now().Sub(e.startedAt) >= d-w
 }
 
+// stepBudgetFor / wallBudgetFor return the effective per-goal budgets,
+// deepened inside the harvest window when Endgame overrides are set: run
+// 42838's walls died one or two moves short with the next move already
+// named in their ledgers — endgame slots would otherwise idle, so depth
+// no longer trades against breadth there.
+func (e *Engine) stepBudgetFor() int {
+	if e.inEndgame() && e.cfg.Runtime.EndgameStepBudget > 0 {
+		return e.cfg.Runtime.EndgameStepBudget
+	}
+	return e.cfg.Runtime.GoalStepBudget
+}
+
+func (e *Engine) wallBudgetFor() time.Duration {
+	if e.inEndgame() && e.cfg.Runtime.EndgameWallBudget > 0 {
+		return e.cfg.Runtime.EndgameWallBudget.D()
+	}
+	return e.cfg.Runtime.GoalWallBudget.D()
+}
+
 // endgameRank scores goals for the harvest window: partial flag progress
 // first, multi-flag challenges with nothing banked yet second, the rest
 // last.
@@ -556,7 +575,7 @@ type stepRef struct{ id string }
 // GoalWallBudget. A goal with a step still in flight is never over budget
 // here: the stop must not race the executor's finish write.
 func (e *Engine) goalOverBudget(ctx context.Context, goalID string) (bool, string) {
-	sb, wb := e.cfg.Runtime.GoalStepBudget, e.cfg.Runtime.GoalWallBudget.D()
+	sb, wb := e.stepBudgetFor(), e.wallBudgetFor()
 	if sb <= 0 && wb <= 0 {
 		return false, ""
 	}

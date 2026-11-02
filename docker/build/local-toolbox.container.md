@@ -40,14 +40,16 @@ description: 本机(断网 Linux 容器)已装工具清单。开题第一步清�
 - **JWT 的 kid/alg/jku 是注入面**,不只是要解的东西:kid 路径穿越(`kid=../../proc/self/environ`、`../<已知静态文件>`)让服务端拿任意文件内容当 HMAC 密钥→拿一个已知文件(公开 js/robots.txt)即可本地伪造签名;alg none、RS256→HS256 混淆一并试。
 - **LFI/任意读第一步是读源码,不是读 passwd**:download/view/export 类带路径参数的端点天然 LFI 面;`?id=../download.php` 拉全量源码→配置里的硬编码凭据/角色表/隐藏数据条目(带 sensitive 标记的对象)就是主线。登录页/README/页面 JS 注释泄露的**测试凭据先试**——那是设计好的入口不是诱饵。
 - **文件写原语 × 应用自带的"启动脚本/配置重载/重启"机制 = 执行**:userdata 保存/上传接口哪怕限定目录,写进插件管理器的 startup-scripts/安装清单/配置文件,再打免鉴权的 reboot/reload 端点让应用自己执行它。路径被规范化挡住时,**路径参数里 %2F、%2e%2e 编码**常能绕(路由按编码串匹配、文件系统按解码串走)。ML 框架的模型载入点默认 weights_only=True——pickle RCE 多半是死路,别恋战,打生态组件。
-- **JS 栈先对已知 CVE 家族,别先扎自定义反序列化**:Next.js/Nuxt/Remix 一类 SSR 指纹(App Router、Server Actions、Next-Action 头)出现时,先试该组件公开 RCE/SSRF 家族(如 Server Actions 的 multipart chunks+Next-Action 回显链),自定义协议逆向是后手——在自定义序列化格式上硬啃是烧穿容器寿命的头号死法,组件对上 CVE 时一条公开 poc 直取。
+- **JS 栈先对已知 CVE 家族,别先扎自定义反序列化**:Next.js/Nuxt/Remix 一类 SSR 指纹(App Router、Server Actions、Next-Action 头)出现时,先试该组件公开 RCE/SSRF 家族(如 Server Actions 的 multipart chunks+Next-Action 回显链),自定义协议逆向是后手——在自定义序列化格式上硬啃是烧穿容器寿命的头号死法,组件对上 CVE 时一条公开 poc 直取。**静态扫 bundle"没找到 callsite"不构成任何判死证据**:React flight client runtime 打进每一个 Next bundle,而处理器在运行期挂载(动态 import、middleware、运行期路由注册、反射)——静态缺席只能用来排优先级,不能关面。没打过的动态族还有:middleware 绕过头家族、缓存投毒、RSC payload 原型链污染、image optimizer SSRF。
+- **Gradio 面全套(出现即按此清点)**:`GET /config` 是侦察金矿——版本、组件树、deps 全表(fn_index、每个 fn 的 inputs/outputs 形状)。**deps 里每个 fn 都是可调端点,包括 UI 上没有的隐藏 fn**(Flag/reset 一类):老版本 `POST /run/<fn>`,新版本 `POST /call/<fn>`+queue 协议;参数形状照 inputs 逐个组件对着填,错形状常回 `["Error!"]` 且 duration≈0。**文件读 `/file=` 有守卫就上深度电池,别只试一档**:1..12 层 `../`(raw 与 `..%2F` 两种都跑)、绝对路径形态、`..\\`;CVE-2024-1561 家族(<4.11)就是 `..%2F` 链;部分版本把 file/proxy 路由挪到 `/gradio_api/` 前缀下——**每种路由拼写都要试**再下"守卫牢固"的结论。**`/proxy=` 新版有 allowlist**:恒定 400 "cannot be proxied" 就是 allowlist 拒了,别 fuzz 几十个变体——先从 /config 与题面里找"允许被代理"的内部目标再打。上传接口的 basename 清洗一般洗得很死,别恋战。
+- **参数名带点号/横线 × nginx+PHP = 头部载体死刑**:nginx `ignore_invalid_headers=on` 对名字含 `.`/`_` 的 header **静默丢弃**(没有 400——"没报错"≠"送到了");即使送到了,PHP 注册 `HTTP_*` 键时也把 `.`/`-` 统统 mangle 成 `_`。所以带点参数名**永远无法经 header 到达 PHP**,载体只剩 body/query/cookie/JSON——在 39 种 header 形状上排队是纯烧轮次(实战 130+ 种 body 形状 + 全部 header 形状证伪后才发现该规则)。
 - **原型链/属性污染:payload"通过但不生效"≠死,变换编码层级再试**:污染 gadget 首选"文件读取/包含端点会用的属性"(模块 `__file__`、配置路径、模板名);JSON 转义层级(`\\` vs `\`)、URL/Unicode 编码差异常是生效与否的关键——一层不生效换下一层,严禁两发就判死。污染前先找源码披露端点(GET /src、/.git、备份文件)拉全量源码定 gadget。
 - **裸 JDWP 手搓是最后手段**:invokeMethod 是崩 JVM 大户(一 invoke 一崩,连带整容器重启)。有 HTTP API 的 Java 服务,API 层 RCE(沙箱绕过/CVE 链)与**诊断代理激活端点**(PUT/POST 挂载 arthas/JMX 一类,激活后 telnet/http 即全权执行——注意:激活前端口零回显不是死面)全部证伪之前不碰 JDWP;必须进 JDWP 时只用只读原语(String reference 读取、线程枚举),不 invokeMethod。
 
 ## 容器健康(实战血泪)
 - **start 返回的地址只是声明**:平台复用地址,可能发来别题的应用或根本没服务。开打前 GET 根路径验签(标题/框架对上本题);TCP 能连≠端口开。
 - **网架 SYN 代理处处假开放**:nmap/端口扫描对靶机会报出几千个假 open,零信息量且烧窗口。只打 container_addr 给的端口 + 有 HTTP 层正证据的端口。
-- **地址哑/错**:close→重开一次→再验;仍不行立即 WAITING_SLOT 交还引擎。重启循环第三次起就是纯亏损(实战有单题连开 9 次全废的教训)。
+- **地址哑/错**:close→重开一次→再验;仍不行立即 WAITING_SLOT 交还引擎。重启循环第三次起就是纯亏损(实战有单题连开 9 次全废的教训)。**TCP 能连但 HTTP 沉默 ≠ 死**:重型应用(Gradio/ML 载模型、大 JVM)从容器启动到首个 HTTP 响应要几分钟——此时**严禁重启**(重启把开机时钟清零,只会再哑一轮;实战:ML 应用两次都在 ~90 秒被 close,永远没被允许开完机);保持容器,就绪循环放宽到 5 分钟(10 秒一探)再判死。
 - 靶机应用"服务几个请求就死"是异常不是抖动:记录进台账,降速(单连接、串行、加延时),别用重启解决。
 - **重启按题累计熔断**:close+start 的配额按题算,不按死亡次数算——第 3 次重启即判定该攻击面已死,停止重启换面或交还槽位。**攻击后秒级全端口 RST = 你自己把它打崩的**(重型 invoke/利用/模糊),不是平台劣化:重启一次后必须降级原语(只读探针/更小载荷),原样重放只会再崩一次(典型:手搓 JDWP invoke 反复杀 JVM,十几连重启零产出)。
 

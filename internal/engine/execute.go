@@ -83,9 +83,10 @@ func (e *Engine) executeStep(ctx context.Context, goalID, stepID string) {
 	// so an uncapped mega-step overruns the budget freely while pinning a
 	// container slot: with ExecuteTimeout 90m > GoalWallBudget 45m, run 42176
 	// saw three goals hold slots 93–110 min. Cap the step at the wall budget
-	// still remaining (+2m grace for terminal writes).
+	// still remaining (+2m grace for terminal writes). wallBudgetFor picks
+	// the endgame-deepened budget when the harvest window is open.
 	timeout := e.cfg.Runtime.ExecuteTimeout.D()
-	if wb := e.cfg.Runtime.GoalWallBudget.D(); wb > 0 {
+	if wb := e.wallBudgetFor(); wb > 0 {
 		e.mu.Lock()
 		first, ok := e.firstClaim[goalID]
 		e.mu.Unlock()

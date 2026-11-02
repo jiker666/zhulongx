@@ -345,6 +345,49 @@ func TestGoalWallBudgetStops(t *testing.T) {
 	}
 }
 
+func TestEndgameBudgetsDeepenInHarvestWindow(t *testing.T) {
+	// Run 42838 walls died one or two moves short of the flag with the next
+	// move already named in the ledger — 30m/6-step pass caps fit first-touch
+	// recon, not deep chains (keystream batteries, locked-suffix write
+	// primitives, 30k-entry internal fuzzes). In the harvest window the
+	// budgets deepen; mid-run they stay tight so breadth keeps its slots.
+	ctx := context.Background()
+	e, st, _ := newEngine(t, ok(`{}`))
+	e.cfg.Runtime.RunDeadline = cfg.Duration(6 * time.Hour)
+	e.cfg.Runtime.EndgameAfter = cfg.Duration(5 * time.Hour)
+	e.cfg.Runtime.GoalStepBudget = 6
+	e.cfg.Runtime.GoalWallBudget = cfg.Duration(30 * time.Minute)
+	e.cfg.Runtime.EndgameStepBudget = 10
+	e.cfg.Runtime.EndgameWallBudget = cfg.Duration(45 * time.Minute)
+
+	e.startedAt = e.now() // mid-run
+	if got := e.stepBudgetFor(); got != 6 {
+		t.Fatalf("mid-run step budget: %d", got)
+	}
+	if got := e.wallBudgetFor(); got != 30*time.Minute {
+		t.Fatalf("mid-run wall budget: %s", got)
+	}
+
+	g, _ := st.CreateGoal(ctx, "deep", "o", "obj")
+	e.mu.Lock()
+	e.firstClaim[g.ID] = e.now().Add(-40 * time.Minute) // 10m past the mid-run cap
+	e.mu.Unlock()
+	if over, why := e.goalOverBudget(ctx, g.ID); !over {
+		t.Fatalf("mid-run 40m against a 30m cap must be over budget (%s)", why)
+	}
+
+	e.startedAt = e.now().Add(-5 * time.Hour) // inside the harvest window
+	if got := e.stepBudgetFor(); got != 10 {
+		t.Fatalf("endgame step budget: %d", got)
+	}
+	if got := e.wallBudgetFor(); got != 45*time.Minute {
+		t.Fatalf("endgame wall budget: %s", got)
+	}
+	if over, why := e.goalOverBudget(ctx, g.ID); over {
+		t.Fatalf("40m against the 45m harvest cap must keep going (%s)", why)
+	}
+}
+
 func TestRequeueRespectsDeadline(t *testing.T) {
 	// A run deadline already within the 10-minute floor forbids requeueing.
 	ctx := context.Background()

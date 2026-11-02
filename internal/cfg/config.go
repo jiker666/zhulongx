@@ -78,6 +78,16 @@ type Runtime struct {
 	// multi-flag goals sat stopped. An idle endgame slot is worth exactly
 	// zero. 0 disables the top-up.
 	EndgameMinActive int `yaml:"endgame_min_active"`
+	// EndgameStepBudget / EndgameWallBudget override GoalStepBudget /
+	// GoalWallBudget inside the harvest window (0 = keep the mid-run cap).
+	// Run 42838 walls died one or two moves short of the flag with the next
+	// move already named in the ledger — deep chains (locked-suffix write
+	// primitives, custom-crypto keystream batteries, 30k-entry internal dir
+	// fuzzes) need more steps and minutes per pass than first-touch recon
+	// does. In endgame the queue is thin, slots would otherwise idle, and
+	// breadth no longer trades against depth.
+	EndgameStepBudget int          `yaml:"endgame_step_budget"`
+	EndgameWallBudget Duration     `yaml:"endgame_wall_budget"`
 }
 
 // Pi describes how to launch the agent runtime.
