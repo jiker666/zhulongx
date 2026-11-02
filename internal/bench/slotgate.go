@@ -64,19 +64,19 @@ type SlotGate struct {
 // NewSlotGate builds a gate for at most maxSlots concurrent containers.
 func NewSlotGate(st *store.Store, c *Client, maxSlots int, log *slog.Logger) *SlotGate {
 	return &SlotGate{
-		st:        st,
-		client:    c,
-		log:       log,
-		maxSlot:   maxSlots,
-		pollTTL:   8 * time.Second,
-		reserveTTL: 4 * time.Minute,
-		sweepTTL:  5 * time.Minute,
-		now:       time.Now,
-		listOnce:  c.List,
-		closeCode: c.Close,
-		reserved:  map[string]time.Time{},
-		lastWork:  map[string]time.Time{},
-		pendingRelease: map[string]time.Time{},
+		st:              st,
+		client:          c,
+		log:             log,
+		maxSlot:         maxSlots,
+		pollTTL:         8 * time.Second,
+		reserveTTL:      4 * time.Minute,
+		sweepTTL:        5 * time.Minute,
+		now:             time.Now,
+		listOnce:        c.List,
+		closeCode:       c.Close,
+		reserved:        map[string]time.Time{},
+		lastWork:        map[string]time.Time{},
+		pendingRelease:  map[string]time.Time{},
 		releaseRetryTTL: 30 * time.Second,
 	}
 }
