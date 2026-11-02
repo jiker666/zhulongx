@@ -2,6 +2,7 @@ package bench
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"testing"
@@ -17,6 +18,7 @@ type gateFixture struct {
 	closed     []string
 	now        time.Time
 	challenges []Challenge
+	failCloses int // when > 0, the next N close POSTs fail
 }
 
 func newFixture(t *testing.T, maxSlots int) *gateFixture {
@@ -35,7 +37,18 @@ func newFixture(t *testing.T, maxSlots int) *gateFixture {
 		return out, nil
 	}
 	g.closeCode = func(_ context.Context, code string) error {
+		if f.failCloses > 0 {
+			f.failCloses--
+			f.closed = append(f.closed, code+"!ERR")
+			return fmt.Errorf("transient 5xx")
+		}
 		f.closed = append(f.closed, code)
+		// reflect the close in the fake platform list
+		for i := range f.challenges {
+			if f.challenges[i].UniqueCode == code {
+				f.challenges[i].ContainerStatus = "stopped"
+			}
+		}
 		return nil
 	}
 	f.gate = g
@@ -132,12 +145,11 @@ func TestSlotGateReapsTerminalGoalContainer(t *testing.T) {
 
 func TestSlotGateForceReleaseBypassesTerminalScan(t *testing.T) {
 	// A stopped goal whose pass-2 requeue keeps the title non-terminal is
-	// invisible to the reaper; ForceRelease must free the slot anyway —
-	// and skip challenges the platform already credits (no container needed).
-	f := newFixture(t, 2)
+	// invisible to the reaper; ForceRelease must free the slot anyway.
+	f := newFixture(t, 1)
 	f.challenges = []Challenge{
 		{UniqueCode: "a-01", ContainerStatus: "available"},
-		{UniqueCode: "a-02", IsCompleted: true, ContainerStatus: "available"},
+		{UniqueCode: "a-02", IsCompleted: true, ContainerStatus: "stopped"},
 	}
 	f.goal(t, "a-01", fgs.GoalStopped)
 	f.goal(t, "a-01", fgs.GoalActive) // pass-2 successor: title is live
@@ -149,7 +161,7 @@ func TestSlotGateForceReleaseBypassesTerminalScan(t *testing.T) {
 		t.Fatal("completed challenge needs no slot")
 	}
 	if f.gate.Allow(ctx, c) {
-		t.Fatal("two running containers saturate the task")
+		t.Fatal("the leaked container still occupies the only slot")
 	}
 	if len(f.closed) != 0 {
 		t.Fatalf("a title with a live successor must not be reaped: %v", f.closed)
@@ -158,12 +170,84 @@ func TestSlotGateForceReleaseBypassesTerminalScan(t *testing.T) {
 	if len(f.closed) != 1 || f.closed[0] != "a-01" {
 		t.Fatalf("force release must close the stopped goal's container: %v", f.closed)
 	}
-	f.gate.ForceRelease(ctx, "a-02") // completed → no close
-	if len(f.closed) != 1 {
-		t.Fatalf("completed challenges need no container: %v", f.closed)
-	}
 	if !f.gate.Allow(ctx, c) {
 		t.Fatal("after force release the slot must be free")
+	}
+}
+
+func TestSlotGateCompletedContainerReapedOnSight(t *testing.T) {
+	// Run 43251's leak: the challenge was fully solved (platform is_completed,
+	// correct==total) yet its container stayed OPEN with every guard skipping
+	// it — the agent's step had died right after the submit, ForceRelease
+	// returned nil for completed codes, and the idle sweep exempted them.
+	// A completed challenge's running container is worth zero: reap it on
+	// sight, ahead of every other consideration.
+	f := newFixture(t, 1)
+	f.challenges = []Challenge{
+		{UniqueCode: "f1-05", IsCompleted: true, CorrectFlagCount: 1, FlagCount: 1, ContainerStatus: "running"},
+	}
+	f.goal(t, "f1-05", fgs.GoalActive) // goal may even still be active (stuck step)
+	other := f.goal(t, "a-02", fgs.GoalActive)
+
+	ctx := context.Background()
+	if f.gate.Allow(ctx, other) {
+		t.Fatal("the solved challenge's container still occupies the slot on this call")
+	}
+	if len(f.closed) != 1 || f.closed[0] != "f1-05" {
+		t.Fatalf("completed challenge's running container must be reaped immediately: %v", f.closed)
+	}
+	if !f.gate.Allow(ctx, other) {
+		t.Fatal("after the reap the slot must be free")
+	}
+}
+
+func TestSlotGateForceReleaseClosesCompletedChallenge(t *testing.T) {
+	// Regression: ForceRelease used to return nil for completed codes under
+	// the (false) assumption that the platform reaps solved challenges'
+	// containers itself. It does not — closing is the hook's whole job.
+	f := newFixture(t, 1)
+	f.challenges = []Challenge{
+		{UniqueCode: "f1-05", IsCompleted: true, CorrectFlagCount: 1, FlagCount: 1, ContainerStatus: "running"},
+	}
+	if err := f.gate.ForceRelease(context.Background(), "f1-05"); err != nil {
+		t.Fatalf("force release of a completed challenge must succeed: %v", err)
+	}
+	if len(f.closed) != 1 || f.closed[0] != "f1-05" {
+		t.Fatalf("completed challenge's container must be closed: %v", f.closed)
+	}
+}
+
+func TestSlotGateRetriesFailedCloseUntilPlatformConfirms(t *testing.T) {
+	// A transient 5xx on the one-shot close POST used to leak the slot for
+	// the rest of the run. Now the failure parks the code and every
+	// releaseRetryTTL the gate re-posts until the snapshot shows it down.
+	f := newFixture(t, 1)
+	f.challenges = []Challenge{{UniqueCode: "a-01", ContainerStatus: "running"}}
+	f.goal(t, "a-01", fgs.GoalStopped)
+	other := f.goal(t, "a-02", fgs.GoalActive)
+	f.failCloses = 1 // first close attempt fails
+
+	ctx := context.Background()
+	if err := f.gate.ForceRelease(ctx, "a-01"); err == nil {
+		t.Fatal("the failed close must surface its error")
+	}
+	if len(f.closed) != 1 || f.closed[0] != "a-01!ERR" {
+		t.Fatalf("first attempt must have failed: %v", f.closed)
+	}
+	f.now = f.now.Add(31 * time.Second) // past releaseRetryTTL
+	if f.gate.Allow(ctx, other) {
+		t.Fatal("the unreleased container must still occupy the slot")
+	}
+	if len(f.closed) != 2 || f.closed[1] != "a-01" {
+		t.Fatalf("the parked release must be retried: %v", f.closed)
+	}
+	if !f.gate.Allow(ctx, other) {
+		t.Fatal("after the successful retry the slot must be free")
+	}
+	f.now = f.now.Add(31 * time.Second)
+	f.gate.Allow(ctx, other)
+	if len(f.closed) != 2 {
+		t.Fatalf("a confirmed release must not be re-posted: %v", f.closed)
 	}
 }
 

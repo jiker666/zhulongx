@@ -2,6 +2,7 @@ package bench
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -49,6 +50,13 @@ type SlotGate struct {
 	total      map[string]int    // code -> flag_count
 	reserved   map[string]time.Time
 	lastWork   map[string]time.Time // code -> last time a running step used its container
+	// pendingRelease parks codes whose close POST failed: the gate re-asks
+	// the platform every releaseRetryTTL until the snapshot shows the
+	// container down, so one transient 5xx on a one-shot close cannot leak
+	// a slot for the rest of the run.
+	pendingRelease map[string]time.Time
+
+	releaseRetryTTL time.Duration // re-close cadence for parked releases
 
 	onSnapshot func(ctx context.Context) // optional: fired after each successful refresh (fast-lane pending flush)
 }
@@ -68,6 +76,8 @@ func NewSlotGate(st *store.Store, c *Client, maxSlots int, log *slog.Logger) *Sl
 		closeCode: c.Close,
 		reserved:  map[string]time.Time{},
 		lastWork:  map[string]time.Time{},
+		pendingRelease: map[string]time.Time{},
+		releaseRetryTTL: 30 * time.Second,
 	}
 }
 
@@ -264,8 +274,21 @@ func (g *SlotGate) refreshLocked(ctx context.Context) []string {
 	}
 	var reap []string
 	for code2 := range status {
-		if !isRunning(status[code2]) || completed[code2] {
-			continue // already gone, or platform credits the challenge in full
+		if !isRunning(status[code2]) {
+			continue // already gone
+		}
+		// A COMPLETED challenge's running container is the first thing to
+		// reap, not something to skip: the platform does NOT auto-close
+		// solved challenges (run 43251: f1-05 banked its last flag at
+		// t+12.7 and the container sat open 15+ minutes — the step died on
+		// a transport error at that exact seam, the stop-time
+		// ReleaseContainer treated "completed" as nothing-to-release, and
+		// this sweep exempted completed codes). Nothing legitimate still
+		// needs a fully solved challenge's container, not even an
+		// in-flight step writing its ledger: the ledger lives agent-side.
+		if completed[code2] {
+			reap = append(reap, code2)
+			continue
 		}
 		if working[code2] {
 			continue // a running step is using this container right now
@@ -289,22 +312,46 @@ func (g *SlotGate) refreshLocked(ctx context.Context) []string {
 		}
 		reap = append(reap, code2)
 	}
+
+	// Parked releases: retry the close POST every releaseRetryTTL until the
+	// snapshot shows the container down (cleared the moment it does). A
+	// code already reaped above is skipped so the POST fires once per cycle.
+	inReap := make(map[string]bool, len(reap))
+	for _, c := range reap {
+		inReap[c] = true
+	}
+	for code2, at := range g.pendingRelease {
+		if !isRunning(status[code2]) {
+			delete(g.pendingRelease, code2)
+			continue
+		}
+		if inReap[code2] || now.Sub(at) < g.releaseRetryTTL {
+			continue
+		}
+		g.pendingRelease[code2] = now
+		reap = append(reap, code2)
+	}
 	return reap
 }
 
 // reap closes containers the sweep found idle (outside g.mu — Close is a
 // network call), then fires the on-snapshot callback so dependents on the
-// fresh platform state (the fast lane's deferred flags) can act.
+// fresh platform state (the fast lane's deferred flags) can act. A failed
+// close parks the code for retry instead of leaking the slot silently.
 func (g *SlotGate) reap(ctx context.Context, codes []string) {
 	for _, code := range codes {
-		if err := g.closeCode(ctx, code); err != nil {
-			g.log.Warn("bench: slot gate reap close failed", "code", code, "err", err)
+		if err := g.closeNow(ctx, code); err != nil {
+			g.mu.Lock()
+			g.pendingRelease[code] = g.now()
+			g.mu.Unlock()
+			g.log.Warn("bench: container close failed, will retry", "code", code, "err", err)
 			continue
 		}
 		g.mu.Lock()
 		if g.status != nil {
 			g.status[code] = "stopped"
 		}
+		delete(g.pendingRelease, code)
 		g.mu.Unlock()
 		g.log.Info("bench: slot gate swept idle container", "code", code)
 	}
@@ -319,28 +366,43 @@ func (g *SlotGate) reap(ctx context.Context, codes []string) {
 // ForceRelease closes a challenge container now, bypassing the idle sweep.
 // The engine asks for this the moment it stops a goal: the pass-2 requeue
 // keeps a live goal on the title, but nothing is working the challenge
-// anymore, and the sweep would only catch it sweepTTL later. A challenge
-// the platform already credits needs no container, so it is skipped. The
-// error return lets the engine's release retry tell failure from success.
+// anymore, and the sweep would only catch it sweepTTL later. Completed
+// challenges are the MOST important thing to close, not the least: the
+// platform does not auto-close solved challenges (run 43251: a 1/1-flag
+// challenge's container sat open 15+ minutes because this hook returned nil
+// for completed codes). Closing is idempotent — invalid_state (already
+// stopped) counts as success. A failed POST parks the code for retry.
 func (g *SlotGate) ForceRelease(ctx context.Context, code string) error {
 	if code == "" {
 		return nil
 	}
-	g.mu.Lock()
-	completed := g.completed[code]
-	g.mu.Unlock()
-	if completed {
-		return nil
-	}
-	if err := g.closeCode(ctx, code); err != nil {
+	if err := g.closeNow(ctx, code); err != nil {
+		g.mu.Lock()
+		g.pendingRelease[code] = g.now()
+		g.mu.Unlock()
 		return fmt.Errorf("close %s: %w", code, err)
 	}
 	g.mu.Lock()
 	if g.status != nil {
 		g.status[code] = "stopped"
 	}
+	delete(g.pendingRelease, code)
 	g.mu.Unlock()
 	g.log.Info("bench: slot gate released container of stopped goal", "code", code)
+	return nil
+}
+
+// closeNow posts one Close, treating invalid_state (the container is
+// already stopped or the task is over) as success: the goal of the call is
+// a non-running container, and that state already holds.
+func (g *SlotGate) closeNow(ctx context.Context, code string) error {
+	if err := g.closeCode(ctx, code); err != nil {
+		var ae *APIError
+		if errors.As(err, &ae) && ae.Code == CodeInvalidState {
+			return nil
+		}
+		return err
+	}
 	return nil
 }
 
