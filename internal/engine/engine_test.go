@@ -1024,6 +1024,39 @@ func TestFlagRefuelExtendsWallBudget(t *testing.T) {
 	}
 }
 
+func TestCompletedChallengeRetiresAndNeverRequeues(t *testing.T) {
+	// Solved titles must leave the fleet: the sweep retires the active
+	// goal (freeing the container), and requeuePass2 — the single choke
+	// point every resurrection path funnels through (budget stops,
+	// endgame top-up) — refuses a completed title. Otherwise a solved
+	// challenge re-queues for two more passes and re-eats slots the
+	// untouched tail never sees.
+	ctx := context.Background()
+	e, st, _ := newEngine(t, ok(`{}`))
+	e.cfg.Runtime.RunDeadline = cfg.Duration(time.Hour)
+	e.startedAt = e.now()
+	e.FlagProgress = func(string) (int, int, bool) { return 1, 1, true }
+
+	g, _ := st.CreateGoal(ctx, "solved-title", "o", "obj")
+	pruned := e.sweepCompleted(ctx, []fgs.Goal{*g})
+	if len(pruned) != 0 {
+		t.Fatalf("completed goal must be pruned from actives, got %d", len(pruned))
+	}
+	gg, err := st.GetGoal(ctx, g.ID)
+	if err != nil || gg.Status != fgs.GoalStopped {
+		t.Fatalf("completed goal must be stopped: err=%v status=%v", err, gg.Status)
+	}
+	if ng, ok := e.requeuePass2(ctx, gg); ok {
+		t.Fatalf("completed challenge must never requeue, minted %v", ng.ID)
+	}
+	// The pass-2 requeue of a NON-completed sibling still works — the gate
+	// must not overreach.
+	e.FlagProgress = func(string) (int, int, bool) { return 1, 4, true }
+	if _, ok := e.requeuePass2(ctx, gg); !ok {
+		t.Fatal("partial-progress challenge must still requeue normally")
+	}
+}
+
 func TestFlagRefuelGrantsStepBudget(t *testing.T) {
 	// Run 43065 anatomy: a multi-flag intranet banked flags mid-pass but the
 	// STEP budget (checked before the wall refuel ever helped) still cut the

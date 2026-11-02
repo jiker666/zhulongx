@@ -271,6 +271,14 @@ func (e *Engine) tick(ctx context.Context) {
 			actives = append(actives, g)
 		}
 	}
+	// Completion sweep: a challenge whose platform progress reads full has
+	// nothing left to earn. Without this, solved titles sat active until
+	// budget death — burning Decide rounds on a done challenge — and then
+	// requeued for two more passes, re-eating slots the untouched queue
+	// tail never saw. The in-flight step lands naturally (ledger flush,
+	// container close); the engine simply schedules nothing further, and
+	// every resurrection path refuses completed titles.
+	actives = e.sweepCompleted(ctx, actives)
 	// First-touch fairness (pre-endgame): a goal whose TITLE the run has
 	// never claimed a step for is visited ahead of every title already
 	// worked, so a refueled siege cannot starve the queue tail (run 42416:
@@ -307,6 +315,39 @@ func (e *Engine) tick(ctx context.Context) {
 		}
 		e.scheduleGoal(ctx, g.ID)
 	}
+}
+
+// challengeComplete reports whether the challenge behind a title has all
+// its flags banked (platform is_completed). Unknown progress = false.
+func (e *Engine) challengeComplete(title string) bool {
+	if e.FlagProgress == nil {
+		return false
+	}
+	cur, total, ok := e.FlagProgress(title)
+	return ok && total > 0 && cur >= total
+}
+
+// sweepCompleted retires goals whose challenges read fully solved and
+// returns the pruned active list.
+func (e *Engine) sweepCompleted(ctx context.Context, actives []fgs.Goal) []fgs.Goal {
+	out := actives[:0:0]
+	for _, g := range actives {
+		if ctx.Err() != nil {
+			return actives
+		}
+		if !e.challengeComplete(g.Title) {
+			out = append(out, g)
+			continue
+		}
+		if err := e.store.SetGoalStatus(ctx, g.ID, fgs.GoalStopped, fgs.ActorEngine); err != nil {
+			e.log.Error("complete sweep: set status", "goal", g.ID, "err", err)
+			out = append(out, g)
+			continue
+		}
+		e.releaseStoppedContainer(g.ID)
+		e.log.Info("challenge complete: goal retired, slot freed", "goal", g.ID, "title", g.Title)
+	}
+	return out
 }
 
 // endgameTopUp feeds the harvest window. The requeue caps that keep mid-run
@@ -436,6 +477,14 @@ func (e *Engine) requeuePass2(ctx context.Context, g *fgs.Goal) (*fgs.Goal, bool
 	// exploration (42361: b-01 killed at 2/4 with the third in reach).
 	const maxRequeues = 2
 	const endgameMaxRequeues = 6
+	// Solved challenges never re-enter the queue — not via budget stops,
+	// not via the endgame top-up. A completed title that requeues burns a
+	// container cycle and a pass on work the platform has already paid
+	// for, exactly the slot-starvation shape the fairness sort exists to
+	// prevent.
+	if e.challengeComplete(g.Title) {
+		return nil, false
+	}
 	maxFor := maxRequeues
 	if e.FlagProgress != nil {
 		if cur, _, ok := e.FlagProgress(g.Title); ok && cur == 0 {
