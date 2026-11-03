@@ -527,27 +527,43 @@ func (e *Engine) inEndgame() bool {
 }
 
 // stepBudgetFor / wallBudgetFor return the effective per-goal budgets,
-// deepened inside the harvest window when Endgame overrides are set: run
-// 42838's walls died one or two moves short with the next move already
-// named in their ledgers — endgame slots would otherwise idle, so depth
-// no longer trades against breadth there.
-func (e *Engine) stepBudgetFor() int {
-	if e.inEndgame() && e.cfg.Runtime.EndgameStepBudget > 0 {
+// deepened inside the harvest window when Endgame overrides are set — but
+// only for titles with banked flag progress. Run 42838's walls died one
+// or two moves short with the next move already named (depth pays there);
+// run 43574 inverted that lesson: deep walls on unbanked goals let two
+// deep partials and three regrind passes hold the whole fleet for the
+// final half hour while 39 untouched titles starved and the run scored
+// zero. Depth is for proven converters; breadth for everything else.
+func (e *Engine) stepBudgetFor(title string) int {
+	if e.inEndgame() && e.cfg.Runtime.EndgameStepBudget > 0 && e.bankedTitle(title) {
 		return e.cfg.Runtime.EndgameStepBudget
 	}
 	return e.cfg.Runtime.GoalStepBudget
 }
 
-func (e *Engine) wallBudgetFor() time.Duration {
-	if e.inEndgame() && e.cfg.Runtime.EndgameWallBudget > 0 {
+func (e *Engine) wallBudgetFor(title string) time.Duration {
+	if e.inEndgame() && e.cfg.Runtime.EndgameWallBudget > 0 && e.bankedTitle(title) {
 		return e.cfg.Runtime.EndgameWallBudget.D()
 	}
 	return e.cfg.Runtime.GoalWallBudget.D()
 }
 
-// endgameRank scores goals for the harvest window: partial flag progress
-// first, multi-flag challenges with nothing banked yet second, the rest
-// last.
+// bankedTitle reports whether the title has banked flag progress — a
+// proven converter, not a promise.
+func (e *Engine) bankedTitle(title string) bool {
+	if e.FlagProgress == nil {
+		return false
+	}
+	cur, _, ok := e.FlagProgress(title)
+	return ok && cur > 0
+}
+
+// endgameRank scores goals for the harvest window on title-completion
+// economics: one-flag-from-done (4) > untouched singles (3) > deep partials
+// still missing ≥2 flags (2) > zero-flag multis (1) > everything else (0).
+// Run 43574: ranking every banked partial top-tier let the stuck 2/4 pair
+// hold the fleet's slots through a zero-flag final half hour while ~39
+// untouched titles waited.
 func (e *Engine) endgameRank(goals []fgs.Goal) map[string]int {
 	rank := make(map[string]int, len(goals))
 	if e.FlagProgress == nil {
@@ -559,16 +575,28 @@ func (e *Engine) endgameRank(goals []fgs.Goal) map[string]int {
 			continue
 		}
 		switch {
+		case cur > 0 && total-cur == 1:
+			// One flag from title completion — the cheapest conversion in
+			// the fleet, worth a slot before anything else.
+			rank[g.ID] = 4
 		case cur > 0 && cur < total:
-			rank[g.ID] = 3 // banked progress — cheapest conversion in the fleet
-		case !e.titleTouched(g.Title):
-			// Never worked beats regrinding a zero-flag multi (run 43065:
-			// a-15/e1-04/e2-02 converted the MOMENT they were finally fed
-			// at t+339-343, while zero-flag regrinds held slots through
-			// the same window and 7 titles never saw a container at all).
-			rank[g.ID] = 2
+			rank[g.ID] = 2 // deep partial: ≥2 flags still missing — full siege work per flag
 		case total > 1 && cur == 0:
-			rank[g.ID] = 1 // multi-flag challenge, nothing banked yet
+			// Multi-flag title with nothing banked — whether worked or not,
+			// the title only completes when ALL flags land, so endgame slots
+			// go to it only after single-flag conversions (run 43065:
+			// zero-flag regrinds held slots while single-flag titles
+			// converted the moment they were fed).
+			rank[g.ID] = 1
+		case !e.titleTouched(g.Title):
+			// Never-worked single-flag title: a fresh, cheap conversion —
+			// beats sieging a deep partial (run 43574: b-01/b-03 sat at 2/4
+			// from t+80m and monopolized the top slots through a zero-flag
+			// final half hour while 39 untouched titles waited; the pair
+			// has ended 2/4 in every run since 42361). Flag state is checked
+			// first on purpose: a banked title has been worked even if
+			// firstTouch memory was lost to an engine restart.
+			rank[g.ID] = 3
 		}
 	}
 	return rank
@@ -596,6 +624,11 @@ func (e *Engine) requeuePass2(ctx context.Context, g *fgs.Goal) (*fgs.Goal, bool
 	// exploration (42361: b-01 killed at 2/4 with the third in reach).
 	const maxRequeues = 2
 	const endgameMaxRequeues = 8
+	// Zero-progress titles stay fuse-limited even in the harvest window:
+	// the endgame lift exists for converters (42838), but an unbanked dud
+	// re-minted to 8 passes is the 43574 shape — three regrind passes
+	// held half the fleet for the final half hour with zero return.
+	const endgameZeroMaxRequeues = 3
 	// Solved challenges never re-enter the queue — not via budget stops,
 	// not via the endgame top-up. A completed title that requeues burns a
 	// container cycle and a pass on work the platform has already paid
@@ -605,6 +638,7 @@ func (e *Engine) requeuePass2(ctx context.Context, g *fgs.Goal) (*fgs.Goal, bool
 		return nil, false
 	}
 	maxFor := maxRequeues
+	banked := e.bankedTitle(g.Title)
 	if e.FlagProgress != nil {
 		if cur, _, ok := e.FlagProgress(g.Title); ok && cur == 0 {
 			maxFor = 1
@@ -614,9 +648,13 @@ func (e *Engine) requeuePass2(ctx context.Context, g *fgs.Goal) (*fgs.Goal, bool
 		// Harvest-window lift (run 42838: hour-5 slot utilization collapsed
 		// to 1.17/3 because every title had burned its requeue cap — the
 		// queue emptied while partials sat stopped). An idle endgame slot is
-		// worth exactly zero; every stopped title stays requeueable under a
-		// hard pass fuse, and endgameRank feeds banked progress first.
-		maxFor = endgameMaxRequeues
+		// worth exactly zero — but the lift is for converters: banked
+		// titles get the full fuse, unbanked ones a short one.
+		if banked {
+			maxFor = endgameMaxRequeues
+		} else {
+			maxFor = endgameZeroMaxRequeues
+		}
 	}
 	if e.cfg.Runtime.RunDeadline <= 0 || ctx.Err() != nil {
 		return nil, false
@@ -804,7 +842,11 @@ func (e *Engine) goalOverBudget(ctx context.Context, goalID string) (bool, strin
 	if e.runtimeDead() {
 		return false, ""
 	}
-	sb, wb := e.stepBudgetFor(), e.wallBudgetFor()
+	g, err := e.store.GetGoal(ctx, goalID)
+	if err != nil {
+		return false, ""
+	}
+	sb, wb := e.stepBudgetFor(g.Title), e.wallBudgetFor(g.Title)
 	if sb <= 0 && wb <= 0 {
 		return false, ""
 	}

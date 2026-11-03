@@ -28,9 +28,9 @@ type fastLaneFixture struct {
 	engine *engine.Engine
 	store  *store.Store
 
-	mu       sync.Mutex
-	status   string // a-01 container status served by the platform
-	submits  []string
+	mu      sync.Mutex
+	status  string // a-01 container status served by the platform
+	submits []string
 }
 
 func newFastLaneFixture(t *testing.T, initialStatus string) *fastLaneFixture {

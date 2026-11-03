@@ -361,14 +361,20 @@ func TestEndgameBudgetsDeepenInHarvestWindow(t *testing.T) {
 	e.cfg.Runtime.EndgameWallBudget = cfg.Duration(45 * time.Minute)
 
 	e.startedAt = e.now() // mid-run
-	if got := e.stepBudgetFor(); got != 6 {
+	if got := e.stepBudgetFor("bench:b-01"); got != 6 {
 		t.Fatalf("mid-run step budget: %d", got)
 	}
-	if got := e.wallBudgetFor(); got != 30*time.Minute {
+	if got := e.wallBudgetFor("bench:b-01"); got != 30*time.Minute {
 		t.Fatalf("mid-run wall budget: %s", got)
 	}
 
 	g, _ := st.CreateGoal(ctx, "deep", "o", "obj")
+	e.FlagProgress = func(title string) (int, int, bool) {
+		if title == "deep" {
+			return 1, 2, true // banked: deep endgame budgets apply
+		}
+		return 0, 0, false
+	}
 	e.mu.Lock()
 	e.firstClaim[g.ID] = e.now().Add(-40 * time.Minute) // 10m past the mid-run cap
 	e.mu.Unlock()
@@ -377,10 +383,10 @@ func TestEndgameBudgetsDeepenInHarvestWindow(t *testing.T) {
 	}
 
 	e.startedAt = e.now().Add(-5 * time.Hour) // inside the harvest window
-	if got := e.stepBudgetFor(); got != 10 {
+	if got := e.stepBudgetFor("deep"); got != 10 {
 		t.Fatalf("endgame step budget: %d", got)
 	}
-	if got := e.wallBudgetFor(); got != 45*time.Minute {
+	if got := e.wallBudgetFor("deep"); got != 45*time.Minute {
 		t.Fatalf("endgame wall budget: %s", got)
 	}
 	if over, why := e.goalOverBudget(ctx, g.ID); over {
@@ -1228,7 +1234,7 @@ func TestReleaseContainerRetries(t *testing.T) {
 	}
 }
 
-func TestEndgameRankPrefersPartialFlagProgress(t *testing.T) {
+func TestEndgameRankBreadthOverDeepPartial(t *testing.T) {
 	ctx := context.Background()
 	e, st, _ := newEngine(t, ok(`{}`))
 	e.cfg.Runtime.RunDeadline = cfg.Duration(350 * time.Minute)
@@ -1264,9 +1270,12 @@ func TestEndgameRankPrefersPartialFlagProgress(t *testing.T) {
 		t.Fatal("t+331m of a 350m run with an 80m window is endgame")
 	}
 	rank := e.endgameRank([]fgs.Goal{{ID: partial.ID, Title: "bench:partial"}, {ID: multi.ID, Title: "bench:multi"}, {ID: plain.ID, Title: "bench:plain"}, {ID: fresh.ID, Title: "bench:fresh"}})
-	// partial(3) > never-touched(2) > worked multi-zero(1) > worked plain-zero(0)
-	if !(rank[partial.ID] > rank[fresh.ID] && rank[fresh.ID] > rank[multi.ID] && rank[multi.ID] > rank[plain.ID]) {
-		t.Fatalf("partial > never-touched > worked multi-zero > worked plain-zero: %v", rank)
+	// v20 re-tier (run 43574: banked deep partials starved untouched breadth):
+	// untouched single(3) > deep partial 2/4(2) > worked multi-zero(1) >
+	// worked plain-zero(0). A deep partial is a proven chain, not a cheap
+	// conversion — fresh singles convert, sieges grind.
+	if !(rank[fresh.ID] > rank[partial.ID] && rank[partial.ID] > rank[multi.ID] && rank[multi.ID] > rank[plain.ID]) {
+		t.Fatalf("untouched single > deep partial > worked multi-zero > worked plain-zero: %v", rank)
 	}
 	_ = ctx
 }
@@ -1425,9 +1434,16 @@ func TestEndgameTopUpRefeedsIdleSlots(t *testing.T) {
 	if err := st.SetGoalStatus(ctx, dud.ID, fgs.GoalStopped, fgs.ActorEngine); err != nil {
 		t.Fatal(err)
 	}
-	// Both stopped titles burned their full mid-run caps.
+	// Both stopped titles burned their full mid-run caps — and both were
+	// worked to get there (untouched titles cannot have burned caps; without
+	// the touch marks the fresh-tier rank would invert this order, which is
+	// the v20 breadth change covered by the rank tests above).
 	e.requeues["bench:b-01"] = 2
 	e.requeues["bench:c-02"] = 2
+	e.mu.Lock()
+	e.firstTouch["bench:b-01"] = true
+	e.firstTouch["bench:c-02"] = true
+	e.mu.Unlock()
 
 	goals, err := st.ListGoals(ctx)
 	if err != nil {
@@ -1757,5 +1773,65 @@ func TestRequeueSeedsPlatformHintIntoFreshPass(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("title-level dedupe broken, calls = %d", calls)
+	}
+}
+
+func TestEndgameRankOneFromDoneOverUntouchedOverDeepPartial(t *testing.T) {
+	// 43574 post-mortem: "banked" is not one tier. A title one flag from
+	// completion is the fleet's cheapest conversion; an UNTOUCHED title
+	// beats a deep partial (b-01/b-03 sat 2/4 from t+80m and monopolized
+	// the top slots for a zero-flag final half hour while 39 untouched
+	// titles starved — the pair has ended 2/4 in every run since 42361).
+	ctx := context.Background()
+	e, st, _ := newEngine(t)
+	e.FlagProgress = func(title string) (int, int, bool) {
+		switch title {
+		case "bench:one-from-done":
+			return 2, 3, true
+		case "bench:deep-partial":
+			return 2, 4, true
+		case "bench:zero-multi":
+			return 0, 6, true
+		case "bench:untouched":
+			return 0, 1, true
+		}
+		return 0, 0, false
+	}
+	mk := func(title string) *fgs.Goal {
+		g, err := st.CreateGoal(ctx, title, "o", "obj")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return g
+	}
+	gDone, gFresh, gDeep, gZero := mk("bench:one-from-done"), mk("bench:untouched"), mk("bench:deep-partial"), mk("bench:zero-multi")
+	rank := e.endgameRank([]fgs.Goal{*gZero, *gDeep, *gFresh, *gDone})
+	if !(rank[gDone.ID] > rank[gFresh.ID] && rank[gFresh.ID] > rank[gDeep.ID] && rank[gDeep.ID] > rank[gZero.ID]) {
+		t.Fatalf("rank order broken: done=%d fresh=%d deep=%d zero=%d",
+			rank[gDone.ID], rank[gFresh.ID], rank[gDeep.ID], rank[gZero.ID])
+	}
+	// Deep endgame budgets are for proven converters only: the untouched
+	// title keeps the base wall even inside the window, the banked ones
+	// get the deepened one.
+	e.cfg.Runtime.GoalWallBudget = cfg.Duration(30 * time.Minute)
+	e.cfg.Runtime.EndgameWallBudget = cfg.Duration(70 * time.Minute)
+	e.cfg.Runtime.RunDeadline = cfg.Duration(time.Hour)
+	e.cfg.Runtime.EndgameAfter = cfg.Duration(50 * time.Minute)
+	e.mu.Lock()
+	e.startedAt = time.Now().Add(-40 * time.Minute)
+	e.mu.Unlock()
+	if !e.inEndgame() {
+		t.Fatal("test must sit inside the endgame window")
+	}
+	if got := e.wallBudgetFor("bench:untouched"); got != 30*time.Minute {
+		t.Fatalf("untouched wall = %v, want base 30m", got)
+	}
+	for _, title := range []string{"bench:one-from-done", "bench:deep-partial"} {
+		if got := e.wallBudgetFor(title); got != 70*time.Minute {
+			t.Fatalf("%s wall = %v, want deep 70m", title, got)
+		}
+	}
+	if got := e.stepBudgetFor("bench:untouched"); got != e.cfg.Runtime.GoalStepBudget {
+		t.Fatalf("untouched step budget must stay base, got %d", got)
 	}
 }

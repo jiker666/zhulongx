@@ -86,7 +86,11 @@ func (e *Engine) executeStep(ctx context.Context, goalID, stepID string) {
 	// still remaining (+2m grace for terminal writes). wallBudgetFor picks
 	// the endgame-deepened budget when the harvest window is open.
 	timeout := e.cfg.Runtime.ExecuteTimeout.D()
-	if wb := e.wallBudgetFor(); wb > 0 {
+	stepTitle := ""
+	if g, gerr := e.store.GetGoal(ctx, goalID); gerr == nil {
+		stepTitle = g.Title
+	}
+	if wb := e.wallBudgetFor(stepTitle); wb > 0 {
 		e.mu.Lock()
 		first, ok := e.firstClaim[goalID]
 		e.mu.Unlock()
