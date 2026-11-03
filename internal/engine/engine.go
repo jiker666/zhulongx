@@ -89,6 +89,22 @@ type Engine struct {
 	failStreak    int
 	cooldownUntil time.Time
 
+	// Runtime watchdog: lastRunnerOK is the last completed runner turn
+	// (either mode); when it is older than RunnerWatchdog with no step in
+	// flight, the model path is declared dead and outageStart opens. During
+	// an outage the budget clocks freeze (goalOverBudget returns never,
+	// failStep defers at zero attempt cost, endgame top-up mints nothing,
+	// scheduleGoal claims nothing) and a cheap runtime probe re-tests the
+	// model path once a minute. The first successful turn closes the outage
+	// and shifts every goal's wall clock by the outage length (run 43263:
+	// the model path died at t+247, three in-flight steps hung until their
+	// 35m ctx cut unwound them, the walls then stopped and released all
+	// three goals, and the engine idled silently for the remaining 5+ hours
+	// with 24 unsolved titles).
+	lastRunnerOK time.Time
+	outageStart  time.Time // zero = runtime considered alive
+	lastProbe    time.Time // probe pacing while the outage is open
+
 	// releaseBackoff paces the container-release retries; tests shorten it.
 	releaseBackoff []time.Duration
 
@@ -183,6 +199,9 @@ func (e *Engine) Run(ctx context.Context) error {
 		e.log.Info("recovered running steps", "count", n)
 	}
 	e.startedAt = e.now()
+	e.mu.Lock()
+	e.lastRunnerOK = e.startedAt
+	e.mu.Unlock()
 
 	ticker := time.NewTicker(e.cfg.Runtime.TickInterval.D())
 	defer ticker.Stop()
@@ -238,11 +257,97 @@ func (e *Engine) noteRunnerFailure(stage string) {
 }
 
 // noteRunnerSuccess resets the failure streak: any completed runner turn
-// proves the runtime is alive.
+// proves the runtime is alive. It also closes an open outage and, on close,
+// shifts every goal's wall clock by the outage length — the outage must not
+// count against budgets the goals could not spend.
 func (e *Engine) noteRunnerSuccess() {
 	e.mu.Lock()
 	e.failStreak = 0
+	now := e.now()
+	e.lastRunnerOK = now
+	shifted, dur := 0, time.Duration(0)
+	if !e.outageStart.IsZero() {
+		dur = now.Sub(e.outageStart)
+		e.outageStart = time.Time{}
+		for gid, first := range e.firstClaim {
+			e.firstClaim[gid] = first.Add(dur)
+			shifted++
+		}
+	}
 	e.mu.Unlock()
+	if shifted > 0 {
+		e.log.Warn("engine: runtime recovered — outage closed, goal wall clocks shifted",
+			"outage", dur.Round(time.Second), "goals_shifted", shifted)
+	}
+}
+
+// runtimeDead reports whether the model path is under a declared outage:
+// either one is already open, or the liveness floor is crossed (no runner
+// turn completed for RunnerWatchdog AND no Execute goroutine is in flight —
+// a running step may just be a long, healthy one, so in-flight work
+// suppresses the trip). Tripping is a tick-path decision; once open, the
+// state holds until a runner turn succeeds.
+func (e *Engine) runtimeDead() bool {
+	w := e.cfg.Runtime.RunnerWatchdog.D()
+	if w <= 0 || e.startedAt.IsZero() {
+		return false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if !e.outageStart.IsZero() {
+		return true
+	}
+	return e.running == 0 && e.now().Sub(e.lastRunnerOK) > w
+}
+
+// noteOutage opens (once) the outage window and alarms.
+func (e *Engine) noteOutage() {
+	e.mu.Lock()
+	if !e.outageStart.IsZero() {
+		e.mu.Unlock()
+		return
+	}
+	sinceOK := e.now().Sub(e.lastRunnerOK)
+	e.outageStart = e.now()
+	e.mu.Unlock()
+	e.log.Error("engine: RUNTIME OUTAGE — no completed runner turn for the watchdog window and no step in flight; budget clocks frozen, probing the model path",
+		"since_last_success", sinceOK.Round(time.Second), "watchdog", e.cfg.Runtime.RunnerWatchdog.D().String())
+}
+
+// probeRuntime re-tests the model path during an outage with one cheap
+// runner turn, paced at probeMinInterval. A success closes the outage (via
+// noteRunnerSuccess); a failure is logged only when it is infra-shaped —
+// a hanging probe is cut by its own deadline. Steps are never spent on
+// probes: ClaimNextStep burns an attempt, so the probe uses a bare prompt.
+const probeTimeout = 3 * time.Minute
+
+func (e *Engine) probeRuntime(ctx context.Context) {
+	e.mu.Lock()
+	if e.now().Sub(e.lastProbe) < time.Minute {
+		e.mu.Unlock()
+		return
+	}
+	e.lastProbe = e.now()
+	e.mu.Unlock()
+	e.wg.Add(1)
+	go func() {
+		defer e.wg.Done()
+		pctx, cancel := context.WithTimeout(ctx, probeTimeout)
+		defer cancel()
+		runner, err := e.launchRunner()
+		if err != nil {
+			e.noteRunnerFailure("probe:launch")
+			return
+		}
+		defer runner.Close()
+		if _, err := runner.Prompt(pctx, "Runtime health probe. Reply with the single word OK and nothing else."); err != nil {
+			if errors.Is(err, pi.ErrProcessExit) || errors.Is(err, pi.ErrProtocol) {
+				e.noteRunnerFailure("probe")
+			}
+			return
+		}
+		e.noteRunnerSuccess()
+	}()
 }
 
 // breakerOpen reports whether the engine is pausing work because the
@@ -279,6 +384,17 @@ func (e *Engine) tick(ctx context.Context) {
 	// container close); the engine simply schedules nothing further, and
 	// every resurrection path refuses completed titles.
 	actives = e.sweepCompleted(ctx, actives)
+	// Runtime outage: the model path is dead. Freeze the bookkeeping that
+	// would otherwise burn against a corpse — fairness ranking, harvest
+	// ranking, endgame minting, and step claiming are all skipped;
+	// goalOverBudget and failStep carry their own outage guards. The tick's
+	// runtime probe is the only thing that touches the model path until a
+	// turn succeeds, then everything reopens with the clocks shifted.
+	dead := e.runtimeDead()
+	if dead {
+		e.noteOutage()
+		e.probeRuntime(ctx)
+	}
 	// First-touch fairness (pre-endgame): a goal whose TITLE the run has
 	// never claimed a step for is visited ahead of every title already
 	// worked, so a refueled siege cannot starve the queue tail (run 42416:
@@ -290,7 +406,7 @@ func (e *Engine) tick(ctx context.Context) {
 	// t+59 while ~50 titles had never seen a container) front-run the
 	// untouched tail the sort exists to protect. Creation order stays the
 	// tiebreaker.
-	if !e.inEndgame() {
+	if !dead && !e.inEndgame() {
 		sort.SliceStable(actives, func(i, j int) bool {
 			ti, tj := e.titleTouched(actives[i].Title), e.titleTouched(actives[j].Title)
 			if ti != tj {
@@ -304,7 +420,7 @@ func (e *Engine) tick(ctx context.Context) {
 	// slot into completion far cheaper than a fresh first pass (run 42361:
 	// b-01 died at 2/4 flags while untouched queue-tail goals burned the
 	// last hour). Stable sort — creation order stays the tiebreaker.
-	if e.inEndgame() {
+	if !dead && e.inEndgame() {
 		rank := e.endgameRank(actives)
 		sort.SliceStable(actives, func(i, j int) bool { return rank[actives[i].ID] > rank[actives[j].ID] })
 		actives = e.endgameTopUp(ctx, goals, actives)
@@ -534,6 +650,13 @@ func (e *Engine) requeuePass2(ctx context.Context, g *fgs.Goal) (*fgs.Goal, bool
 }
 
 func (e *Engine) scheduleGoal(ctx context.Context, goalID string) {
+	// Outage: the model path is dead — no claims, no Decide rounds, no
+	// bootstrap declares (ClaimNextStep burns an attempt, and a verdict
+	// minted by a dying gateway is graph churn, not intel). The tick-path
+	// runtime probe reopens the fleet on the first successful turn.
+	if e.runtimeDead() {
+		return
+	}
 	// Budget first: an exhausted goal must not spend another Decide round
 	// declaring "promising" steps it will never get to run.
 	if over, why := e.goalOverBudget(ctx, goalID); over {
@@ -623,10 +746,23 @@ func (e *Engine) scheduleGoal(ctx context.Context, goalID string) {
 		e.wg.Add(1)
 		go func(st *stepRef) {
 			defer e.wg.Done()
+			// The concurrency slot frees on EVERY exit path — a panic in
+			// executeStep must not leak it (a leaked running count wedges
+			// every future claim) nor kill the whole engine.
+			defer func() {
+				e.mu.Lock()
+				e.running--
+				e.mu.Unlock()
+			}()
+			defer func() {
+				if r := recover(); r != nil {
+					e.log.Error("execute: panic recovered — step returned for retry", "goal", goalID, "step", st.id, "panic", r)
+					dctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					e.failStep(dctx, goalID, st.id, fmt.Sprintf("panic: %v", r), true)
+				}
+			}()
 			e.executeStep(ctx, goalID, st.id)
-			e.mu.Lock()
-			e.running--
-			e.mu.Unlock()
 		}(&stepRef{step.ID})
 	}
 }
@@ -637,6 +773,13 @@ type stepRef struct{ id string }
 // GoalWallBudget. A goal with a step still in flight is never over budget
 // here: the stop must not race the executor's finish write.
 func (e *Engine) goalOverBudget(ctx context.Context, goalID string) (bool, string) {
+	// Outage freeze: a dead runtime must not stop goals out of budgets the
+	// outage itself prevented them from spending (run 43263: three goals
+	// wall-stopped at t+280-285 while their steps had hung dead for half of
+	// the window, then the fleet drained to silence).
+	if e.runtimeDead() {
+		return false, ""
+	}
 	sb, wb := e.stepBudgetFor(), e.wallBudgetFor()
 	if sb <= 0 && wb <= 0 {
 		return false, ""
@@ -889,10 +1032,17 @@ func (e *Engine) startDecide(ctx context.Context, goalID, why string) {
 	e.wg.Add(1)
 	go func() {
 		defer e.wg.Done()
+		// A panic in decide must not kill the engine NOR wedge the
+		// globally-serial Decide slot forever.
+		defer func() {
+			if r := recover(); r != nil {
+				e.log.Error("decide: panic recovered", "goal", goalID, "panic", r)
+			}
+			e.mu.Lock()
+			e.deciding = ""
+			e.mu.Unlock()
+		}()
 		e.decide(ctx, goalID, why)
-		e.mu.Lock()
-		e.deciding = ""
-		e.mu.Unlock()
 	}()
 }
 

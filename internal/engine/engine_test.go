@@ -1509,3 +1509,166 @@ func TestZeroProgressTitleEarnsSingleRequeue(t *testing.T) {
 		t.Fatalf("banked-progress title must keep both requeues, got %d goals", n)
 	}
 }
+
+// panicRunner panics inside Prompt — the engine's execute goroutine must
+// recover, return the step for retry, and never leak its concurrency slot.
+type panicRunner struct{}
+
+func (panicRunner) Prompt(context.Context, string) (*pi.PromptResult, error) {
+	panic("boom: streaming layer exploded")
+}
+
+func (panicRunner) Close() error { return nil }
+
+func TestExecutePanicRecoveredKeepsConcurrencySlot(t *testing.T) {
+	// A panic on the execute path must not kill the engine (the whole run
+	// would go silent — the 43263 post-mortem made engine-survivability a
+	// hard requirement) and must not wedge e.running: the deferred slot
+	// release runs on every exit path.
+	ctx := context.Background()
+	e, st, _ := newEngine(t) // unused script; factory overridden below
+	e.newRunner = func() (Runner, error) { return panicRunner{}, nil }
+	e.cfg.Runtime.BootstrapStep = "direct step"
+	g, _ := st.CreateGoal(ctx, "panic", "o", "obj")
+
+	e.scheduleGoal(ctx, g.ID) // bootstrap step claimed → goroutine panics
+	e.wg.Wait()
+
+	e.mu.Lock()
+	running := e.running
+	e.mu.Unlock()
+	if running != 0 {
+		t.Fatalf("panic must release the concurrency slot, running=%d", running)
+	}
+	steps, _ := st.ListSteps(ctx, g.ID)
+	if len(steps) != 1 {
+		t.Fatalf("expected the one bootstrap step, got %d", len(steps))
+	}
+	if steps[0].Status != fgs.StepPending && steps[0].Status != fgs.StepFailed {
+		t.Fatalf("panicked step must be returned for retry or failed cleanly: %s", steps[0].Status)
+	}
+	if steps[0].Attempts != 1 {
+		t.Fatalf("the panic counts as exactly one attempt: %d", steps[0].Attempts)
+	}
+
+	// The engine keeps scheduling afterwards: a second scheduleGoal round
+	// claims again without deadlock.
+	e.scheduleGoal(ctx, g.ID)
+	e.wg.Wait()
+}
+
+func TestRuntimeWatchdogFreezesBudgetsDuringOutage(t *testing.T) {
+	// Run 43263 anatomy: the model path died mid-round with steps in
+	// flight. The steps hung until their ctx cut unwound them, the wall
+	// budgets then stopped and released the goals, and the engine idled
+	// silently for the rest of the window with a fleet of unsolved titles.
+	// The watchdog must (a) trip once nothing completes and nothing runs,
+	// (b) freeze budget stops and step attempts for the outage's duration,
+	// (c) close the outage on the first successful turn, shifting the wall
+	// clocks by the outage length.
+	ctx := context.Background()
+	e, st, fr := newEngine(t,
+		ok(`{"accepted":true,"data":{"steps":[{"from":["f_0001"],"description":"s1"},{"from":["f_0001"],"description":"s2"}]}}`),
+		ok(`{"accepted":true,"data":{"finding":{"content":"s1 done","evidence":"e"}}}`),
+	)
+	e.cfg.Runtime.RunnerWatchdog = cfg.Duration(5 * time.Minute)
+	e.cfg.Runtime.GoalWallBudget = cfg.Duration(time.Minute)
+	fake := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
+	e.now = func() time.Time { return fake }
+	e.startedAt = fake
+	e.mu.Lock()
+	e.lastRunnerOK = fake
+	e.mu.Unlock()
+
+	g, _ := st.CreateGoal(ctx, "outage", "o", "obj")
+	st.AddHumanFact(ctx, g.ID, "seed", "t")
+	e.decide(ctx, g.ID, "initial") // declares s1 + s2
+	e.scheduleGoal(ctx, g.ID)      // claims s1 at T0 and runs it (success)
+	e.wg.Wait()
+
+	// +10m: the 1m wall is long exceeded, nothing is running, nothing has
+	// completed for 10m — the outage opens and the budget stop must NOT
+	// fire. The dead runtime's step claim (script exhausted) defers at
+	// zero attempt cost.
+	fake = fake.Add(10 * time.Minute)
+	e.tick(ctx)
+	e.wg.Wait()
+	got, _ := st.GetGoal(ctx, g.ID)
+	if got.Status != fgs.GoalActive {
+		t.Fatalf("outage must freeze budget stops: goal=%s", got.Status)
+	}
+	e.mu.Lock()
+	outageOpen := !e.outageStart.IsZero()
+	e.mu.Unlock()
+	if !outageOpen {
+		t.Fatal("the watchdog must have opened the outage")
+	}
+	var s2 *fgs.Step
+	load := func() {
+		steps, _ := st.ListSteps(ctx, g.ID)
+		s2 = nil
+		for i := range steps {
+			if steps[i].Description == "s2" {
+				s2 = &steps[i]
+			}
+		}
+	}
+	load()
+	if s2 == nil {
+		t.Fatal("s2 missing")
+	}
+	if s2.Status != fgs.StepPending || s2.Attempts != 0 {
+		t.Fatalf("outage failure must defer at zero cost: status=%s attempts=%d", s2.Status, s2.Attempts)
+	}
+
+	// +20m more: still dead, still frozen.
+	fake = fake.Add(20 * time.Minute)
+	e.tick(ctx)
+	e.wg.Wait()
+	load()
+	if s2.Status != fgs.StepPending || s2.Attempts != 0 {
+		t.Fatalf("outage must keep deferring at zero cost: status=%s attempts=%d", s2.Status, s2.Attempts)
+	}
+
+	// Recovery: the runtime answers again — the tick's probe turn closes
+	// the outage and shifts the wall clocks by the outage length (opened at
+	// 12:10, closed at 12:32). +2m so the probe's 1m pacing floor passes.
+	// The wall budget is deepened first (the 1m wall + 32m of elapsed fake
+	// time would otherwise legitimately stop the goal on the shifted
+	// clock): what must be demonstrated here is resumption, and steps were
+	// not claimed during the outage tick itself.
+	fake = fake.Add(2 * time.Minute)
+	e.cfg.Runtime.GoalWallBudget = cfg.Duration(40 * time.Minute)
+	fr.mu.Lock()
+	fr.queue = append(fr.queue,
+		ok("OK"), // the runtime probe's reply
+		ok(`{"accepted":true,"data":{"finding":{"content":"s2 done","evidence":"e"}}}`),
+	)
+	fr.mu.Unlock()
+	e.tick(ctx)
+	e.wg.Wait()
+	e.mu.Lock()
+	closed := e.outageStart.IsZero()
+	first := e.firstClaim[g.ID]
+	e.mu.Unlock()
+	if !closed {
+		t.Fatal("a successful probe turn must close the outage")
+	}
+	if want := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC).Add(22 * time.Minute); !first.Equal(want) {
+		t.Fatalf("wall clock must shift by the outage length: got %s want %s", first, want)
+	}
+	load()
+	if s2.Status != fgs.StepPending {
+		t.Fatalf("no step may be claimed while the outage is open: %s", s2.Status)
+	}
+	// Refresh the decide checkpoint so the recovering tick schedules s2
+	// deterministically (s1's finding would otherwise trigger a Decide
+	// round racing s2's execute for the scripted replies).
+	e.refreshCheckpoint(ctx, g.ID)
+	e.tick(ctx) // outage closed: normal scheduling resumes
+	e.wg.Wait()
+	load()
+	if s2.Status != fgs.StepDone {
+		t.Fatalf("recovered runtime must complete the deferred step: %s", s2.Status)
+	}
+}

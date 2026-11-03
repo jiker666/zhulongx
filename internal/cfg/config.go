@@ -41,6 +41,16 @@ type Runtime struct {
 	// RepairTimeout bounds the single follow-up round that salvages a
 	// contract miss (no JSON / invalid schema) without re-running the step.
 	RepairTimeout Duration `yaml:"repair_timeout"`
+	// RunnerWatchdog, when > 0, is the runtime-liveness floor: if no runner
+	// turn (Decide or Execute) completes for this long while no step is in
+	// flight, the model path is declared dead and the engine enters outage
+	// mode — budget clocks freeze (no goal stops, no step-claim attempt
+	// burn, no endgame minting) while a cheap runtime probe re-tests the
+	// model path once a minute. The first successful turn ends the outage
+	// and shifts every goal's wall clock by the outage length. Without
+	// this, a dead gateway (run 43263: model path died at t+247) drains
+	// titles to terminal and idles the run for hours. 0 disables.
+	RunnerWatchdog Duration `yaml:"runner_watchdog"`
 	// DecideNoopLimit auto-stops a goal after N consecutive no-op Decide
 	// rounds while no steps are open (bounds wasted Decide rounds).
 	DecideNoopLimit int `yaml:"decide_noop_limit"`

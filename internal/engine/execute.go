@@ -280,6 +280,17 @@ func (e *Engine) noteStepFinish(goalID string) {
 
 // failStep records the failure and the retry decision.
 func (e *Engine) failStep(ctx context.Context, goalID, stepID, msg string, retryable bool) {
+	// Outage freeze: while the runtime is under a declared outage the
+	// failure is infrastructure, not the step's — return it to pending at
+	// zero attempt cost instead of burning StepMaxAttempts against a dead
+	// gateway (run 43263: every remaining attempt in the fleet evaporated
+	// into a dead model path).
+	if e.runtimeDead() {
+		if err := e.store.UnclaimStep(ctx, goalID, stepID, "zhulongx", "runtime outage — deferred at zero cost: "+msg); err != nil && !errors.Is(err, store.ErrClaimLost) {
+			e.log.Error("execute: outage defer write failed", "goal", goalID, "step", stepID, "err", err)
+		}
+		return
+	}
 	target, err := e.store.FailStep(ctx, goalID, stepID, "zhulongx", msg, retryable, e.cfg.Runtime.StepMaxAttempts)
 	if err != nil {
 		if errors.Is(err, store.ErrClaimLost) {

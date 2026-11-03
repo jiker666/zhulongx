@@ -10,6 +10,7 @@ runtime:
   step_max_attempts: 3
   decide_noop_limit: 5
   repair_timeout: 4m
+  runner_watchdog: 12m
   goal_step_budget: 6
   goal_wall_budget: 30m
   flag_refill_max: 4
