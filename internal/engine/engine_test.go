@@ -894,8 +894,8 @@ func TestExecuteTimeoutPartialBecomesFinding(t *testing.T) {
 		ok(`{"accepted":true,"data":{"steps":[{"from":["f_0001"],"description":"s"}]}}`),
 		func(string) (*pi.PromptResult, error) {
 			return &pi.PromptResult{
-				Text:    "mid-run narrative: got admin session, exfil in progress",
-				Events:  []string{"ev1", "ev2"},
+				Text:   "mid-run narrative: got admin session, exfil in progress",
+				Events: []string{"ev1", "ev2"},
 			}, pi.ErrTimeout
 		},
 	)
@@ -1670,5 +1670,92 @@ func TestRuntimeWatchdogFreezesBudgetsDuringOutage(t *testing.T) {
 	load()
 	if s2.Status != fgs.StepDone {
 		t.Fatalf("recovered runtime must complete the deferred step: %s", s2.Status)
+	}
+}
+
+func TestHintRescueRoundsFiresBeforeGuardEdge(t *testing.T) {
+	// Completion-rate runs pull the platform hint early (HintRescueRounds)
+	// instead of letting the goal burn empty rounds toward the stop guard.
+	ctx := context.Background()
+	e, st, _ := newEngine(t,
+		ok(`{"accepted":true,"data":{}}`),
+		ok(`{"accepted":true,"data":{}}`),
+		ok(`{"accepted":true,"data":{}}`),
+		ok(`{"accepted":true,"data":{}}`),
+	)
+	e.cfg.Runtime.DecideNoopLimit = 3
+	e.cfg.Runtime.HintRescueRounds = 1
+	g, _ := st.CreateGoal(ctx, "early-rescue", "o", "obj")
+	calls := 0
+	e.NoopRescue = func(_ context.Context, _ string) (string, bool) {
+		calls++
+		return "aim at the upload endpoint", true
+	}
+	e.decide(ctx, g.ID, "initial") // noop 1 -> already at rescue threshold
+	if calls != 1 {
+		t.Fatalf("early rescue must fire at round 1, calls = %d", calls)
+	}
+	hints, _ := st.ListHints(ctx, g.ID)
+	if len(hints) != 1 || !strings.Contains(hints[0].Content, "upload endpoint") {
+		t.Fatalf("early rescue hint not written: %+v", hints)
+	}
+	got, _ := st.GetGoal(ctx, g.ID)
+	if got.Status != fgs.GoalActive {
+		t.Fatalf("goal must survive the early rescue, got %s", got.Status)
+	}
+	// The rescue is spent; three more empty rounds hit the guard edge and
+	// stop the goal (no second fetch).
+	e.decide(ctx, g.ID, "t")
+	e.decide(ctx, g.ID, "t")
+	e.decide(ctx, g.ID, "t")
+	if calls != 1 {
+		t.Fatalf("rescue stays one-shot, calls = %d", calls)
+	}
+	got, _ = st.GetGoal(ctx, g.ID)
+	if got.Status != fgs.GoalStopped {
+		t.Fatalf("goal must stop at the guard edge, got %s", got.Status)
+	}
+	if !e.rescuedTitle["early-rescue"] {
+		t.Fatal("title-level hint bookkeeping must record the fetch")
+	}
+}
+
+func TestRequeueSeedsPlatformHintIntoFreshPass(t *testing.T) {
+	// A stalled title's fresh pass opens AIMED: requeuePass2 pulls the
+	// platform hint for the title (once per title, across passes) so
+	// pass-2 starts from the hint's direction instead of re-walking dead
+	// ends the ledger already ruled out.
+	ctx := context.Background()
+	e, st, _ := newEngine(t)
+	e.cfg.Runtime.RunDeadline = cfg.Duration(time.Hour)
+	e.cfg.Runtime.GoalStepBudget = 0
+	e.cfg.Runtime.GoalWallBudget = 0
+	e.mu.Lock()
+	e.startedAt = time.Now().Add(-30 * time.Minute) // Run() never started: arm the deadline window by hand
+	e.mu.Unlock()
+	g, _ := st.CreateGoal(ctx, "bench:x-99", "o", "obj")
+	st.AddHumanFact(ctx, g.ID, "seed", "t")
+	calls := 0
+	e.NoopRescue = func(_ context.Context, _ string) (string, bool) {
+		calls++
+		return "the debug route leaks the config", true
+	}
+	ng, ok := e.requeuePass2(ctx, g)
+	if !ok {
+		t.Fatal("requeue must mint the pass-2 goal")
+	}
+	if calls != 1 {
+		t.Fatalf("hint pre-seed must fetch once, calls = %d", calls)
+	}
+	hints, _ := st.ListHints(ctx, ng.ID)
+	if len(hints) != 1 || !strings.Contains(hints[0].Content, "debug route") {
+		t.Fatalf("pass-2 goal must carry the seeded hint: %+v", hints)
+	}
+	// Second requeue: the title's hint was already pulled — no refetch.
+	if _, ok := e.requeuePass2(ctx, ng); !ok {
+		t.Fatal("second requeue within caps must succeed")
+	}
+	if calls != 1 {
+		t.Fatalf("title-level dedupe broken, calls = %d", calls)
 	}
 }

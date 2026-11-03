@@ -58,10 +58,10 @@ func (e *Engine) decide(ctx context.Context, goalID, why string) {
 		if errors.Is(err, pi.ErrTimeout) && res != nil {
 			if payload, _ := contract.ExtractJSONObject(res.Text); payload != nil {
 				if a, verr := contract.ValidateDecide(payload, openStepsEmpty, e.cfg.Runtime.MaxStepsPerDecide); verr == nil {
-				e.log.Info("decide: deadline hit after the verdict — salvaged", "goal", goalID)
-				e.noteRunnerSuccess()
-				e.applyDecide(ctx, goalID, why, a, openStepsEmpty)
-				return
+					e.log.Info("decide: deadline hit after the verdict — salvaged", "goal", goalID)
+					e.noteRunnerSuccess()
+					e.applyDecide(ctx, goalID, why, a, openStepsEmpty)
+					return
 				}
 			}
 		}
@@ -171,21 +171,34 @@ func (e *Engine) countNoop(ctx context.Context, goalID string, openStepsEmpty bo
 	n := e.noop[goalID]
 	alreadyRescued := e.rescued[goalID]
 	e.mu.Unlock()
-	if n >= e.cfg.Runtime.DecideNoopLimit {
-		if e.NoopRescue != nil && !alreadyRescued {
-			e.mu.Lock()
-			e.rescued[goalID] = true
-			e.mu.Unlock()
-			if hint, ok := e.NoopRescue(ctx, goalID); ok && strings.TrimSpace(hint) != "" {
-				if _, err := e.store.AddHint(ctx, goalID, hint, fgs.ActorEngine); err != nil {
-					e.log.Error("decide: noop rescue hint write failed", "goal", goalID, "err", err)
-				} else {
-					e.resetNoop(goalID)
-					e.log.Warn("decide: noop guard rescued by hint", "goal", goalID, "rounds", n)
-					return
+	// Rescue threshold: normally the guard edge; HintRescueRounds pulls it
+	// earlier on completion-rate runs — the platform hint is the only
+	// external idea source, and an idea-starved goal burning empty rounds
+	// toward the stop guard is wall time the tail never gets back.
+	rescueAt := e.cfg.Runtime.DecideNoopLimit
+	if r := e.cfg.Runtime.HintRescueRounds; r > 0 && r < rescueAt {
+		rescueAt = r
+	}
+	if n >= rescueAt && e.NoopRescue != nil && !alreadyRescued {
+		e.mu.Lock()
+		e.rescued[goalID] = true
+		e.mu.Unlock()
+		if hint, ok := e.NoopRescue(ctx, goalID); ok && strings.TrimSpace(hint) != "" {
+			if _, err := e.store.AddHint(ctx, goalID, hint, fgs.ActorEngine); err != nil {
+				e.log.Error("decide: noop rescue hint write failed", "goal", goalID, "err", err)
+			} else {
+				e.resetNoop(goalID)
+				if g, err := e.store.GetGoal(ctx, goalID); err == nil {
+					e.mu.Lock()
+					e.rescuedTitle[g.Title] = true
+					e.mu.Unlock()
 				}
+				e.log.Warn("decide: noop guard rescued by hint", "goal", goalID, "rounds", n)
+				return
 			}
 		}
+	}
+	if n >= e.cfg.Runtime.DecideNoopLimit {
 		if err := e.store.SetGoalStatus(context.Background(), goalID, fgs.GoalStopped, fgs.ActorEngine); err != nil {
 			e.log.Error("decide: noop guard stop failed", "goal", goalID, "err", err)
 			return

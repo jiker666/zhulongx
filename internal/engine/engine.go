@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"regexp"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -48,16 +49,17 @@ type Engine struct {
 	log       *slog.Logger
 	newRunner RunnerFactory
 
-	mu       sync.Mutex
-	snapshot map[string]store.SnapshotCounts // last Decide checkpoint per goal
-	noop     map[string]int                  // consecutive empty Decide rounds
-	rescued  map[string]bool                 // goals whose noop rescue already fired (one shot per goal)
-	deciding string                          // goalID of the in-flight Decide round ("" = none): Decide is globally serial
-	running  int                             // active Execute goroutines
+	mu           sync.Mutex
+	snapshot     map[string]store.SnapshotCounts // last Decide checkpoint per goal
+	noop         map[string]int                  // consecutive empty Decide rounds
+	rescued      map[string]bool                 // goals whose noop rescue already fired (one shot per goal)
+	rescuedTitle map[string]bool                 // titles whose platform hint was already pulled (any pass)
+	deciding     string                          // goalID of the in-flight Decide round ("" = none): Decide is globally serial
+	running      int                             // active Execute goroutines
 
 	// Budget bookkeeping (GoalStepBudget / GoalWallBudget / RunDeadline).
-	now        func() time.Time    // injectable clock
-	startedAt  time.Time           // set in Run; RunDeadline counts from here
+	now        func() time.Time     // injectable clock
+	startedAt  time.Time            // set in Run; RunDeadline counts from here
 	firstClaim map[string]time.Time // goalID → first claimed step time
 	firstTouch map[string]bool      // title → any goal with this title has claimed a step (first-touch fairness signal)
 	requeues   map[string]int       // title → requeues spent (cap 2)
@@ -165,17 +167,18 @@ func New(st *store.Store, c *cfg.Config, log *slog.Logger, factory RunnerFactory
 		}
 	}
 	return &Engine{
-		store:      st,
-		cfg:        c,
-		log:        log,
-		newRunner:  factory,
-		snapshot:   map[string]store.SnapshotCounts{},
-		noop:       map[string]int{},
-		rescued:    map[string]bool{},
-		now:        time.Now,
-		firstClaim: map[string]time.Time{},
-		firstTouch: map[string]bool{},
-		requeues:   map[string]int{},
+		store:        st,
+		cfg:          c,
+		log:          log,
+		newRunner:    factory,
+		snapshot:     map[string]store.SnapshotCounts{},
+		noop:         map[string]int{},
+		rescued:      map[string]bool{},
+		rescuedTitle: map[string]bool{},
+		now:          time.Now,
+		firstClaim:   map[string]time.Time{},
+		firstTouch:   map[string]bool{},
+		requeues:     map[string]int{},
 
 		flagBase:    map[string]int{},
 		flagRefills: map[string]int{},
@@ -592,7 +595,7 @@ func (e *Engine) requeuePass2(ctx context.Context, g *fgs.Goal) (*fgs.Goal, bool
 	// banked flags keeps both retries — its pass-2 is conversion, not
 	// exploration (42361: b-01 killed at 2/4 with the third in reach).
 	const maxRequeues = 2
-	const endgameMaxRequeues = 6
+	const endgameMaxRequeues = 8
 	// Solved challenges never re-enter the queue — not via budget stops,
 	// not via the endgame top-up. A completed title that requeues burns a
 	// container cycle and a pass on work the platform has already paid
@@ -637,6 +640,27 @@ func (e *Engine) requeuePass2(ctx context.Context, g *fgs.Goal) (*fgs.Goal, bool
 		fmt.Sprintf("此题进入第 %d 遍进攻:前面每一遍的完整过程与结论都已写入 attack/ 目录下本题的 work.md 台账。开局第一动作是读台账(及 attack/notes.md),只做台账里标记为【未测】或【差一步】的假设,严禁从零重扫已排除的方向。完成率优先于分值:上一遍没有新 flag 进账(平台 correct_flag_count 未增长)且台账主攻面已穷尽时,本遍开局拉下一个 hint 按其定向进攻;此后每条 hint 必须隔≥20 分钟且上一条 hint 指向的方向已打到有结论——没打完上一条 hint 就不许拉下一条,hint 是弹药不是侦察。多 flag 题拿到任何一个 flag 立即提交,然后继续下一个攻击面,完成标准是平台 is_completed=true(correct_flag_count=flag_count),拿到一个 flag 绝不等于解完。flag 候选一旦在手,当轮立即提交,不要留到下一轮。", pass),
 		"engine:pass2"); err != nil {
 		e.log.Error("requeue: seed fact", "goal", ng.ID, "err", err)
+	}
+	// Hint pre-seed: this title earns a fresh pass precisely because the
+	// last one stalled. If the platform hint was never pulled for the
+	// TITLE (rescue is one-shot per goal and passes mint fresh goal IDs),
+	// fetch it now so the pass opens aimed at the hint's direction
+	// instead of rediscovering the same dead ends — the hint's cost is
+	// score, not completion, and the run's target is completion rate.
+	if e.NoopRescue != nil {
+		e.mu.Lock()
+		seen := e.rescuedTitle[g.Title]
+		e.rescuedTitle[g.Title] = true
+		e.mu.Unlock()
+		if !seen {
+			if hint, ok := e.NoopRescue(ctx, g.ID); ok && strings.TrimSpace(hint) != "" {
+				if _, err := e.store.AddHint(ctx, ng.ID, hint, fgs.ActorEngine); err != nil {
+					e.log.Error("requeue: hint seed write failed", "goal", ng.ID, "err", err)
+				} else {
+					e.log.Info("requeue: platform hint seeded into fresh pass", "title", g.Title, "pass", pass)
+				}
+			}
+		}
 	}
 	e.mu.Lock()
 	e.requeues[g.Title] = done + 1

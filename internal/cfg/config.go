@@ -54,6 +54,14 @@ type Runtime struct {
 	// DecideNoopLimit auto-stops a goal after N consecutive no-op Decide
 	// rounds while no steps are open (bounds wasted Decide rounds).
 	DecideNoopLimit int `yaml:"decide_noop_limit"`
+	// HintRescueRounds, when > 0 and below DecideNoopLimit, fires the
+	// platform-hint rescue after this many consecutive no-op rounds
+	// instead of at the guard edge. The hint's cost is score, not
+	// completion — on a completion-rate run (43405: 14 hints in 3h while
+	// the capability tail starved for ideas) waiting for five empty
+	// rounds burns wall time the tail titles never get back. 0 = legacy
+	// behavior (rescue only at the guard edge).
+	HintRescueRounds int `yaml:"hint_rescue_rounds"`
 	// GoalStepBudget caps how many DONE Execute steps one goal may run
 	// before the scheduler stops it. 0 disables. It is the engine-side
 	// backstop against zombie goals: a goal whose Decide keeps declaring
@@ -96,8 +104,8 @@ type Runtime struct {
 	// fuzzes) need more steps and minutes per pass than first-touch recon
 	// does. In endgame the queue is thin, slots would otherwise idle, and
 	// breadth no longer trades against depth.
-	EndgameStepBudget int          `yaml:"endgame_step_budget"`
-	EndgameWallBudget Duration     `yaml:"endgame_wall_budget"`
+	EndgameStepBudget int      `yaml:"endgame_step_budget"`
+	EndgameWallBudget Duration `yaml:"endgame_wall_budget"`
 	// FlagRefillMax caps how many times banking a NEW correct flag may refuel
 	// one goal's budgets in a pass: the wall window resets AND FlagStepBonus
 	// extra Execute steps are granted. Multi-flag intranets legitimately
