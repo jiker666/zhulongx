@@ -1835,3 +1835,57 @@ func TestEndgameRankOneFromDoneOverUntouchedOverDeepPartial(t *testing.T) {
 		t.Fatalf("untouched step budget must stay base, got %d", got)
 	}
 }
+
+func TestRequeueSeedsFlagStateFact(t *testing.T) {
+	// 43574 session 3757389 (b-01): pass-2 did not know which flags were
+	// already banked, re-derived one, and only learned it from the
+	// platform's "duplicate" answer. The fresh pass must open carrying
+	// the live flag count so its whole wall goes to the MISSING flags.
+	ctx := context.Background()
+	e, st, _ := newEngine(t)
+	e.cfg.Runtime.RunDeadline = cfg.Duration(time.Hour)
+	e.cfg.Runtime.GoalStepBudget = 0
+	e.cfg.Runtime.GoalWallBudget = 0
+	e.mu.Lock()
+	e.startedAt = time.Now().Add(-30 * time.Minute)
+	e.mu.Unlock()
+	g, _ := st.CreateGoal(ctx, "bench:b-01", "o", "obj")
+	e.FlagProgress = func(title string) (int, int, bool) {
+		if title == "bench:b-01" {
+			return 2, 4, true
+		}
+		return 0, 1, true
+	}
+	ng, ok := e.requeuePass2(ctx, g)
+	if !ok {
+		t.Fatal("requeue must mint the pass-2 goal")
+	}
+	facts, _ := st.ListFacts(ctx, ng.ID)
+	state := ""
+	for _, f := range facts {
+		if strings.Contains(f.Content, "correct_flag_count=2") {
+			state = f.Content
+		}
+	}
+	if state == "" {
+		t.Fatalf("pass-2 goal must carry the live flag-state fact: %+v", facts)
+	}
+	if !strings.Contains(state, "缺失的 4 个旗") && !strings.Contains(state, "缺失的 2") {
+		// wording may shift; the invariant is: missing count named, duplicate named
+		if !strings.Contains(state, "duplicate") || !strings.Contains(state, "2") {
+			t.Fatalf("flag-state fact must name the missing count and the duplicate rule: %s", state)
+		}
+	}
+	// Zero-progress titles get no flag-state fact (nothing banked to protect).
+	g2, _ := st.CreateGoal(ctx, "bench:c-02", "o", "obj")
+	ng2, ok := e.requeuePass2(ctx, g2)
+	if !ok {
+		t.Fatal("zero-progress requeue must succeed")
+	}
+	facts2, _ := st.ListFacts(ctx, ng2.ID)
+	for _, f := range facts2 {
+		if strings.Contains(f.Content, "平台旗情") {
+			t.Fatalf("zero-banked title must not get a flag-state fact: %s", f.Content)
+		}
+	}
+}

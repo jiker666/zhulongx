@@ -679,6 +679,19 @@ func (e *Engine) requeuePass2(ctx context.Context, g *fgs.Goal) (*fgs.Goal, bool
 		"engine:pass2"); err != nil {
 		e.log.Error("requeue: seed fact", "goal", ng.ID, "err", err)
 	}
+	// Flag-state fact: scheduling knows the banked count — the agent must
+	// too. Run 43574 (b-01, 4 flags): pass-2 re-derived an already-banked
+	// flag and only learned it from the platform's "duplicate" answer, so
+	// wall clock went to re-finding what was already paid for.
+	if e.FlagProgress != nil {
+		if cur, total, ok := e.FlagProgress(g.Title); ok && cur > 0 && cur < total {
+			if _, err := e.store.AddHumanFact(ctx, ng.ID,
+				fmt.Sprintf("平台旗情(以此为准):本题 correct_flag_count=%d / flag_count=%d——这 %d 个 flag 已入库计分,重复提交已入库的旗平台只回 duplicate、零收益,严禁重推已入库的攻击面。本遍的全部墙钟只打缺失的 %d 个旗;已入库旗的具体旗面若台账有记录以台账为准,台账缺失时以平台 duplicate 回执为准。", cur, total, cur, total-cur),
+				"engine:flagstate"); err != nil {
+				e.log.Error("requeue: flag-state fact write failed", "goal", ng.ID, "err", err)
+			}
+		}
+	}
 	// Hint pre-seed: this title earns a fresh pass precisely because the
 	// last one stalled. If the platform hint was never pulled for the
 	// TITLE (rescue is one-shot per goal and passes mint fresh goal IDs),
