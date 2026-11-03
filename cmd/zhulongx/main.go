@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -20,6 +21,7 @@ import (
 
 	"zhulongx/internal/bench"
 	"zhulongx/internal/cfg"
+	"zhulongx/internal/dasctf"
 	"zhulongx/internal/engine"
 	"zhulongx/internal/fgs"
 	"zhulongx/internal/store"
@@ -42,10 +44,14 @@ Usage:
   zhulongx audit [goalID] [--config F]             recent audit entries
   zhulongx bench import [--base-url URL] [--config F]  TSecBench: challenges -> goals
   zhulongx bench sync [--base-url URL] [--config F]    TSecBench: reconcile goal states
+  zhulongx dasctf import [--config F]                  DASCTF: exercises -> goals
+  zhulongx dasctf sync [--config F]                    DASCTF: reconcile goal states
 
 bench auth comes from the environment only: BENCHMARK_BASE_URL (or
 --base-url) and BENCHMARK_TOKEN — export both in the shell that runs
 zhulongx so the agent's shell inherits them too.
+
+dasctf auth likewise: DASCTF_HOST and DASCTF_ACCESSKEY.
 `
 
 func main() {
@@ -73,6 +79,8 @@ func main() {
 		err = cmdAudit(os.Args[2:])
 	case "bench":
 		err = cmdBench(os.Args[2:])
+	case "dasctf":
+		err = cmdDasctf(os.Args[2:])
 	default:
 		fmt.Fprint(os.Stderr, usageText)
 		os.Exit(2)
@@ -151,6 +159,7 @@ func cmdRun(args []string) error {
 	e := engine.New(st, c, log, nil)
 	wireNoopRescue(e, st, log)
 	wireStepGate(e, st, log)
+	wireDasctf(e, st, log)
 	log.Info("zhulongx running", "db", c.DBPath, "pi", c.Pi.Command)
 	if err := e.Run(ctx); err != nil {
 		return err
@@ -700,4 +709,138 @@ func wireFlagFastLane(e *engine.Engine, bc *bench.Client, gate *bench.SlotGate, 
 
 	// Fresh snapshots (engine ticks poll the platform) pump deferred flags.
 	gate.OnSnapshot(func(ctx context.Context) { flushPending(ctx) })
+}
+
+// readPriorityIDs loads exercise IDs (one per line, # comments and blank
+// lines ignored) that dasctf import should put at the head of the queue.
+func readPriorityIDs(path string) ([]int, error) {
+	if path == "" {
+		return nil, nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("dasctf: read priority file: %w", err)
+	}
+	var ids []int
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		id, err := strconv.Atoi(line)
+		if err != nil {
+			return nil, fmt.Errorf("dasctf: priority file: %q is not an exercise id", line)
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
+// cmdDasctf bridges the DASCTF slab-match Agent API: import creates one
+// goal per open exercise (origin carries the full combat brief), sync
+// reconciles platform hasSolved state back into the graph.
+func cmdDasctf(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("dasctf requires a subcommand: import|sync")
+	}
+	sub := args[0]
+	if sub != "import" && sub != "sync" {
+		return fmt.Errorf("unknown dasctf subcommand %q (want import|sync)", sub)
+	}
+	fs := flag.NewFlagSet("dasctf "+sub, flag.ContinueOnError)
+	configPath := fs.String("config", "zhulongx.yaml", "config file path")
+	prioFile := fs.String("priority-file", "", "file with exercise ids to import first, one per line (# comments)")
+	if _, err := parseMixed(fs, args[1:]); err != nil {
+		return err
+	}
+	c, err := cfg.Load(*configPath)
+	if err != nil {
+		return err
+	}
+	st, err := openStore(c)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	dc, err := dasctf.NewClient(os.Getenv("DASCTF_HOST"), os.Getenv("DASCTF_ACCESSKEY"))
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+	switch sub {
+	case "import":
+		priority, err := readPriorityIDs(*prioFile)
+		if err != nil {
+			return err
+		}
+		if len(priority) > 0 {
+			fmt.Printf("dasctf: %d id(s) from priority file head the queue\n", len(priority))
+		}
+		n, err := dasctf.Import(ctx, st, dc, priority)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("dasctf: imported %d new exercise goal(s)\n", n)
+		fmt.Println("dasctf: next — export DASCTF_HOST and DASCTF_ACCESSKEY in this shell, then `zhulongx run`")
+		return nil
+	default: // sync
+		rep, err := dasctf.Sync(ctx, st, dc)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("dasctf: sync done — %d completed by platform", len(rep.Completed))
+		if len(rep.Completed) > 0 {
+			fmt.Println()
+			for _, s := range rep.Completed {
+				fmt.Printf("  completed %s\n", s)
+			}
+		} else {
+			fmt.Println()
+		}
+		if rep.InProgress > 0 {
+			fmt.Printf("  in progress: %d goal(s)\n", rep.InProgress)
+		}
+		for _, s := range rep.Mismatched {
+			fmt.Printf("  MISMATCH %s — locally completed, platform disagrees; review before trusting\n", s)
+		}
+		for _, s := range rep.Missing {
+			fmt.Printf("  missing  %s — platform no longer lists this exercise\n", s)
+		}
+		return nil
+	}
+}
+
+// wireDasctf arms the DASCTF env gate + flag fast lane when the run is a
+// DASCTF session (both env vars present). The gate builds env-backed
+// exercises operator-side (agent steps never burn a turn on build/poll),
+// recovers the envs of solved/stopped goals, and submits every
+// DASCTF-shaped flag candidate the moment it lands in the graph.
+func wireDasctf(e *engine.Engine, st *store.Store, log *slog.Logger) {
+	host, key := os.Getenv("DASCTF_HOST"), os.Getenv("DASCTF_ACCESSKEY")
+	if host == "" || key == "" {
+		return
+	}
+	if os.Getenv("BENCHMARK_BASE_URL") != "" {
+		log.Warn("dasctf: BENCHMARK_* env also set; the bench gate owns StepGate, dasctf gate stays off")
+		return
+	}
+	dc, err := dasctf.NewClient(host, key)
+	if err != nil {
+		log.Warn("dasctf: gate not armed", "err", err)
+		return
+	}
+	gate := dasctf.NewGate(st, dc, log)
+	e.StepGate = gate.Allow
+	e.ReleaseContainer = gate.ForceRelease
+	e.FlagProgress = func(title string) (int, int, bool) {
+		id, ok := dasctf.CodeOfTitle(title)
+		if !ok {
+			return 0, 0, false
+		}
+		return gate.Progress(id)
+	}
+	e.OnFlagCandidate = func(ctx context.Context, title, flag string) {
+		gate.Submit(ctx, title, flag)
+	}
+	log.Info("dasctf: gate armed (env lifecycle paced, flag fast lane live)")
 }

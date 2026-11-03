@@ -935,7 +935,10 @@ func (e *Engine) harvestFlags(ctx context.Context, goalID, text string) {
 	}
 }
 
-var flagPattern = regexp.MustCompile(`(?i)flag\{[0-9a-z_-]{8,80}\}`)
+// DASCTF flags are DASCTF{...}-shaped (same charset family); the
+// alternation keeps the harvest generic across platforms without matching
+// bare brace pairs in prose.
+var flagPattern = regexp.MustCompile(`(?i)(?:flag|dasctf)\{[0-9a-z_-]{8,80}\}`)
 
 // stopGoalForBudget stops a zombie goal and requeues it for the second
 // pass immediately. Findings stay in the graph; the agent-maintained attack
