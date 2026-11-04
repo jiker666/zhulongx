@@ -38,3 +38,8 @@
 | log4shell-detect.py | log4j JNDI 检测电池（断网友好） | REFERENCE |
 | gradio-file-read-traversal.py | Gradio file= 任意读 | REFERENCE |
 | langchain-llmmath-eval-rce.py | LangChain LLMMathChain eval 注入 | REFERENCE |
+| vm2-sandbox-escape-pack.py | nodejs vm2 沙箱逃逸变体包（CVE-2023-30547/37903/32314 家族 + host 泄露原语） | REFERENCE |
+| langflow-unauth-file-read.py | Langflow 未授权任意文件读（CVE-2025-3248）→ secret_key→admin JWT 链 | REFERENCE |
+| comfyui-attack-surface.md | ComfyUI/Manager 公开攻击面手册（无鉴权 API / startup-scripts 兑换 RCE / pickle 面） | REFERENCE |
+| default-creds-cn.md | 国产 OA/中间件/内网默认凭证表（泛微/用友/致远/金蝶/Tomcat…） | REFERENCE |
+| geoserver-ogc-xpath-oracle.py | GeoServer OGC filter XPath 盲注 oracle（先试 CVE-2024-36401 RCE 族） | REFERENCE |

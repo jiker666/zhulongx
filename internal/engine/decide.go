@@ -208,6 +208,7 @@ func (e *Engine) countNoop(ctx context.Context, goalID string, openStepsEmpty bo
 			// Idealess goals also earn a second pass: with a fresh attack
 			// surface instruction and the on-disk ledger they sometimes crack.
 			if g, err := e.store.GetGoal(ctx, goalID); err == nil {
+				e.refundSterilePass(goalID, g.Title)
 				e.requeuePass2(ctx, g)
 			}
 		}

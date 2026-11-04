@@ -268,6 +268,11 @@ func (e *Engine) finishPartial(ctx context.Context, log *slog.Logger, goalID, st
 	// seconds before the wall by construction, so counting it as "the goal
 	// is mid-flow" would arm the active grace on EVERY budget-stopped goal
 	// (run 42407: three flagless goals each burned the +10m grace this way).
+	// The pass still counts as WORKED though — real streamed attack output
+	// entered the graph, so it must not be refunded as a sterile pass.
+	e.mu.Lock()
+	e.passWorked[goalID] = true
+	e.mu.Unlock()
 	e.harvestFlags(ctx, goalID, res.Text) // the kill can land mid-report, flag and all
 	log.Info("execute: step done with partial finding (deadline salvage)", "finding", fd.ID, "tools", res.ToolCalls)
 	e.noteRunnerSuccess()
@@ -275,10 +280,13 @@ func (e *Engine) finishPartial(ctx context.Context, log *slog.Logger, goalID, st
 
 // noteStepFinish records when a step last landed NATURALLY (the agent chose
 // to wrap up and report), feeding the wall-budget active grace: a goal whose
-// steps keep landing on their own is mid-flow, not wedged.
+// steps keep landing on their own is mid-flow, not wedged. It also marks the
+// pass as worked — a real report landed, so the goal's requeue fuse slot was
+// honestly spent (see refundSterilePass).
 func (e *Engine) noteStepFinish(goalID string) {
 	e.mu.Lock()
 	e.lastFinish[goalID] = e.now()
+	e.passWorked[goalID] = true
 	e.mu.Unlock()
 }
 

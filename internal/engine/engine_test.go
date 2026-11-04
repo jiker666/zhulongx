@@ -1889,3 +1889,107 @@ func TestRequeueSeedsFlagStateFact(t *testing.T) {
 		}
 	}
 }
+
+func TestSterileRequeueRefundsFuse(t *testing.T) {
+	// Run 43633: c-04's pass-2/3/4 and c-02's pass-3 burned whole requeue
+	// passes on WAITING_SLOT deferrals — the slot race minted goals that
+	// never got a container, yet each consumed a fuse slot. A pass that
+	// produced NO real agent output (no natural report, no deadline
+	// salvage) refunds its fuse slot, once per title; a worked pass keeps
+	// its slot. The refund must land before stopGoalForBudget's internal
+	// re-mint, so a title at its fuse cap still earns one more real pass.
+	ctx := context.Background()
+	mockOK := ok(`{}`)
+	e, st, _ := newEngine(t, mockOK)
+	e.cfg.Runtime.RunDeadline = cfg.Duration(time.Hour)
+	e.cfg.Runtime.GoalStepBudget = 0
+	e.cfg.Runtime.GoalWallBudget = 0
+	e.mu.Lock()
+	e.startedAt = time.Now().Add(-30 * time.Minute)
+	e.mu.Unlock()
+	g, _ := st.CreateGoal(ctx, "bench:c-04", "o", "obj")
+	countGoals := func() int {
+		goals, _ := st.ListGoals(ctx)
+		n := 0
+		for _, gg := range goals {
+			if gg.Title == "bench:c-04" {
+				n++
+			}
+		}
+		return n
+	}
+
+	// Burn the mid-run fuse: pass 2 and pass 3 both minted.
+	ng, ok := e.requeuePass2(ctx, g)
+	if !ok {
+		t.Fatal("pass 2 must mint")
+	}
+	if _, ok := e.requeuePass2(ctx, ng); !ok {
+		t.Fatal("pass 3 must mint (mid-run cap 2)")
+	}
+	if countGoals() != 3 {
+		t.Fatalf("setup: want 3 goals (fresh + 2 passes), got %d", countGoals())
+	}
+
+	// The newest pass dies STERILE: refund fires, and stopGoalForBudget's
+	// internal re-mint becomes legal again — one more goal appears despite
+	// the burned cap. The newest minted goal is pass 3; find it by listing.
+	goals, _ := st.ListGoals(ctx)
+	var ng3 fgs.Goal
+	for _, gg := range goals {
+		if gg.Title == "bench:c-04" && gg.Status == fgs.GoalActive && gg.ID != g.ID && gg.ID != ng.ID {
+			ng3 = gg
+		}
+	}
+	e.stopGoalForBudget(ctx, ng3.ID, "wall")
+	e.mu.Lock()
+	refunded := e.sterileRefunded["bench:c-04"]
+	rq := e.requeues["bench:c-04"]
+	e.mu.Unlock()
+	if !refunded {
+		t.Fatal("sterile death must bank the title's one refund")
+	}
+	if rq != 2 {
+		t.Fatalf("refund must land before the re-mint, requeues = %d", rq)
+	}
+	if countGoals() != 4 {
+		t.Fatalf("refund must buy one more pass at the cap: goals = %d", countGoals())
+	}
+
+	// A WORKED pass keeps its fuse slot: fresh engine, mint, finish a step
+	// naturally, stop — no refund banked.
+	e2, st2, _ := newEngine(t, mockOK)
+	e2.cfg.Runtime.RunDeadline = cfg.Duration(time.Hour)
+	e2.cfg.Runtime.GoalStepBudget = 0
+	e2.cfg.Runtime.GoalWallBudget = 0
+	e2.mu.Lock()
+	e2.startedAt = time.Now().Add(-30 * time.Minute)
+	e2.mu.Unlock()
+	g2, _ := st2.CreateGoal(ctx, "bench:c-04", "o", "obj")
+	ng2, ok := e2.requeuePass2(ctx, g2)
+	if !ok {
+		t.Fatal("pass 2 must mint")
+	}
+	facts, _ := st2.ListFacts(ctx, ng2.ID)
+	docs := false
+	for _, f := range facts {
+		if strings.Contains(f.Content, "增量落盘") {
+			docs = true
+		}
+	}
+	if !docs {
+		t.Fatal("pass fact must carry the incremental ledger-flush doctrine")
+	}
+	e2.noteStepFinish(ng2.ID)
+	e2.stopGoalForBudget(ctx, ng2.ID, "wall")
+	e2.mu.Lock()
+	refunded2 := e2.sterileRefunded["bench:c-04"]
+	rq2 := e2.requeues["bench:c-04"]
+	e2.mu.Unlock()
+	if refunded2 {
+		t.Fatal("a pass with a natural report must not refund")
+	}
+	if rq2 != 2 {
+		t.Fatalf("worked pass keeps its slot then re-mints within caps, requeues = %d", rq2)
+	}
+}

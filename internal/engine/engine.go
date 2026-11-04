@@ -64,6 +64,16 @@ type Engine struct {
 	firstTouch map[string]bool      // title → any goal with this title has claimed a step (first-touch fairness signal)
 	requeues   map[string]int       // title → requeues spent (cap 2)
 
+	// Sterile-pass refund: a requeued pass that never landed ANY real
+	// agent output (every step deferred WAITING_SLOT — the slot race of
+	// run 43633 burned c-04's pass-2/3/4 with zero attack minutes) must
+	// not consume the requeue fuse. One refund per title bounds the loop;
+	// passWorked is set by any natural report or deadline salvage, so a
+	// pass killed mid-attack keeps its count.
+	requeuedGoal    map[string]bool // goalIDs minted by requeuePass2
+	passWorked      map[string]bool // goalIDs that produced a real finding
+	sterileRefunded map[string]bool // titles that already banked their one refund
+
 	// Flag-progress budget refuel: a goal whose challenge banked flags
 	// during the current pass is demonstrably converting slot time into
 	// score — its wall budget refuels instead of expiring (run 42361:
@@ -179,6 +189,10 @@ func New(st *store.Store, c *cfg.Config, log *slog.Logger, factory RunnerFactory
 		firstClaim:   map[string]time.Time{},
 		firstTouch:   map[string]bool{},
 		requeues:     map[string]int{},
+
+		requeuedGoal:    map[string]bool{},
+		passWorked:      map[string]bool{},
+		sterileRefunded: map[string]bool{},
 
 		flagBase:    map[string]int{},
 		flagRefills: map[string]int{},
@@ -627,8 +641,12 @@ func (e *Engine) requeuePass2(ctx context.Context, g *fgs.Goal) (*fgs.Goal, bool
 	// Zero-progress titles stay fuse-limited even in the harvest window:
 	// the endgame lift exists for converters (42838), but an unbanked dud
 	// re-minted to 8 passes is the 43574 shape — three regrind passes
-	// held half the fleet for the final half hour with zero return.
-	const endgameZeroMaxRequeues = 3
+	// held half the fleet for the final half hour with zero return. Five,
+	// not three, since v20's rank demotes zero-flag multis below every
+	// untouched single (43633: c-08's ID brute stood at 2000/10000 with
+	// the winning primitive in hand when the 3-fuse blew — the extra
+	// passes can no longer starve breadth, they only fill idle slots).
+	const endgameZeroMaxRequeues = 5
 	// Solved challenges never re-enter the queue — not via budget stops,
 	// not via the endgame top-up. A completed title that requeues burns a
 	// container cycle and a pass on work the platform has already paid
@@ -673,9 +691,12 @@ func (e *Engine) requeuePass2(ctx context.Context, g *fgs.Goal) (*fgs.Goal, bool
 		e.log.Error("requeue: create goal", "title", g.Title, "err", err)
 		return nil, false
 	}
+	e.mu.Lock()
+	e.requeuedGoal[ng.ID] = true
+	e.mu.Unlock()
 	pass := done + 2
 	if _, err := e.store.AddHumanFact(ctx, ng.ID,
-		fmt.Sprintf("此题进入第 %d 遍进攻:前面每一遍的完整过程与结论都已写入 attack/ 目录下本题的 work.md 台账。开局第一动作是读台账(及 attack/notes.md),只做台账里标记为【未测】或【差一步】的假设,严禁从零重扫已排除的方向。完成率优先于分值:上一遍没有新 flag 进账(平台 correct_flag_count 未增长)且台账主攻面已穷尽时,本遍开局拉下一个 hint 按其定向进攻;此后每条 hint 必须隔≥20 分钟且上一条 hint 指向的方向已打到有结论——没打完上一条 hint 就不许拉下一条,hint 是弹药不是侦察。多 flag 题拿到任何一个 flag 立即提交,然后继续下一个攻击面,完成标准是平台 is_completed=true(correct_flag_count=flag_count),拿到一个 flag 绝不等于解完。flag 候选一旦在手,当轮立即提交,不要留到下一轮。", pass),
+		fmt.Sprintf("此题进入第 %d 遍进攻:前面每一遍的完整过程与结论都已写入 attack/ 目录下本题的 work.md 台账。开局第一动作是读台账(及 attack/notes.md),只做台账里标记为【未测】或【差一步】的假设,严禁从零重扫已排除的方向。台账增量落盘:每完成一个里程碑或每约 5 分钟,立即把新结论/新原语/下一步计划写进 work.md,绝不留到收尾——墙钟随时会杀掉本步,被杀时断点必须已经在台账里,下一遍直接从断点续打。完成率优先于分值:上一遍没有新 flag 进账(平台 correct_flag_count 未增长)且台账主攻面已穷尽时,本遍开局拉下一个 hint 按其定向进攻;此后每条 hint 必须隔≥20 分钟且上一条 hint 指向的方向已打到有结论——没打完上一条 hint 就不许拉下一条,hint 是弹药不是侦察。多 flag 题拿到任何一个 flag 立即提交,然后继续下一个攻击面,完成标准是平台 is_completed=true(correct_flag_count=flag_count),拿到一个 flag 绝不等于解完。flag 候选一旦在手,当轮立即提交,不要留到下一轮。", pass),
 		"engine:pass2"); err != nil {
 		e.log.Error("requeue: seed fact", "goal", ng.ID, "err", err)
 	}
@@ -1031,9 +1052,34 @@ func (e *Engine) stopGoalForBudget(ctx context.Context, goalID string, why strin
 		e.log.Error("budget stop: set status", "goal", goalID, "err", err)
 		return
 	}
+	e.refundSterilePass(goalID, g.Title)
 	e.releaseStoppedContainer(goalID)
 	e.requeuePass2(ctx, g)
 	e.log.Warn("budget: goal stopped, slot released", "goal", goalID, "title", g.Title, "reason", why)
+}
+
+// refundSterilePass returns one requeue fuse to a title whose requeued
+// pass died without producing any real agent output — every step deferred
+// WAITING_SLOT on the slot race (43633: c-04's pass-2/3/4 and c-02's
+// pass-3 burned whole passes narrating "max active instances reached"
+// with zero attack minutes). One refund per title bounds the loop; a pass
+// with a natural report or a deadline-salvaged partial counts as worked
+// and keeps its fuse slot.
+func (e *Engine) refundSterilePass(goalID, title string) {
+	e.mu.Lock()
+	wasRequeue := e.requeuedGoal[goalID]
+	worked := e.passWorked[goalID]
+	refunded := e.sterileRefunded[title]
+	delete(e.requeuedGoal, goalID)
+	delete(e.passWorked, goalID)
+	if wasRequeue && !worked && !refunded && e.requeues[title] > 0 {
+		e.requeues[title]--
+		e.sterileRefunded[title] = true
+		e.mu.Unlock()
+		e.log.Info("requeue: sterile pass refunded to the fuse", "goal", goalID, "title", title)
+		return
+	}
+	e.mu.Unlock()
 }
 
 // releaseStoppedContainer closes the stopped goal's challenge container off
