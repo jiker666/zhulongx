@@ -75,6 +75,17 @@ func Import(ctx context.Context, st *store.Store, c *Client, priority []string) 
 // Brief renders the goal origin: everything the agent needs to operate
 // the platform autonomously, without ever containing the token (the
 // agent reads it from the BENCHMARK_TOKEN environment variable).
+// hintCap is the per-RUN hint ceiling the brief announces to the agent:
+// hard single-flag titles burn out fastest (43926: 11 pulls on a 500pt hard
+// title, zero return, more than the title was worth); everything else gets 6.
+// Run-level, never re-armed by a new pass — the ledger's hint log is the counter.
+func hintCap(ch Challenge) int {
+	if strings.EqualFold(ch.Difficulty, "hard") && ch.FlagCount <= 1 {
+		return 4
+	}
+	return 6
+}
+
 func Brief(c *Client, ch Challenge) string {
 	base := c.BaseURL()
 	code := ch.UniqueCode
@@ -89,7 +100,7 @@ func Brief(c *Client, ch Challenge) string {
 	fmt.Fprintf(&b, "平台 API(鉴权 header: `BENCHMARK_TOKEN: $BENCHMARK_TOKEN`,token 已注入你的 shell 环境变量,严禁写入文件或提交记录):\n")
 	fmt.Fprintf(&b, "  1. GET  %s/openapi/v1/challenges                       — 题单+进度(本题 is_completed / correct_flag_count / container_status)\n", base)
 	fmt.Fprintf(&b, "  2. POST %s/openapi/v1/challenges/start?unique_code=%s  — 启动靶场容器,返回入口地址 IP:端口(需先连平台 VPN 才可达)\n", base, code)
-	fmt.Fprintf(&b, "  3. GET  %s/openapi/v1/challenges/hint?unique_code=%s   — 提示(查看后本题得分按比例扣减——扣的是分,不是完成率;连挂两轮仍无新攻击面就取,取完按 hint 指向定向打)\n", base, code)
+	fmt.Fprintf(&b, "  3. GET  %s/openapi/v1/challenges/hint?unique_code=%s   — 提示(每发扣本题分值 10%%,重复拉取同样扣分——重复文本=池已空,立即停拉)。本题全程硬上限 %d 发:以台账 hint 日志计数,不按 pass 重新计算;到顶后本题 hint 对本次跑分永久停用,终局也不例外,一次决策只拉一发。\n", base, code, hintCap(ch))
 	fmt.Fprintf(&b, `  4. POST %s/openapi/v1/challenges/submit  -H "Content-Type: application/json" -d '{"unique_code":"%s","flag":"..."}'  — 提交 flag 判定;同一 flag 重复提交返回 duplicate(409),属幂等保护,换下一个 flag 即可`+"\n", base, code)
 	fmt.Fprintf(&b, "  5. POST %s/openapi/v1/challenges/close?unique_code=%s  — 做完一题立即释放容器\n\n", base, code)
 	b.WriteString("约束:\n")

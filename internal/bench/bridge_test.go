@@ -2,6 +2,7 @@ package bench
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -382,5 +383,36 @@ func TestImportPriorityHeadsTheQueue(t *testing.T) {
 	// the earlier goal; missing_code is ignored.
 	if goals[0].Title != "bench:crypto_02" || goals[1].Title != "bench:web_01" {
 		t.Fatalf("priority order wrong: %s then %s", goals[0].Title, goals[1].Title)
+	}
+}
+
+func TestBriefAnnouncesRunLevelHintCap(t *testing.T) {
+	// 43926 post-mortem: per-pass hint caps re-armed on every endgame mint and
+	// re-pull bursts torched ~1900 points (a-18: 11 pulls on a 500pt title).
+	// The brief must announce a per-RUN ceiling, sized by difficulty.
+	c := client(t, "http://example.invalid")
+	hard := Challenge{UniqueCode: "h_01", Difficulty: "hard", FlagCount: 1, TotalScore: 500}
+	med := Challenge{UniqueCode: "m_01", Difficulty: "medium", FlagCount: 1, TotalScore: 300}
+	multi := Challenge{UniqueCode: "b_01", Difficulty: "hard", FlagCount: 4, TotalScore: 1800}
+	if got := hintCap(hard); got != 4 {
+		t.Fatalf("hard single-flag cap = %d, want 4", got)
+	}
+	if got := hintCap(med); got != 6 {
+		t.Fatalf("medium cap = %d, want 6", got)
+	}
+	if got := hintCap(multi); got != 6 {
+		t.Fatalf("hard multi-flag cap = %d, want 6", got)
+	}
+	for _, ch := range []Challenge{hard, med, multi} {
+		brief := Brief(c, ch)
+		if !strings.Contains(brief, fmt.Sprintf("全程硬上限 %d 发", hintCap(ch))) {
+			t.Fatalf("brief for %s missing run-level cap", ch.UniqueCode)
+		}
+		if !strings.Contains(brief, "不按 pass 重新计算") {
+			t.Fatalf("brief for %s must state the cap never re-arms per pass", ch.UniqueCode)
+		}
+		if !strings.Contains(brief, "重复拉取同样扣分") {
+			t.Fatalf("brief for %s must warn duplicate pulls are charged", ch.UniqueCode)
+		}
 	}
 }
