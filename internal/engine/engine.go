@@ -768,7 +768,7 @@ func (e *Engine) requeuePass2(ctx context.Context, g *fgs.Goal) (*fgs.Goal, bool
 	e.mu.Unlock()
 	pass := done + 2
 	if _, err := e.store.AddHumanFact(ctx, ng.ID,
-		fmt.Sprintf("此题进入第 %d 遍进攻:前面每一遍的完整过程与结论都已写入 attack/ 目录下本题的 work.md 台账。开局第一动作是读台账(及 attack/notes.md),只做台账里标记为【未测】或【差一步】的假设,严禁从零重扫已排除的方向。台账增量落盘:每完成一个里程碑或每约 5 分钟,立即把新结论/新原语/下一步计划写进 work.md,绝不留到收尾——墙钟随时会杀掉本步,被杀时断点必须已经在台账里,下一遍直接从断点续打。完成率优先于分值:上一遍没有新 flag 进账(平台 correct_flag_count 未增长)且台账主攻面已穷尽时,本遍开局拉下一个 hint 按其定向进攻;此后每条 hint 必须隔≥20 分钟且上一条 hint 指向的方向已打到有结论——没打完上一条 hint 就不许拉下一条,hint 是弹药不是侦察。多 flag 题拿到任何一个 flag 立即提交,然后继续下一个攻击面,完成标准是平台 is_completed=true(correct_flag_count=flag_count),拿到一个 flag 绝不等于解完。flag 候选一旦在手,当轮立即提交,不要留到下一轮。", pass),
+		fmt.Sprintf("此题进入第 %d 遍进攻:前面每一遍的完整过程与结论都已写入 attack/ 目录下本题的 work.md 台账。开局第一动作是读台账(及 attack/notes.md),只做台账里标记为【未测】或【差一步】的假设,严禁从零重扫已排除的方向。止损阀:若台账的主攻方向已经连续两遍零新旗(平台 correct_flag_count 未涨),本遍必须换一条全新解法路线——重新侦察攻击面、换工具链(如静态反汇编推导↔小解空间约束枚举↔动态调试互换)、换数学框架;换路线不是重复劳动而是止损,严禁把下一遍继续押在连续零产出的主攻线上,原方向只保留台账结论不投入新墙钟。台账增量落盘:每完成一个里程碑或每约 5 分钟,立即把新结论/新原语/下一步计划写进 work.md,绝不留到收尾——墙钟随时会杀掉本步,被杀时断点必须已经在台账里,下一遍直接从断点续打。完成率优先于分值:上一遍没有新 flag 进账(平台 correct_flag_count 未增长)且台账主攻面已穷尽时,本遍开局拉下一个 hint 按其定向进攻;此后每条 hint 必须隔≥20 分钟且上一条 hint 指向的方向已打到有结论——没打完上一条 hint 就不许拉下一条,hint 是弹药不是侦察。多 flag 题拿到任何一个 flag 立即提交,然后继续下一个攻击面,完成标准是平台 is_completed=true(correct_flag_count=flag_count),拿到一个 flag 绝不等于解完。flag 候选一旦在手,当轮立即提交,不要留到下一轮。", pass),
 		"engine:pass2"); err != nil {
 		e.log.Error("requeue: seed fact", "goal", ng.ID, "err", err)
 	}

@@ -2126,14 +2126,20 @@ func TestSterileRequeueRefundsFuse(t *testing.T) {
 		t.Fatal("pass 2 must mint")
 	}
 	facts, _ := st2.ListFacts(ctx, ng2.ID)
-	docs := false
+	docs, valve := false, false
 	for _, f := range facts {
 		if strings.Contains(f.Content, "增量落盘") {
 			docs = true
 		}
+		if strings.Contains(f.Content, "止损阀") {
+			valve = true
+		}
 	}
 	if !docs {
 		t.Fatal("pass fact must carry the incremental ledger-flush doctrine")
+	}
+	if !valve {
+		t.Fatal("pass fact must carry the switch-strategy escape valve (run 43759: f2-01 burned six passes locked on one stalling derivation)")
 	}
 	e2.noteStepFinish(ng2.ID)
 	e2.stopGoalForBudget(ctx, ng2.ID, "wall")
