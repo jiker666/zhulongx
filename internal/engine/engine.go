@@ -490,8 +490,28 @@ func (e *Engine) sweepCompleted(ctx context.Context, actives []fgs.Goal) []fgs.G
 // are requeued past the normal cap — banked progress first, creation order
 // as tiebreak, never a title that already has an active goal. An idle
 // endgame slot is worth exactly zero.
+//
+// The gate counts LIVE WORK — active goals with a step actually in flight —
+// not paper-active goals. Run 43759 14:24-15:02: two zombie actives (their
+// containers closed, their passes winding down) plus two real chains
+// satisfied MinActive=3 on paper while the third container slot sat EMPTY
+// for 38 minutes and stopped converters waited. A goal whose step is
+// WAITING_SLOT-unclaimed or between passes is idle by definition: minting
+// past it is exactly what the top-up exists for. Mints are bounded per
+// round (liveWork + minted >= MinActive) so one round cannot flood the
+// fleet with requeues; the next round re-checks whether the minted passes
+// actually started working.
 func (e *Engine) endgameTopUp(ctx context.Context, goals []fgs.Goal, actives []fgs.Goal) []fgs.Goal {
-	if e.cfg.Runtime.EndgameMinActive <= 0 || len(actives) >= e.cfg.Runtime.EndgameMinActive {
+	if e.cfg.Runtime.EndgameMinActive <= 0 {
+		return actives
+	}
+	liveWork := 0
+	for _, a := range actives {
+		if _, running, err := e.store.OpenStepCount(ctx, a.ID); err == nil && running > 0 {
+			liveWork++
+		}
+	}
+	if liveWork >= e.cfg.Runtime.EndgameMinActive {
 		return actives
 	}
 	activeTitles := make(map[string]bool, len(actives))
@@ -506,8 +526,9 @@ func (e *Engine) endgameTopUp(ctx context.Context, goals []fgs.Goal, actives []f
 	}
 	srank := e.endgameRank(stopped)
 	sort.SliceStable(stopped, func(i, j int) bool { return srank[stopped[i].ID] > srank[stopped[j].ID] })
+	minted := 0
 	for _, g := range stopped {
-		if len(actives) >= e.cfg.Runtime.EndgameMinActive {
+		if liveWork+minted >= e.cfg.Runtime.EndgameMinActive {
 			break
 		}
 		if ctx.Err() != nil {
@@ -515,6 +536,7 @@ func (e *Engine) endgameTopUp(ctx context.Context, goals []fgs.Goal, actives []f
 		}
 		if ng, ok := e.requeuePass2(ctx, &g); ok {
 			actives = append(actives, *ng)
+			minted++
 		}
 	}
 	return actives
@@ -529,6 +551,31 @@ func (e *Engine) titleTouched(title string) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.firstTouch[title]
+}
+
+// untouchedWaiting reports whether some OTHER title has an active goal that
+// has never claimed a step — fresh first-pass work waiting on the fleet's
+// slots. Used by requeuePass2's fresh-meat yield: a zero-progress regrind
+// defers to such a title instead of re-hoarding the container it is about
+// to release. Fails OPEN on store errors — a listing hiccup must not
+// strand a legitimately stopped title.
+func (e *Engine) untouchedWaiting(ctx context.Context, exclude string) bool {
+	goals, err := e.store.ListGoals(ctx)
+	if err != nil {
+		return false
+	}
+	for _, g := range goals {
+		if g.Title == exclude || g.Status != fgs.GoalActive {
+			continue
+		}
+		if e.challengeComplete(g.Title) {
+			continue
+		}
+		if !e.titleTouched(g.Title) {
+			return true
+		}
+	}
+	return false
 }
 
 // inEndgame reports whether the run is inside its final harvest window.
@@ -573,11 +620,16 @@ func (e *Engine) bankedTitle(title string) bool {
 }
 
 // endgameRank scores goals for the harvest window on title-completion
-// economics: one-flag-from-done (4) > untouched singles (3) > deep partials
-// still missing ≥2 flags (2) > zero-flag multis (1) > everything else (0).
-// Run 43574: ranking every banked partial top-tier let the stuck 2/4 pair
-// hold the fleet's slots through a zero-flag final half hour while ~39
-// untouched titles waited.
+// economics: one-flag-from-done (4) > untouched titles of ANY flag count
+// (3) > deep partials still missing ≥2 flags (2) > worked zero-flag multis
+// (1) > everything else (0). Run 43574: ranking every banked partial
+// top-tier let the stuck 2/4 pair hold the fleet's slots through a
+// zero-flag final half hour while ~39 untouched titles waited. Run 43759:
+// an untouched MULTI was swallowed by the zero-multi case — a proven
+// converter sat at rank 1 below the regrinds it outranked in value; the
+// untouched check now precedes the zero-multi case so fresh first passes
+// (the cheapest unknown in the fleet) outrank worked regrinds regardless
+// of flag count.
 func (e *Engine) endgameRank(goals []fgs.Goal) map[string]int {
 	rank := make(map[string]int, len(goals))
 	if e.FlagProgress == nil {
@@ -595,22 +647,27 @@ func (e *Engine) endgameRank(goals []fgs.Goal) map[string]int {
 			rank[g.ID] = 4
 		case cur > 0 && cur < total:
 			rank[g.ID] = 2 // deep partial: ≥2 flags still missing — full siege work per flag
-		case total > 1 && cur == 0:
-			// Multi-flag title with nothing banked — whether worked or not,
-			// the title only completes when ALL flags land, so endgame slots
-			// go to it only after single-flag conversions (run 43065:
-			// zero-flag regrinds held slots while single-flag titles
-			// converted the moment they were fed).
-			rank[g.ID] = 1
 		case !e.titleTouched(g.Title):
-			// Never-worked single-flag title: a fresh, cheap conversion —
-			// beats sieging a deep partial (run 43574: b-01/b-03 sat at 2/4
-			// from t+80m and monopolized the top slots through a zero-flag
-			// final half hour while 39 untouched titles waited; the pair
-			// has ended 2/4 in every run since 42361). Flag state is checked
-			// first on purpose: a banked title has been worked even if
-			// firstTouch memory was lost to an engine restart.
+			// Never-worked title of ANY flag count: a fresh first pass is
+			// the cheapest unknown in the fleet — it beats sieging a deep
+			// partial and beats regrinding a worked zero-multi (run 43574:
+			// b-01/b-03 at 2/4 monopolized the top slots through a
+			// zero-flag final half hour while 39 untouched titles waited;
+			// run 43759: untouched b-03 — a 16-minute 0→4 converter once
+			// fed at t+246m — was swallowed by the zero-multi case below
+			// and ranked UNDER the deep partials, so it never saw a
+			// container for four hours while slower conversions rotated).
+			// Flag state is checked first on purpose: a banked title has
+			// been worked even if firstTouch memory was lost to an engine
+			// restart.
 			rank[g.ID] = 3
+		case total > 1 && cur == 0:
+			// WORKED multi-flag title with nothing banked — the title only
+			// completes when ALL flags land, so endgame slots go to it only
+			// after fresh first passes (run 43065: zero-flag regrinds held
+			// slots while single-flag titles converted the moment they
+			// were fed; untouched multis now rank 3 above).
+			rank[g.ID] = 1
 		}
 	}
 	return rank
@@ -654,6 +711,21 @@ func (e *Engine) requeuePass2(ctx context.Context, g *fgs.Goal) (*fgs.Goal, bool
 	// prevent.
 	if e.challengeComplete(g.Title) {
 		return nil, false
+	}
+	// Fresh-meat yield: a zero-progress title's regrind pass must never
+	// re-hoard a slot while an untouched title is still waiting for its
+	// first container. Run 43759: f2-01 burned SIX zero-flag passes and
+	// e2-04 five, each stop→remint inheriting the still-warm container
+	// before the release completed, while untouched b-03 — a 16-minute
+	// 0→4 converter once actually fed — waited four hours. The fuse is
+	// not consumed by declining: when the untouched tail drains (or is
+	// itself fed), the next stop re-mints normally and the endgame
+	// top-up re-feeds what this guard deferred.
+	if e.FlagProgress != nil {
+		if cur, _, ok := e.FlagProgress(g.Title); ok && cur == 0 && e.untouchedWaiting(ctx, g.Title) {
+			e.log.Info("requeue: zero-flag pass yields its slot to the untouched tail", "title", g.Title)
+			return nil, false
+		}
 	}
 	maxFor := maxRequeues
 	banked := e.bankedTitle(g.Title)

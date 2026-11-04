@@ -1252,6 +1252,8 @@ func TestEndgameRankBreadthOverDeepPartial(t *testing.T) {
 			return 0, 1, true
 		case strings.Contains(title, "fresh"):
 			return 0, 1, true
+		case strings.Contains(title, "um"):
+			return 0, 4, true
 		}
 		return 0, 0, false
 	}
@@ -1259,8 +1261,9 @@ func TestEndgameRankBreadthOverDeepPartial(t *testing.T) {
 	multi, _ := st.CreateGoal(ctx, "bench:multi", "o", "obj")
 	plain, _ := st.CreateGoal(ctx, "bench:plain", "o", "obj")
 	fresh, _ := st.CreateGoal(ctx, "bench:fresh", "o", "obj")
+	um, _ := st.CreateGoal(ctx, "bench:um", "o", "obj")
 	// multi and plain were worked in an earlier pass (zero-flag regrinds);
-	// fresh never saw a container.
+	// fresh and um (untouched MULTI) never saw a container.
 	e.mu.Lock()
 	e.firstTouch["bench:multi"] = true
 	e.firstTouch["bench:plain"] = true
@@ -1269,13 +1272,20 @@ func TestEndgameRankBreadthOverDeepPartial(t *testing.T) {
 	if !e.inEndgame() {
 		t.Fatal("t+331m of a 350m run with an 80m window is endgame")
 	}
-	rank := e.endgameRank([]fgs.Goal{{ID: partial.ID, Title: "bench:partial"}, {ID: multi.ID, Title: "bench:multi"}, {ID: plain.ID, Title: "bench:plain"}, {ID: fresh.ID, Title: "bench:fresh"}})
+	rank := e.endgameRank([]fgs.Goal{{ID: partial.ID, Title: "bench:partial"}, {ID: multi.ID, Title: "bench:multi"}, {ID: plain.ID, Title: "bench:plain"}, {ID: fresh.ID, Title: "bench:fresh"}, {ID: um.ID, Title: "bench:um"}})
 	// v20 re-tier (run 43574: banked deep partials starved untouched breadth):
 	// untouched single(3) > deep partial 2/4(2) > worked multi-zero(1) >
 	// worked plain-zero(0). A deep partial is a proven chain, not a cheap
 	// conversion — fresh singles convert, sieges grind.
 	if !(rank[fresh.ID] > rank[partial.ID] && rank[partial.ID] > rank[multi.ID] && rank[multi.ID] > rank[plain.ID]) {
 		t.Fatalf("untouched single > deep partial > worked multi-zero > worked plain-zero: %v", rank)
+	}
+	// v21.1 (run 43759: untouched multi b-03 — a 16-minute 0→4 converter
+	// once fed — was swallowed by the zero-multi tier and starved four
+	// hours below the deep partials): an untouched MULTI ranks with fresh
+	// singles (3), above deep partials and worked zero-multis.
+	if !(rank[um.ID] == rank[fresh.ID] && rank[um.ID] > rank[partial.ID] && rank[um.ID] > rank[multi.ID]) {
+		t.Fatalf("untouched multi must rank with fresh singles above partials and worked zero-multis: %v", rank)
 	}
 	_ = ctx
 }
@@ -1407,6 +1417,140 @@ func TestExecuteNoFootholdRotatesGoal(t *testing.T) {
 	}
 }
 
+func TestZeroRequeueYieldsToUntouchedTail(t *testing.T) {
+	// Run 43759: f2-01 burned six zero-flag passes and e2-04 five, each
+	// stop→remint re-hoarding the container before its release completed,
+	// while untouched b-03 — a 16-minute 0→4 converter once fed — starved
+	// four hours. A zero-progress title's requeue defers while any OTHER
+	// untouched title has an active goal; banked titles never defer (their
+	// passes are conversion, not regrind).
+	ctx := context.Background()
+	e, st, _ := newEngine(t, ok(`{}`))
+	e.cfg.Runtime.RunDeadline = cfg.Duration(6 * time.Hour)
+	e.startedAt = e.now().Add(-2 * time.Hour)
+	e.FlagProgress = func(title string) (int, int, bool) {
+		switch title {
+		case "bench:f2-01":
+			return 0, 1, true
+		case "bench:b-01":
+			return 1, 4, true
+		}
+		return 0, 0, false
+	}
+	dud, err := st.CreateGoal(ctx, "bench:f2-01", "o", "obj")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetGoalStatus(ctx, dud.ID, fgs.GoalStopped, fgs.ActorEngine); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateGoal(ctx, "bench:b-03", "o", "obj"); err != nil { // untouched, active
+		t.Fatal(err)
+	}
+	e.mu.Lock()
+	e.firstTouch["bench:f2-01"] = true
+	e.mu.Unlock()
+
+	if _, ok := e.requeuePass2(ctx, dud); ok {
+		t.Fatal("zero-progress requeue must yield while an untouched title waits")
+	}
+
+	// Banked titles keep converting even with the untouched tail waiting.
+	banked, err := st.CreateGoal(ctx, "bench:b-01", "o", "obj")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetGoalStatus(ctx, banked.ID, fgs.GoalStopped, fgs.ActorEngine); err != nil {
+		t.Fatal(err)
+	}
+	e.mu.Lock()
+	e.firstTouch["bench:b-01"] = true
+	e.mu.Unlock()
+	if _, ok := e.requeuePass2(ctx, banked); !ok {
+		t.Fatal("banked requeue must not yield to the untouched tail")
+	}
+
+	// Once the untouched tail is fed (touched), the dud's requeue resumes.
+	e.mu.Lock()
+	e.firstTouch["bench:b-03"] = true
+	e.mu.Unlock()
+	if _, ok := e.requeuePass2(ctx, dud); !ok {
+		t.Fatal("zero-progress requeue must resume once no untouched title waits")
+	}
+}
+
+func TestEndgameTopUpCountsLiveWork(t *testing.T) {
+	// Run 43759 14:24-15:02: two zombie actives (containers closed, no step
+	// in flight) plus two real chains satisfied MinActive=3 on paper while
+	// the third slot sat empty for 38 minutes and stopped converters
+	// waited. The top-up gate must count goals with a step actually
+	// running, not paper-active goals.
+	ctx := context.Background()
+	e, st, _ := newEngine(t, ok(`{}`))
+	e.cfg.Runtime.RunDeadline = cfg.Duration(6 * time.Hour)
+	e.cfg.Runtime.EndgameAfter = cfg.Duration(5 * time.Hour)
+	e.cfg.Runtime.EndgameMinActive = 3
+	e.startedAt = e.now().Add(-2 * time.Hour) // inside the harvest window
+	e.FlagProgress = func(title string) (int, int, bool) {
+		if title == "bench:b-02" {
+			return 4, 6, true
+		}
+		return 0, 1, true
+	}
+	// Two paper actives: never claimed a step (the 43759 zombies).
+	if _, err := st.CreateGoal(ctx, "bench:a-16", "o", "obj"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateGoal(ctx, "bench:f2-01", "o", "obj"); err != nil {
+		t.Fatal(err)
+	}
+	// One live chain: a claimed (running) step.
+	live, err := st.CreateGoal(ctx, "bench:e2-04", "o", "obj")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateStep(ctx, live.ID, "work", nil, "engine:bootstrap"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.ClaimNextStep(ctx, live.ID, "test"); err != nil {
+		t.Fatal(err)
+	}
+	// A stopped converter that must be re-fed past the paper actives.
+	conv, err := st.CreateGoal(ctx, "bench:b-02", "o", "obj")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetGoalStatus(ctx, conv.ID, fgs.GoalStopped, fgs.ActorEngine); err != nil {
+		t.Fatal(err)
+	}
+	e.requeues["bench:b-02"] = 2 // mid-run caps burned; endgame lift is the only path
+	e.mu.Lock()
+	e.firstTouch["bench:b-02"] = true
+	e.mu.Unlock()
+
+	goals, err := st.ListGoals(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var actives []fgs.Goal
+	for _, g := range goals {
+		if g.Status == fgs.GoalActive {
+			actives = append(actives, g)
+		}
+	}
+	if len(actives) < 3 {
+		t.Fatalf("setup: need the paper actives counted, got %d", len(actives))
+	}
+	out := e.endgameTopUp(ctx, goals, actives)
+	titles := make(map[string]int)
+	for _, g := range out {
+		titles[g.Title]++
+	}
+	if titles["bench:b-02"] != 1 {
+		t.Fatalf("the stopped converter must be re-fed despite 3 paper actives; b-02 minted goals = %d", titles["bench:b-02"])
+	}
+}
+
 func TestEndgameTopUpRefeedsIdleSlots(t *testing.T) {
 	// Run 42838: hour-5 utilization collapsed to 1.17/3 slots — every title
 	// had burned its requeue cap, the queue emptied, and stopped partials
@@ -1437,10 +1581,14 @@ func TestEndgameTopUpRefeedsIdleSlots(t *testing.T) {
 	// Both stopped titles burned their full mid-run caps — and both were
 	// worked to get there (untouched titles cannot have burned caps; without
 	// the touch marks the fresh-tier rank would invert this order, which is
-	// the v20 breadth change covered by the rank tests above).
+	// the v20 breadth change covered by the rank tests above). The active
+	// a-01 is touched too: the 42838 shape is an emptied queue, not an
+	// untouched tail — with a-01 untouched, v21.1's fresh-meat yield
+	// correctly defers the dud's regrind to it instead.
 	e.requeues["bench:b-01"] = 2
 	e.requeues["bench:c-02"] = 2
 	e.mu.Lock()
+	e.firstTouch["bench:a-01"] = true
 	e.firstTouch["bench:b-01"] = true
 	e.firstTouch["bench:c-02"] = true
 	e.mu.Unlock()
@@ -1805,6 +1953,13 @@ func TestEndgameRankOneFromDoneOverUntouchedOverDeepPartial(t *testing.T) {
 		return g
 	}
 	gDone, gFresh, gDeep, gZero := mk("bench:one-from-done"), mk("bench:untouched"), mk("bench:deep-partial"), mk("bench:zero-multi")
+	// zero-multi is a WORKED regrind (run 43759: f2-01 burned six zero-flag
+	// passes) — its title has seen a container. An untouched multi now ranks
+	// with fresh singles (v21.1), so this mark is what keeps it in the
+	// bottom tier where the assertions below expect it.
+	e.mu.Lock()
+	e.firstTouch["bench:zero-multi"] = true
+	e.mu.Unlock()
 	rank := e.endgameRank([]fgs.Goal{*gZero, *gDeep, *gFresh, *gDone})
 	if !(rank[gDone.ID] > rank[gFresh.ID] && rank[gFresh.ID] > rank[gDeep.ID] && rank[gDeep.ID] > rank[gZero.ID]) {
 		t.Fatalf("rank order broken: done=%d fresh=%d deep=%d zero=%d",
