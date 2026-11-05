@@ -156,11 +156,14 @@ func cmdRun(args []string) error {
 	defer stop()
 
 	log := newLogger(c.LogLevel)
+	applyRunDeadlineEnv(c, log)
 	e := engine.New(st, c, log, nil)
 	wireNoopRescue(e, st, log)
 	wireStepGate(e, st, log)
+	wireProgressiveImport(ctx, st, log)
 	wireDasctf(e, st, log)
-	log.Info("zhulongx running", "db", c.DBPath, "pi", c.Pi.Command)
+	log.Info("zhulongx running", "db", c.DBPath, "pi", c.Pi.Command,
+		"run_deadline", c.Runtime.RunDeadline.D().String())
 	if err := e.Run(ctx); err != nil {
 		return err
 	}
@@ -566,6 +569,65 @@ func wireNoopRescue(e *engine.Engine, st *store.Store, log *slog.Logger) {
 // loop entirely (their steps stay pending at zero model cost) instead of
 // letting them burn turns polling for a slot, and reaps containers leaked
 // by terminal goals.
+// applyRunDeadlineEnv lets the operator stretch or shrink the engine's
+// internal stop-watch without rebuilding the image. managed.yaml pins
+// run_deadline for the TSecBench 6h window; other sets run longer (run
+// 44048, bctf-2026: platform window 10.3h, engine stopped at its baked
+// 350m deadline and left 4.4 gifted hours unused). RUN_DEADLINE=10h30m
+// style values override the file.
+func applyRunDeadlineEnv(c *cfg.Config, log *slog.Logger) {
+	v := os.Getenv("RUN_DEADLINE")
+	if v == "" {
+		return
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		log.Warn("RUN_DEADLINE ignored (want e.g. 10h30m)", "value", v, "err", err)
+		return
+	}
+	c.Runtime.RunDeadline = cfg.Duration(d)
+	log.Info("RUN_DEADLINE override active", "run_deadline", d.String())
+}
+
+// wireProgressiveImport re-runs the bench import on a slow cadence so
+// challenges the platform adds mid-run join the queue at the tail within
+// minutes of appearing. Import at t=0 is one-shot and Sync never backfills:
+// on progressively-unlocked sets that strands late challenges with no goal
+// at all (run 44048: bctf2026-26/37/39 never got a container in 6h while
+// 37 siblings did). On fixed sets the diff is empty and each tick costs one
+// list fetch.
+func wireProgressiveImport(ctx context.Context, st *store.Store, log *slog.Logger) {
+	base, token := os.Getenv("BENCHMARK_BASE_URL"), os.Getenv("BENCHMARK_TOKEN")
+	if base == "" || token == "" {
+		return
+	}
+	bc, err := bench.NewClient(base, token)
+	if err != nil {
+		log.Warn("bench: progressive import not armed", "err", err)
+		return
+	}
+	go func() {
+		t := time.NewTicker(15 * time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				n, err := bench.Import(ctx, st, bc, nil)
+				if err != nil {
+					log.Warn("bench: progressive import tick failed", "err", err)
+					continue
+				}
+				if n > 0 {
+					log.Info("bench: progressive import added late challenges", "created", n)
+				}
+			}
+		}
+	}()
+	log.Info("bench: progressive import armed (15m cadence)")
+}
+
 func wireStepGate(e *engine.Engine, st *store.Store, log *slog.Logger) {
 	base, token := os.Getenv("BENCHMARK_BASE_URL"), os.Getenv("BENCHMARK_TOKEN")
 	if base == "" || token == "" {

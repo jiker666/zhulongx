@@ -416,3 +416,53 @@ func TestBriefAnnouncesRunLevelHintCap(t *testing.T) {
 		}
 	}
 }
+
+func TestImportIncrementalPicksUpLateChallenges(t *testing.T) {
+	// Run 44048 (bctf-2026): the platform unlocked challenges progressively;
+	// Import at t=0 is one-shot and Sync never backfills, so three late
+	// codes never got goals. Re-running Import must create only the new
+	// codes, at the queue tail, without touching existing goals.
+	st := openStore(t)
+	p := newPlatformStub(t, twoChallenges)
+	c := client(t, p.srv.URL)
+	if _, err := Import(context.Background(), st, c, nil); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := st.ListGoals(context.Background())
+	if len(before) != 2 {
+		t.Fatalf("want 2 goals after first import, got %d", len(before))
+	}
+	base := strings.TrimRight(twoChallenges, " \t\n")
+	p.set(base[:len(base)-1] + `,{"unique_code":"late_01","description":"unlocked mid-run","difficulty":"hard","level":3,"total_score":500,"flag_count":1}]`)
+	n, err := Import(context.Background(), st, c, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("incremental import created %d goals, want 1", n)
+	}
+	after, _ := st.ListGoals(context.Background())
+	if len(after) != 3 {
+		t.Fatalf("want 3 goals after incremental import, got %d", len(after))
+	}
+	// Existing goals keep their IDs; the late goal sits at the tail.
+	tail := after[len(after)-1]
+	if tail.Title != "bench:late_01" {
+		t.Fatalf("tail goal = %s, want bench:late_01", tail.Title)
+	}
+	for _, g := range before {
+		kept := false
+		for _, h := range after {
+			if h.ID == g.ID && h.Title == g.Title {
+				kept = true
+			}
+		}
+		if !kept {
+			t.Fatalf("existing goal %s disturbed by incremental import", g.Title)
+		}
+	}
+	// Idempotent: a third pass with the same list creates nothing.
+	if n, err := Import(context.Background(), st, c, nil); err != nil || n != 0 {
+		t.Fatalf("repeat import created %d (err %v), want 0", n, err)
+	}
+}
