@@ -43,3 +43,6 @@
 | comfyui-attack-surface.md | ComfyUI/Manager 公开攻击面手册（无鉴权 API / startup-scripts 兑换 RCE / pickle 面） | REFERENCE |
 | default-creds-cn.md | 国产 OA/中间件/内网默认凭证表（泛微/用友/致远/金蝶/Tomcat…） | REFERENCE |
 | geoserver-ogc-xpath-oracle.py | GeoServer OGC filter XPath 盲注 oracle（先试 CVE-2024-36401 RCE 族） | REFERENCE |
+| db-privesc-postgres.md | PostgreSQL 提权/文件读手册（SET ROLE→SECURITY DEFINER→lo_import/dblink→.pgpass 阶梯） | REFERENCE |
+| ssrf-bypass-pack.md | SSRF/URL 校验绕过手册（校验器分类→解析差异电池→gopher/file 兑现） | REFERENCE |
+| race-harness.py | Race/TOCTOU 一次性模板（barrier 起跑+轮内自重置+自动验胜） | TEMPLATE |

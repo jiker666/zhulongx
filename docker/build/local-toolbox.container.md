@@ -22,7 +22,7 @@ description: 本机(断网 Linux 容器)已装工具清单。开题第一步清�
 - `secrets/flask-secret-keys.txt`:Flask SECRET_KEY 专用(5.6 万条)
 
 ## 公开 CVE 武器库(/opt/zhx/arsenal/)
-- 16 件公开知名 Web 利用 PoC(2017-2025 谱系:Next.js/React、PHP-CGI、Apache、HugeGraph、Spring/Java 系、Struts、Shiro、fastjson、ThinkPHP、Openfire、log4j、Gradio、LangChain),每件自带指纹注释与用法
+- 25 件公开武器(2017-2025 高知名度 CVE PoC + 技术族打法手册),每件自带指纹注释与用法
 - **用法纪律见库内 README**:先手工侦察打实指纹,命中武器的 fingerprint 后按默认参数原样复现,失败才改编;`[VERIFIED]`=真实靶验证过原样可用,`[REFERENCE]`=公开 advisory 复写,先打无害探针确认前提再上攻击 payload。断网环境下 JNDI/LDAP/DNS 外带类 payload 只用于确认存在,利用转本地回显面。严禁拿武器库当第一步盲扫。
 
 ## 系统工具
@@ -49,6 +49,10 @@ description: 本机(断网 Linux 容器)已装工具清单。开题第一步清�
 - **参数名带点号/横线 × nginx+PHP = 头部载体死刑**:nginx `ignore_invalid_headers=on` 对名字含 `.`/`_` 的 header **静默丢弃**(没有 400——"没报错"≠"送到了");即使送到了,PHP 注册 `HTTP_*` 键时也把 `.`/`-` 统统 mangle 成 `_`。所以带点参数名**永远无法经 header 到达 PHP**,载体只剩 body/query/cookie/JSON——在 39 种 header 形状上排队是纯烧轮次(实战 130+ 种 body 形状 + 全部 header 形状证伪后才发现该规则)。
 - **原型链/属性污染:payload"通过但不生效"≠死,变换编码层级再试**:污染 gadget 首选"文件读取/包含端点会用的属性"(模块 `__file__`、配置路径、模板名);JSON 转义层级(`\\` vs `\`)、URL/Unicode 编码差异常是生效与否的关键——一层不生效换下一层,严禁两发就判死。污染前先找源码披露端点(GET /src、/.git、备份文件)拉全量源码定 gadget。
 - **裸 JDWP 手搓是最后手段**:invokeMethod 是崩 JVM 大户(一 invoke 一崩,连带整容器重启)。有 HTTP API 的 Java 服务,API 层 RCE(沙箱绕过/CVE 链)与**诊断代理激活端点**(PUT/POST 挂载 arthas/JMX 一类,激活后 telnet/http 即全权执行——注意:激活前端口零回显不是死面)全部证伪之前不碰 JDWP;必须进 JDWP 时只用只读原语(String reference 读取、线程枚举),不 invokeMethod。
+- **PostgreSQL 后端别按 MySQL 打**:阶梯=/opt/zhx/arsenal/db-privesc-postgres.md——测绘(pg_roles/pg_auth_members)→ **SET ROLE 直提先查先试**(角色成员关系是最便宜的提权)→ SECURITY DEFINER 函数枚举(owner≠current_user 的全列出,逐个 pg_get_functiondef 找参数滥用)→ 文件读(pg_read_file→lo_import→dblink 同机回连)→ .pgpass/容器 env 凭据瀑布。SQL 面到顶的判据写死:无可 SET 角色+无 DEFINER+无扩展权+文件读全拒 = 转应用层,别在 SQL 上排队。
+- **SSRF/URL 校验绕过先分类校验器再动手**:/opt/zhx/arsenal/ssrf-bypass-pack.md——纯字符串匹配→解析差异电池一次全打(十进制 IP、userinfo @、反斜杠分隔、[::ffff:]);DNS 后查 IP→重定向链/应用内跳转端点;**根本不 fetch 的参数 SSRF 家族整体不适用**,去找参数真正的消费者(webhook 触发/定时任务/子进程 curl),在参数上排绕过电池=纯烧轮次。金丝雀先行:每参数先打唯一 canary 证明它真的会 fetch。中后收获面:内部 /metrics 与管理台 > file:// > gopher://(redis/FastCGI 一击)。
+- **盲提取速度学**:长度先行→字符集分类判型→每字符二分(log2(charset) 发,不是线性 95 发)→有 UNION/报错通道绝不降级用布尔。**表名/列名先全提(便宜),再定向打 flag 列,严禁全表游标遍历**——提取脚本必须 one-shot(dump→离线解),容器随时轮换,跨轮状态=白干。
+- **race/TOCTOU 题直接改模板**:/opt/zhx/arsenal/race-harness.py——barrier 同步起跑+轮内自重置+自动验胜,填 setup/attempt/verify 三个函数即用;窗口不够窄就 32/64 线程一档档加,别换姿势。
 
 ## 容器健康(实战血泪)
 - **start 返回的地址只是声明**:平台复用地址,可能发来别题的应用或根本没服务。开打前 GET 根路径验签(标题/框架对上本题);TCP 能连≠端口开。
