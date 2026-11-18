@@ -41,6 +41,12 @@ type Runtime struct {
 	// RepairTimeout bounds the single follow-up round that salvages a
 	// contract miss (no JSON / invalid schema) without re-running the step.
 	RepairTimeout Duration `yaml:"repair_timeout"`
+	// RunnerStallTimeout bounds how long ONE turn may go without any agent
+	// event before the adapter aborts it as wedged (run 46631: a tool call
+	// that never returned parked two turns for 24m and 42m while the step
+	// heartbeat kept the claim alive — the wall budget burned on silence).
+	// 0 = the adapter's built-in default (8m).
+	RunnerStallTimeout Duration `yaml:"runner_stall_timeout"`
 	// RunnerWatchdog, when > 0, is the runtime-liveness floor: if no runner
 	// turn (Decide or Execute) completes for this long while no step is in
 	// flight, the model path is declared dead and the engine enters outage
@@ -106,6 +112,12 @@ type Runtime struct {
 	// breadth no longer trades against depth.
 	EndgameStepBudget int      `yaml:"endgame_step_budget"`
 	EndgameWallBudget Duration `yaml:"endgame_wall_budget"`
+	// MultiFlagStepBudget / MultiFlagWallBudget apply to a multi-flag title
+	// with at least one banked flag before endgame. The first-touch budget
+	// remains shallow for breadth; a proven partial conversion gets enough
+	// uninterrupted depth to pursue its remaining flags.
+	MultiFlagStepBudget int      `yaml:"multi_flag_step_budget"`
+	MultiFlagWallBudget Duration `yaml:"multi_flag_wall_budget"`
 	// FlagRefillMax caps how many times banking a NEW correct flag may refuel
 	// one goal's budgets in a pass: the wall window resets AND FlagStepBonus
 	// extra Execute steps are granted. Multi-flag intranets legitimately
@@ -117,6 +129,16 @@ type Runtime struct {
 	// FlagStepBonus is how many extra Execute steps each flag refuel grants
 	// on top of the step-budget reset. 0 = code default (3).
 	FlagStepBonus int `yaml:"flag_step_bonus"`
+	// FlagStallPasses caps how long a banked-but-stalled partial may keep
+	// its converter privileges. A pass boundary where the platform correct
+	// count did not move counts one zero-delta pass; after this many in a
+	// row the title loses the banked exemptions (endgame requeue lift, rank-2
+	// deep-partial tier, live-work credit in the endgame top-up) and drops to
+	// the worked-zero tier — still eligible for idle slots, never again ahead
+	// of fresh unknowns. Run 46870: b-01 sat at 2/4 for five hours across ~19
+	// rounds while the tail's four untouched titles starved to zero flags.
+	// Any new flag resets the streak. 0 = code default (2).
+	FlagStallPasses int `yaml:"flag_stall_passes"`
 }
 
 // Pi describes how to launch the agent runtime.
@@ -147,6 +169,7 @@ func Default() *Config {
 		LogLevel: "info",
 		Runtime: Runtime{
 			TickInterval:       Duration(2 * time.Second),
+			RunnerStallTimeout: Duration(8 * time.Minute),
 			DecideTimeout:      Duration(10 * time.Minute),
 			ExecuteTimeout:     Duration(15 * time.Minute),
 			MaxConcurrentSteps: 2,
@@ -190,6 +213,12 @@ func (c *Config) validate() error {
 	}
 	if c.Runtime.TickInterval.D() <= 0 || c.Runtime.DecideTimeout.D() <= 0 || c.Runtime.ExecuteTimeout.D() <= 0 {
 		return fmt.Errorf("cfg: durations must be positive")
+	}
+	// EndgameAfter is a remaining-time window. A window as large as (or
+	// larger than) the run would switch harvest ordering at startup and
+	// starve first-touch breadth; reject that configuration explicitly.
+	if c.Runtime.RunDeadline.D() > 0 && c.Runtime.EndgameAfter.D() >= c.Runtime.RunDeadline.D() {
+		return fmt.Errorf("cfg: endgame_after must be smaller than run_deadline")
 	}
 	// fail fast on a bad regex before the first runner launch
 	if _, err := pi.CompileToolPolicy(c.Pi.BlockedTools); err != nil {

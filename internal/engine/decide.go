@@ -180,21 +180,41 @@ func (e *Engine) countNoop(ctx context.Context, goalID string, openStepsEmpty bo
 		rescueAt = r
 	}
 	if n >= rescueAt && e.NoopRescue != nil && !alreadyRescued {
-		e.mu.Lock()
-		e.rescued[goalID] = true
-		e.mu.Unlock()
-		if hint, ok := e.NoopRescue(ctx, goalID); ok && strings.TrimSpace(hint) != "" {
-			if _, err := e.store.AddHint(ctx, goalID, hint, fgs.ActorEngine); err != nil {
-				e.log.Error("decide: noop rescue hint write failed", "goal", goalID, "err", err)
-			} else {
-				e.resetNoop(goalID)
+		// A dry hint pool must not be pulled again: each view costs score
+		// and a repeat text adds zero information (the pool-exhausted
+		// signature is an exact-text repeat). Skip straight to the guard.
+		dry := false
+		if g, err := e.store.GetGoal(ctx, goalID); err == nil {
+			dry = e.hintDryTitle(g.Title)
+		}
+		if !dry {
+			e.mu.Lock()
+			e.rescued[goalID] = true
+			e.mu.Unlock()
+			if hint, ok := e.NoopRescue(ctx, goalID); ok && strings.TrimSpace(hint) != "" {
+				var dup bool
 				if g, err := e.store.GetGoal(ctx, goalID); err == nil {
-					e.mu.Lock()
-					e.rescuedTitle[g.Title] = true
-					e.mu.Unlock()
+					dup = e.hintTextSeen(g.Title, hint)
+					if dup {
+						e.mu.Lock()
+						e.hintDry[g.Title] = true
+						e.mu.Unlock()
+					}
 				}
-				e.log.Warn("decide: noop guard rescued by hint", "goal", goalID, "rounds", n)
-				return
+				if dup {
+					e.log.Warn("decide: hint pool exhausted (repeat text) — rescue declined", "goal", goalID, "rounds", n)
+				} else if _, err := e.store.AddHint(ctx, goalID, hint, fgs.ActorEngine); err != nil {
+					e.log.Error("decide: noop rescue hint write failed", "goal", goalID, "err", err)
+				} else {
+					e.resetNoop(goalID)
+					if g, err := e.store.GetGoal(ctx, goalID); err == nil {
+						e.mu.Lock()
+						e.rescuedTitle[g.Title] = true
+						e.mu.Unlock()
+					}
+					e.log.Warn("decide: noop guard rescued by hint", "goal", goalID, "rounds", n)
+					return
+				}
 			}
 		}
 	}

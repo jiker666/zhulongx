@@ -25,6 +25,15 @@ var (
 	// ErrPolicyViolation: the agent ran a command matched by the blocked
 	// tool policy; the run is aborted mid-flight.
 	ErrPolicyViolation = errors.New("pi: tool policy violation")
+	// ErrCommandLoop: the agent repeated one exact bash command without
+	// progress; replaying the same step would only burn the wall clock.
+	ErrCommandLoop = errors.New("pi: repeated command loop")
+	// ErrTurnStall: no protocol events arrived from the agent for the stall
+	// window — a wedged tool execution (a bash call that never returns, a
+	// hung model stream) parks the turn forever while the step heartbeat
+	// keeps refreshing, so the wall budget burns on silence. The adapter
+	// aborts the turn itself and surfaces the streamed partial.
+	ErrTurnStall = errors.New("pi: turn stalled — no agent events for the stall window")
 	// ErrClosed: adapter already closed.
 	ErrClosed = errors.New("pi: adapter closed")
 )
@@ -43,7 +52,21 @@ type LaunchConfig struct {
 	// Policy (optional) aborts the run when a bash command matches a
 	// blocked pattern. nil = allow everything.
 	Policy *ToolPolicy
+	// StallTimeout bounds how long a turn may go without ANY protocol event
+	// from the agent (tool starts/updates, message deltas, settled). A tool
+	// call that never returns — a curl loop with no total fuse, a wedged
+	// stream — silences the event feed while the turn (and the container
+	// slot under it) hangs until ExecuteTimeout. Run 46631: two wedged
+	// turns burned 24m and 42m of slot time with the model's last message
+	// already delivered. <=0 falls back to DefaultStallTimeout.
+	StallTimeout time.Duration
 }
+
+// DefaultStallTimeout is the no-events ceiling for one turn. Long enough
+// that a legitimate 5-minute boot-wait command chained inside one bash call
+// (events only fire around tool execution) never trips it; short enough
+// that a wedged turn costs minutes, not the wall budget.
+const DefaultStallTimeout = 8 * time.Minute
 
 // fixed RPC flags: deterministic, stateless by default.
 func (c LaunchConfig) argv() []string {
@@ -78,11 +101,18 @@ type Adapter struct {
 	// violationCh carries the first tool-policy violation of the current
 	// turn, waking Prompt before the agent settles.
 	violationCh chan string
+	// loopCh carries a repeated-command abort for the current turn.
+	loopCh chan string
 	// streamText accumulates assistant text deltas as a fallback when
 	// get_last_assistant_text is unavailable.
-	streamText strings.Builder
-	toolCalls  int
-	events     []string
+	streamText      strings.Builder
+	toolCalls       int
+	events          []string
+	lastBashCommand string
+	sameBashCount   int
+	// lastEventAt is bumped on every dispatched record; the stall watchdog
+	// reads it to detect a wedged turn (tool execution that never returns).
+	lastEventAt time.Time
 
 	stderrTail ringBuffer
 	exited     chan struct{} // closed when the process is gone
@@ -124,6 +154,7 @@ func Start(cfg LaunchConfig) (*Adapter, error) {
 		waiters:     map[string]chan *Record{},
 		settledCh:   make(chan struct{}, 1),
 		violationCh: make(chan string, 1),
+		loopCh:      make(chan string, 1),
 		exited:      make(chan struct{}),
 	}
 	go a.drainStderr(stderr)
@@ -142,11 +173,12 @@ func (a *Adapter) Prompt(ctx context.Context, message string) (*PromptResult, er
 	res, err := a.prompt(ctx, message)
 	if err != nil {
 		switch {
-		case errors.Is(err, context.DeadlineExceeded):
-			// Deadline salvage: snapshot what the agent streamed before the
-			// deadline — its final report may already be complete, and the
+		case errors.Is(err, context.DeadlineExceeded), errors.Is(err, ErrTurnStall):
+			// Deadline/stall salvage: snapshot what the agent streamed before
+			// the silence — its final report may already be complete, and the
 			// tail still beats nothing. The process is still aborted (the
-			// deadline is hard); callers recover the partial from the result.
+			// deadline is hard, the wedge is real); callers recover the
+			// partial from the result.
 			a.mu.Lock()
 			part := &PromptResult{
 				Disposition: "started",
@@ -160,9 +192,15 @@ func (a *Adapter) Prompt(ctx context.Context, message string) (*PromptResult, er
 			_, _ = a.send(abortCtx, Command{Type: "abort"})
 			cancel()
 			_ = a.Close()
+			if errors.Is(err, ErrTurnStall) {
+				return part, ErrTurnStall
+			}
 			return part, ErrTimeout
 		case errors.Is(err, ErrPolicyViolation):
 			// the run is poisoned: no graceful drain, kill immediately
+			a.killNow()
+		case errors.Is(err, ErrCommandLoop):
+			// the current turn is poisoned by a deterministic tool loop
 			a.killNow()
 		}
 		return nil, err
@@ -180,9 +218,13 @@ func (a *Adapter) prompt(ctx context.Context, message string) (*PromptResult, er
 	id := fmt.Sprintf("zhx-%d", a.seq)
 	a.settledCh = make(chan struct{}, 1) // fresh per turn
 	a.violationCh = make(chan string, 1)
+	a.loopCh = make(chan string, 1)
 	a.streamText.Reset()
 	a.toolCalls = 0
 	a.events = a.events[:0]
+	a.lastBashCommand = ""
+	a.sameBashCount = 0
+	a.lastEventAt = time.Now()
 	a.mu.Unlock()
 
 	// 1. send prompt, await its response (acceptance, NOT completion)
@@ -194,6 +236,43 @@ func (a *Adapter) prompt(ctx context.Context, message string) (*PromptResult, er
 		return nil, fmt.Errorf("%w: prompt: %s", ErrProtocol, resp.Error)
 	}
 
+	// Stall watchdog (run 46631): a tool execution that never returns
+	// silences the event feed while the turn — and the container slot under
+	// it — hangs until ExecuteTimeout (two wedged turns burned 24m and 42m
+	// with the model's last message already streamed). Any dispatched record
+	// bumps lastEventAt; once the silence exceeds the stall window the turn
+	// is declared wedged and Prompt returns via the salvage path.
+	stall := a.cfg.StallTimeout
+	if stall <= 0 {
+		stall = DefaultStallTimeout
+	}
+	stallDone := make(chan struct{})
+	defer close(stallDone)
+	stallCh := make(chan struct{}, 1)
+	go func() {
+		t := time.NewTimer(stall)
+		defer t.Stop()
+		for {
+			select {
+			case <-t.C:
+				a.mu.Lock()
+				last := a.lastEventAt
+				a.mu.Unlock()
+				if d := time.Since(last); d < stall {
+					t.Reset(stall - d)
+					continue
+				}
+				select {
+				case stallCh <- struct{}{}:
+				default:
+				}
+				return
+			case <-stallDone:
+				return
+			}
+		}
+	}()
+
 	// 2. wait for agent_end — the actual completion marker. If the
 	// disposition was "handled" (no run started) the settled event may
 	// already have fired before the response; the channel buffer covers it.
@@ -201,6 +280,10 @@ func (a *Adapter) prompt(ctx context.Context, message string) (*PromptResult, er
 	case <-a.settledCh:
 	case v := <-a.violationCh:
 		return nil, fmt.Errorf("%w: command matched %s", ErrPolicyViolation, v)
+	case v := <-a.loopCh:
+		return nil, fmt.Errorf("%w: %s", ErrCommandLoop, v)
+	case <-stallCh:
+		return nil, ErrTurnStall
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	case <-a.exited:
@@ -299,6 +382,9 @@ func (a *Adapter) readLoop() {
 }
 
 func (a *Adapter) dispatch(rec *Record) {
+	a.mu.Lock()
+	a.lastEventAt = time.Now()
+	a.mu.Unlock()
 	if rec.ID != "" && rec.Type == "response" {
 		a.mu.Lock()
 		ch, ok := a.waiters[rec.ID]
@@ -323,7 +409,7 @@ func (a *Adapter) dispatch(rec *Record) {
 		a.mu.Lock()
 		a.toolCalls++
 		a.mu.Unlock()
-		if a.cfg.Policy != nil {
+		if rec.Type == EventToolExecStart {
 			// tool_execution_* shape: {"toolName":"bash","args":{"command":...}}
 			var probe struct {
 				ToolName string `json:"toolName"`
@@ -333,16 +419,41 @@ func (a *Adapter) dispatch(rec *Record) {
 			}
 			if json.Unmarshal([]byte(rec.Raw), &probe) == nil &&
 				probe.ToolName == "bash" && probe.Args.Command != "" {
-				if v := a.cfg.Policy.Violation(probe.Args.Command); v != "" {
-					select { // wake Prompt mid-run; buffer 1, first hit wins
-					case a.violationCh <- v:
+				if n, loop := a.noteBashCommand(probe.Args.Command); loop {
+					select {
+					case a.loopCh <- fmt.Sprintf("%s after %d identical bash commands", ErrCommandLoop, n):
 					default:
+					}
+				}
+				if a.cfg.Policy != nil {
+					if v := a.cfg.Policy.Violation(probe.Args.Command); v != "" {
+						select { // wake Prompt mid-run; buffer 1, first hit wins
+						case a.violationCh <- v:
+						default:
+						}
 					}
 				}
 			}
 		}
 	}
 	a.pushEvent(truncate(rec.Raw, 400))
+}
+
+// 32 leaves room for short-lived retry bursts (e1-03 repeated a failed
+// helper 13 times, then changed route and solved) while cutting the
+// 500+ invocation dead-loop seen in b-02 well before ExecuteTimeout.
+const repeatedBashLimit = 32
+
+// noteBashCommand tracks exact consecutive bash commands within one prompt.
+// readLoop serializes event dispatch, so this helper does not take the mutex.
+func (a *Adapter) noteBashCommand(command string) (int, bool) {
+	if command == a.lastBashCommand {
+		a.sameBashCount++
+	} else {
+		a.lastBashCommand = command
+		a.sameBashCount = 1
+	}
+	return a.sameBashCount, a.sameBashCount >= repeatedBashLimit
 }
 
 // captureAssistantText pulls text deltas out of message events:

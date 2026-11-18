@@ -11,11 +11,29 @@ runtime:
   decide_noop_limit: 5
   hint_rescue_rounds: 2
   repair_timeout: 4m
+  # v26 (46631): a wedged tool execution silences the agent's event feed while
+  # the step heartbeat keeps the claim alive — two turns burned 24m and 42m of
+  # slot time that way (b-02 held 21 effective attack minutes of a 63-minute
+  # slot). 8m of total event silence aborts the turn and salvages the partial.
+  runner_stall_timeout: 8m
   runner_watchdog: 12m
   goal_step_budget: 6
   goal_wall_budget: 30m
   flag_refill_max: 6
   flag_step_bonus: 3
+  # v27 (46870): a banked partial that goes this many consecutive passes with
+  # zero new platform flags loses its converter privileges (endgame requeue
+  # lift, rank-2 tier, live-work credit) — b-01 sat 2/4 for ~4h across ~19
+  # rounds while 4 untouched titles starved to zero flags. Any new flag
+  # resets the streak, so real converters never trip it.
+  flag_stall_passes: 2
+  # v22: a multi-flag title with banked-but-incomplete flags (e.g. b-02 4/6)
+  # gets deeper budgets MID-RUN instead of waiting for the endgame window —
+  # endgame depth only ever arrived with <70m left, too late for a 6-flag
+  # intranet. First-touch breadth stays at goal_*_budget; only proven
+  # partial converters earn this.
+  multi_flag_step_budget: 12
+  multi_flag_wall_budget: 60m
   run_deadline: 350m
   endgame_after: 4h30m
   endgame_min_active: 3

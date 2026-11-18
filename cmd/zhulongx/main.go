@@ -693,6 +693,10 @@ func wireFlagFastLane(e *engine.Engine, bc *bench.Client, gate *bench.SlotGate, 
 		case err != nil:
 			log.Warn("bench: fast-lane submit failed", "code", code, "err", err)
 		case res.Correct:
+			// The response carries the scoring pipeline's own progress count —
+			// feed it to the gate immediately so scheduling (completion sweep,
+			// endgame ranking, stall accounting) never reads a lagging list.
+			gate.SetSubmitProgress(code, res.CorrectFlagCount, res.TotalFlagCount)
 			log.Info("bench: fast-lane FLAG BANKED", "code", code, "progress", fmt.Sprintf("%d/%d", res.CorrectFlagCount, res.TotalFlagCount))
 		default:
 			log.Info("bench: fast-lane submit not correct", "code", code)

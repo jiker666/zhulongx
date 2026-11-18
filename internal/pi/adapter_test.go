@@ -176,6 +176,67 @@ func TestTimeoutReturnsPartialResult(t *testing.T) {
 	}
 }
 
+func TestTurnStallAbortsWedgedRun(t *testing.T) {
+	// Run 46631: a tool execution that never returns silences the event
+	// feed while the turn — and the container slot under it — hangs until
+	// ExecuteTimeout (two wedged turns burned 24m and 42m with the model's
+	// last message already streamed). The stall watchdog must abort the
+	// turn well before any caller deadline and surface the streamed partial
+	// together with ErrTurnStall.
+	bin := buildMock(t)
+	a, err := Start(LaunchConfig{
+		Command: bin,
+		Env:     []string{"MOCK_SCENARIO=stream_then_hang"},
+		// caller deadline is far away — ONLY the stall watchdog can fire
+		StallTimeout: 400 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("start mockpi: %v", err)
+	}
+	defer a.Close()
+	start := time.Now()
+	res, err := a.Prompt(context.Background(), "go")
+	if !errors.Is(err, ErrTurnStall) {
+		t.Fatalf("want ErrTurnStall, got %v", err)
+	}
+	if res == nil || !strings.Contains(res.Text, "partial streamed output") {
+		t.Fatalf("partial result must carry the streamed text: %+v", res)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("stall abort arrived late: %v", elapsed)
+	}
+	select {
+	case <-a.exited:
+	case <-time.After(6 * time.Second):
+		t.Fatal("process not killed after stall abort")
+	}
+}
+
+func TestTurnStallNotTriggeredByLiveStream(t *testing.T) {
+	// A turn whose events keep arriving must never trip the stall watchdog:
+	// the timer re-arms on every dispatched record. slow_stream emits two
+	// deltas 500ms apart and settles at ~1s — with a 700ms stall window a
+	// one-shot timer would abort mid-stream, the re-arming watchdog carries
+	// the turn to agent_end.
+	bin := buildMock(t)
+	a, err := Start(LaunchConfig{
+		Command:      bin,
+		Env:          []string{"MOCK_SCENARIO=slow_stream"},
+		StallTimeout: 700 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("start mockpi: %v", err)
+	}
+	defer a.Close()
+	res, err := a.Prompt(context.Background(), "go")
+	if err != nil {
+		t.Fatalf("live stream must complete, got %v", err)
+	}
+	if !strings.Contains(res.Text, "slow but alive") {
+		t.Fatalf("streamed text: %q", res.Text)
+	}
+}
+
 func TestSecondPromptReusesProcess(t *testing.T) {
 	bin := buildMock(t)
 	a := launch(t, bin, "normal")
@@ -258,6 +319,22 @@ func TestToolPolicyAllowsUnmatchedCommands(t *testing.T) {
 	}
 	if res.ToolCalls != 1 {
 		t.Fatalf("tool calls: %d", res.ToolCalls)
+	}
+}
+
+func TestRepeatedBashCommandLoop(t *testing.T) {
+	a := &Adapter{}
+	for i := 1; i < repeatedBashLimit; i++ {
+		if got, loop := a.noteBashCommand("python3 missing.py"); loop || got != i {
+			t.Fatalf("before limit: count=%d loop=%v want count=%d", got, loop, i)
+		}
+	}
+	got, loop := a.noteBashCommand("python3 missing.py")
+	if got != repeatedBashLimit || !loop {
+		t.Fatalf("at limit: count=%d loop=%v", got, loop)
+	}
+	if got, loop := a.noteBashCommand("python3 other.py"); got != 1 || loop {
+		t.Fatalf("different command must reset loop: count=%d loop=%v", got, loop)
 	}
 }
 

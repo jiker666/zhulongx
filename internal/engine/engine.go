@@ -74,6 +74,23 @@ type Engine struct {
 	passWorked      map[string]bool // goalIDs that produced a real finding
 	sterileRefunded map[string]bool // titles that already banked their one refund
 
+	// Zero-delta stall accounting (FlagStallPasses): a banked partial that
+	// stops converting keeps its converter privileges only for so long.
+	// passBase is the platform correct count at the last counted pass
+	// boundary; zeroStreak counts consecutive boundaries with no new flags.
+	// passCounted makes each boundary count exactly once — endgameTopUp
+	// re-offers the same stopped goal every tick, and the pass ended once.
+	passBase    map[string]int  // title → correct count at last pass boundary
+	zeroStreak  map[string]int  // title → consecutive zero-delta boundaries
+	passCounted map[string]bool // goalID → its stop already counted as a boundary
+
+	// Hint-pool bookkeeping: hintSeen holds the text of every platform hint
+	// pulled for a title; a repeat text means the pool is dry (the platform
+	// charges each view), so hintDry marks the title off limits for further
+	// pulls — engine-side prefetch and the noop rescue both respect it.
+	hintSeen map[string]map[string]bool
+	hintDry  map[string]bool
+
 	// Flag-progress budget refuel: a goal whose challenge banked flags
 	// during the current pass is demonstrably converting slot time into
 	// score — its wall budget refuels instead of expiring (run 42361:
@@ -169,10 +186,11 @@ func New(st *store.Store, c *cfg.Config, log *slog.Logger, factory RunnerFactory
 			// invalid patterns already rejected at config load; ignore the error
 			policy, _ := pi.CompileToolPolicy(c.Pi.BlockedTools)
 			return pi.Start(pi.LaunchConfig{
-				Command: c.Pi.Command,
-				Args:    c.Pi.Args,
-				Dir:     c.Pi.Dir,
-				Policy:  policy,
+				Command:      c.Pi.Command,
+				Args:         c.Pi.Args,
+				Dir:          c.Pi.Dir,
+				Policy:       policy,
+				StallTimeout: c.Runtime.RunnerStallTimeout.D(),
 			})
 		}
 	}
@@ -193,6 +211,12 @@ func New(st *store.Store, c *cfg.Config, log *slog.Logger, factory RunnerFactory
 		requeuedGoal:    map[string]bool{},
 		passWorked:      map[string]bool{},
 		sterileRefunded: map[string]bool{},
+
+		passBase:    map[string]int{},
+		zeroStreak:  map[string]int{},
+		passCounted: map[string]bool{},
+		hintSeen:    map[string]map[string]bool{},
+		hintDry:     map[string]bool{},
 
 		flagBase:    map[string]int{},
 		flagRefills: map[string]int{},
@@ -436,10 +460,12 @@ func (e *Engine) tick(ctx context.Context) {
 	// A goal holding banked-but-unfinished flag progress converts a free
 	// slot into completion far cheaper than a fresh first pass (run 42361:
 	// b-01 died at 2/4 flags while untouched queue-tail goals burned the
-	// last hour). Stable sort — creation order stays the tiebreaker.
+	// last hour). The full tiebreak ladder lives in endgameOrder — see the
+	// 46418 note there for why rank-tier-only sorting with creation order
+	// underneath starved single-pass titles behind fifth helpings.
 	if !dead && e.inEndgame() {
 		rank := e.endgameRank(actives)
-		sort.SliceStable(actives, func(i, j int) bool { return rank[actives[i].ID] > rank[actives[j].ID] })
+		sort.SliceStable(actives, e.endgameOrder(actives, rank))
 		actives = e.endgameTopUp(ctx, goals, actives)
 	}
 	for _, g := range actives {
@@ -505,8 +531,28 @@ func (e *Engine) endgameTopUp(ctx context.Context, goals []fgs.Goal, actives []f
 	if e.cfg.Runtime.EndgameMinActive <= 0 {
 		return actives
 	}
+	// Runway floor: a minted pass needs a viable window. Run 46196 minted
+	// c-08/c-09 retries with 6 minutes of runway left (their sessions read
+	// ledgers, found live footholds, and died mid-harvest at the bell) —
+	// those slots were pure noise. Below the floor an idle slot is worth
+	// exactly as much and says nothing misleading in the log.
+	const minMintRunway = 15 * time.Minute
+	if d := e.cfg.Runtime.RunDeadline.D(); d > 0 && !e.startedAt.IsZero() {
+		if e.startedAt.Add(d).Sub(e.now()) < minMintRunway {
+			return actives
+		}
+	}
 	liveWork := 0
 	for _, a := range actives {
+		// A stalled partial winding down is not live work in the top-up's
+		// ledger: counting it satisfied MinActive on paper while a slot sat
+		// empty — the exact shape the liveWork check exists to kill (run
+		// 43759's zombie actives). Stalled titles still hold their containers
+		// until their passes end naturally; the fleet simply mints around
+		// them instead of waiting.
+		if e.stalledTitle(a.Title) {
+			continue
+		}
 		if _, running, err := e.store.OpenStepCount(ctx, a.ID); err == nil && running > 0 {
 			liveWork++
 		}
@@ -525,7 +571,7 @@ func (e *Engine) endgameTopUp(ctx context.Context, goals []fgs.Goal, actives []f
 		}
 	}
 	srank := e.endgameRank(stopped)
-	sort.SliceStable(stopped, func(i, j int) bool { return srank[stopped[i].ID] > srank[stopped[j].ID] })
+	sort.SliceStable(stopped, e.endgameOrder(stopped, srank))
 	minted := 0
 	for _, g := range stopped {
 		if liveWork+minted >= e.cfg.Runtime.EndgameMinActive {
@@ -596,17 +642,37 @@ func (e *Engine) inEndgame() bool {
 // final half hour while 39 untouched titles starved and the run scored
 // zero. Depth is for proven converters; breadth for everything else.
 func (e *Engine) stepBudgetFor(title string) int {
-	if e.inEndgame() && e.cfg.Runtime.EndgameStepBudget > 0 && e.bankedTitle(title) {
-		return e.cfg.Runtime.EndgameStepBudget
+	budget := e.cfg.Runtime.GoalStepBudget
+	if e.cfg.Runtime.MultiFlagStepBudget > budget && e.partialMultiFlag(title) {
+		budget = e.cfg.Runtime.MultiFlagStepBudget
 	}
-	return e.cfg.Runtime.GoalStepBudget
+	if e.inEndgame() && e.cfg.Runtime.EndgameStepBudget > 0 && e.bankedTitle(title) {
+		if e.cfg.Runtime.EndgameStepBudget > budget {
+			budget = e.cfg.Runtime.EndgameStepBudget
+		}
+	}
+	return budget
 }
 
 func (e *Engine) wallBudgetFor(title string) time.Duration {
-	if e.inEndgame() && e.cfg.Runtime.EndgameWallBudget > 0 && e.bankedTitle(title) {
-		return e.cfg.Runtime.EndgameWallBudget.D()
+	budget := e.cfg.Runtime.GoalWallBudget.D()
+	if multi := e.cfg.Runtime.MultiFlagWallBudget.D(); multi > budget && e.partialMultiFlag(title) {
+		budget = multi
 	}
-	return e.cfg.Runtime.GoalWallBudget.D()
+	if e.inEndgame() && e.cfg.Runtime.EndgameWallBudget > 0 && e.bankedTitle(title) {
+		if endgame := e.cfg.Runtime.EndgameWallBudget.D(); endgame > budget {
+			budget = endgame
+		}
+	}
+	return budget
+}
+
+func (e *Engine) partialMultiFlag(title string) bool {
+	if e.FlagProgress == nil {
+		return false
+	}
+	cur, total, ok := e.FlagProgress(title)
+	return ok && total > 1 && cur > 0 && cur < total
 }
 
 // bankedTitle reports whether the title has banked flag progress — a
@@ -619,9 +685,95 @@ func (e *Engine) bankedTitle(title string) bool {
 	return ok && cur > 0
 }
 
+// flagStallPasses returns the configured zero-delta boundary limit (code
+// default 2 when unset).
+func (e *Engine) flagStallPasses() int {
+	if n := e.cfg.Runtime.FlagStallPasses; n > 0 {
+		return n
+	}
+	return 2
+}
+
+// stalledTitle reports whether the title has burned through FlagStallPasses
+// consecutive pass boundaries without banking a new flag. Such a title keeps
+// its stopped-partial RIGHT to an idle slot but loses every converter
+// privilege: the endgame requeue lift, the rank-2 deep-partial tier, and
+// live-work credit in the endgame top-up (run 46870: a 2/4 title held one of
+// three slots for five hours across ~19 rounds on zero conversion while four
+// untouched titles starved to zero flags; a genuinely converting title — the
+// same run's other intranet — never trips this fuse because every banked
+// flag resets the streak).
+func (e *Engine) stalledTitle(title string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.zeroStreak[title] >= e.flagStallPasses()
+}
+
+// notePassBoundary records one pass boundary (a goal stopped, a requeue
+// offered) and updates the zero-delta streak. Idempotent per stopped goal:
+// endgameTopUp re-offers the same goal every tick, but the pass ended once.
+// Returns the platform's current correct count for the title.
+func (e *Engine) notePassBoundary(g *fgs.Goal) int {
+	cur := 0
+	if e.FlagProgress != nil {
+		if c, _, ok := e.FlagProgress(g.Title); ok {
+			cur = c
+		}
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.passCounted[g.ID] {
+		return cur
+	}
+	e.passCounted[g.ID] = true
+	if cur > e.passBase[g.Title] {
+		e.zeroStreak[g.Title] = 0 // new flags: still a converter
+	} else {
+		e.zeroStreak[g.Title]++
+		if e.zeroStreak[g.Title] >= e.flagStallPasses() {
+			e.log.Info("requeue: banked partial stalled — converter privileges suspended",
+				"title", g.Title, "zero_delta_passes", e.zeroStreak[g.Title], "banked", cur)
+		}
+	}
+	e.passBase[g.Title] = cur
+	return cur
+}
+
+// hintTextSeen records a hint text for a title and reports whether the exact
+// same text was already seen — the platform's pool-exhausted signature. Each
+// view costs score, so a dry pool must stop both the engine's prefetch and
+// the noop rescue from paying for repeats.
+func (e *Engine) hintTextSeen(title, text string) bool {
+	key := strings.TrimSpace(text)
+	if len(key) > 256 {
+		key = key[:256]
+	}
+	if key == "" {
+		return false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.hintSeen[title] == nil {
+		e.hintSeen[title] = map[string]bool{}
+	}
+	if e.hintSeen[title][key] {
+		return true
+	}
+	e.hintSeen[title][key] = true
+	return false
+}
+
+// hintDryTitle reports whether the title's hint pool is exhausted (a repeat
+// text was already pulled).
+func (e *Engine) hintDryTitle(title string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.hintDry[title]
+}
+
 // endgameRank scores goals for the harvest window on title-completion
 // economics: one-flag-from-done (4) > untouched titles of ANY flag count
-// (3) > deep partials still missing ≥2 flags (2) > worked zero-flag multis
+// (3) > worked zero-flag singles and deep partials (2) > worked zero-flag multis
 // (1) > everything else (0). Run 43574: ranking every banked partial
 // top-tier let the stuck 2/4 pair hold the fleet's slots through a
 // zero-flag final half hour while ~39 untouched titles waited. Run 43759:
@@ -643,8 +795,16 @@ func (e *Engine) endgameRank(goals []fgs.Goal) map[string]int {
 		switch {
 		case cur > 0 && total-cur == 1:
 			// One flag from title completion — the cheapest conversion in
-			// the fleet, worth a slot before anything else.
+			// the fleet, worth a slot before anything else. Stalled or not:
+			// a single remaining flag is one bounded attempt away, and the
+			// stall fuse still caps its requeue count.
 			rank[g.ID] = 4
+		case cur > 0 && cur < total && e.stalledTitle(g.Title):
+			// STALLED deep partial: FlagStallPasses boundaries without a new
+			// flag. It keeps the right to idle slots but no longer outranks
+			// fresh unknowns — run 46870's 2/4 siege outlasted four untouched
+			// titles that all died flagless with hints delivered mid-derivation.
+			rank[g.ID] = 1
 		case cur > 0 && cur < total:
 			rank[g.ID] = 2 // deep partial: ≥2 flags still missing — full siege work per flag
 		case !e.titleTouched(g.Title):
@@ -661,6 +821,12 @@ func (e *Engine) endgameRank(goals []fgs.Goal) map[string]int {
 			// been worked even if firstTouch memory was lost to an engine
 			// restart.
 			rank[g.ID] = 3
+		case total == 1 && cur == 0:
+			// A previously attempted single-flag title that produced no flag
+			// still gets a bounded endgame retry. Runs 44913→45035 regressed
+			// several single-flag titles, so leaving worked singles at rank 0
+			// meant they could never recover after first-pass breadth was done.
+			rank[g.ID] = 2
 		case total > 1 && cur == 0:
 			// WORKED multi-flag title with nothing banked — the title only
 			// completes when ALL flags land, so endgame slots go to it only
@@ -671,6 +837,51 @@ func (e *Engine) endgameRank(goals []fgs.Goal) map[string]int {
 		}
 	}
 	return rank
+}
+
+// endgameOrder is the shared comparator for EVERY endgame allocation path —
+// both the tick's active-goal schedule order and endgameTopUp's mint queue.
+// Rank tier first, then fewer requeues already spent (a fresh second look
+// beats an nth helping of a repeatedly-failed siege), then banked progress
+// (a proven converter still outranks a zero-flag dud among equals — run
+// 42838), then creation order via the stable sort.
+//
+// Run 46418: the tick's endgame sort carried ONLY the rank tier, falling
+// back to creation order — and every budget stop mints a fresh goal with a
+// NEW created_at, so a starving title loses its queue position each time it
+// churns while an incumbent reclaiming its just-freed slot stays first. The
+// endgame window then fed c-09 FIVE consecutive 30-minute blocks and b-02/
+// a-14 three each (305 of ~369 slot-minutes, zero flags) while a-18, c-02
+// and e2-04 — one pass spent each — got nothing until the death line.
+// requeuesSpent is churn-invariant (it only grows), which is exactly the
+// property the creation-order tiebreak lacked.
+func (e *Engine) endgameOrder(goals []fgs.Goal, rank map[string]int) func(i, j int) bool {
+	banked := func(g fgs.Goal) int {
+		if e.FlagProgress == nil {
+			return 0
+		}
+		cur, _, ok := e.FlagProgress(g.Title)
+		if ok && cur > 0 {
+			return 0 // proven converter
+		}
+		return 1 // zero-flag dud
+	}
+	e.mu.Lock()
+	requeuesSpent := make(map[string]int, len(goals))
+	for _, g := range goals {
+		requeuesSpent[g.Title] = e.requeues[g.Title]
+	}
+	e.mu.Unlock()
+	return func(i, j int) bool {
+		a, b := goals[i], goals[j]
+		if rank[a.ID] != rank[b.ID] {
+			return rank[a.ID] > rank[b.ID]
+		}
+		if requeuesSpent[a.Title] != requeuesSpent[b.Title] {
+			return requeuesSpent[a.Title] < requeuesSpent[b.Title]
+		}
+		return banked(a) < banked(b)
+	}
 }
 
 // requeuePass2 immediately recreates a just-stopped goal for its second
@@ -712,6 +923,11 @@ func (e *Engine) requeuePass2(ctx context.Context, g *fgs.Goal) (*fgs.Goal, bool
 	if e.challengeComplete(g.Title) {
 		return nil, false
 	}
+	// Zero-delta stall bookkeeping happens at every pass boundary, declined
+	// or not — the pass is over either way. It must precede the maxFor logic
+	// below: a stalled banked partial loses its converter exemptions here.
+	cur := e.notePassBoundary(g)
+	stalled := cur > 0 && e.stalledTitle(g.Title)
 	// Fresh-meat yield: a zero-progress title's regrind pass must never
 	// re-hoard a slot while an untouched title is still waiting for its
 	// first container. Run 43759: f2-01 burned SIX zero-flag passes and
@@ -739,12 +955,23 @@ func (e *Engine) requeuePass2(ctx context.Context, g *fgs.Goal) (*fgs.Goal, bool
 		// to 1.17/3 because every title had burned its requeue cap — the
 		// queue emptied while partials sat stopped). An idle endgame slot is
 		// worth exactly zero — but the lift is for converters: banked
-		// titles get the full fuse, unbanked ones a short one.
-		if banked {
+		// titles get the full fuse, unbanked ones a short one — and a
+		// STALLED banked partial (FlagStallPasses zero-delta boundaries)
+		// is no longer a converter: it gets the short fuse too, and the
+		// rank demotion below puts fresh unknowns ahead of it in the mint
+		// queue (run 46870: b-01's eleventh hour of zero-conversion siege
+		// outranked four never-touched titles that all died at the bell
+		// with hints delivered and derivations mid-flight).
+		if banked && !stalled {
 			maxFor = endgameMaxRequeues
 		} else {
 			maxFor = endgameZeroMaxRequeues
 		}
+	} else if stalled && banked {
+		// Mid-run a stalled partial behaves like an unbanked dud: its
+		// re-buys are exploration now, not conversion, and exploration is
+		// fuse-limited to one.
+		maxFor = 1
 	}
 	if e.cfg.Runtime.RunDeadline <= 0 || ctx.Err() != nil {
 		return nil, false
@@ -791,14 +1018,28 @@ func (e *Engine) requeuePass2(ctx context.Context, g *fgs.Goal) (*fgs.Goal, bool
 	// fetch it now so the pass opens aimed at the hint's direction
 	// instead of rediscovering the same dead ends — the hint's cost is
 	// score, not completion, and the run's target is completion rate.
+	// A dry pool changes the arithmetic: a repeat text costs score and
+	// carries zero information, so the pull is skipped and the fact says
+	// so — the pass must not burn its own hint budget either.
 	if e.NoopRescue != nil {
 		e.mu.Lock()
 		seen := e.rescuedTitle[g.Title]
+		dry := e.hintDry[g.Title]
 		e.rescuedTitle[g.Title] = true
 		e.mu.Unlock()
-		if !seen {
+		if !seen && !dry {
 			if hint, ok := e.NoopRescue(ctx, g.ID); ok && strings.TrimSpace(hint) != "" {
-				if _, err := e.store.AddHint(ctx, ng.ID, hint, fgs.ActorEngine); err != nil {
+				if e.hintTextSeen(g.Title, hint) {
+					e.mu.Lock()
+					e.hintDry[g.Title] = true
+					e.mu.Unlock()
+					if _, err := e.store.AddHumanFact(ctx, ng.ID,
+						"平台 hint 池已尽:最新一发 hint 与此前完全同文(平台对重复拉取照常扣分、零新信息)。本遍及后续遍严禁再对本题拉任何 hint;把池尽结论写进台账,火力全部走自有推导。",
+						"engine:hintdry"); err != nil {
+						e.log.Error("requeue: hint-dry fact write failed", "goal", ng.ID, "err", err)
+					}
+					e.log.Warn("requeue: hint pool exhausted (repeat text) — pulls disabled for title", "title", g.Title, "pass", pass)
+				} else if _, err := e.store.AddHint(ctx, ng.ID, hint, fgs.ActorEngine); err != nil {
 					e.log.Error("requeue: hint seed write failed", "goal", ng.ID, "err", err)
 				} else {
 					e.log.Info("requeue: platform hint seeded into fresh pass", "title", g.Title, "pass", pass)
@@ -829,6 +1070,22 @@ func (e *Engine) scheduleGoal(ctx context.Context, goalID string) {
 	// declaring "promising" steps it will never get to run.
 	if over, why := e.goalOverBudget(ctx, goalID); over {
 		e.stopGoalForBudget(ctx, goalID, why)
+		return
+	}
+
+	// Claim-time completion guard: the tick's sweep retires solved titles
+	// once per tick, but a flag landing between sweep and schedule (or via
+	// any non-tick claim path) must not buy this goal another round — a
+	// completed challenge pays nothing for more work. Same semantics as
+	// sweepCompleted: stop the goal, free the container, let an in-flight
+	// step land naturally.
+	if g, err := e.store.GetGoal(ctx, goalID); err == nil && e.challengeComplete(g.Title) {
+		if err := e.store.SetGoalStatus(ctx, goalID, fgs.GoalStopped, fgs.ActorEngine); err != nil {
+			e.log.Error("claim-time complete guard: set status", "goal", goalID, "err", err)
+		} else {
+			e.releaseStoppedContainer(goalID)
+			e.log.Info("challenge complete: claim-time retire", "goal", goalID, "title", g.Title)
+		}
 		return
 	}
 
@@ -895,14 +1152,19 @@ func (e *Engine) scheduleGoal(ctx context.Context, goalID string) {
 		}
 		e.mu.Unlock()
 		if firstClaimed {
-			// Record the title for first-touch fairness, and capture the
-			// flag baseline for the budget refuel: what the platform
-			// credited before this pass began.
-			if g, err := e.store.GetGoal(ctx, goalID); err == nil {
-				e.mu.Lock()
-				e.firstTouch[g.Title] = true
-				e.mu.Unlock()
-				if e.FlagProgress != nil {
+			// Capture the flag baseline for the budget refuel: what the
+			// platform credited before this pass began.
+			//
+			// firstTouch is deliberately NOT set here (run 46196: e3-02's
+			// only step ever claimed was a 27-second 409 → WAITING_SLOT
+			// deferral; the claim-time mark made the title read "worked"
+			// forever, so it lost the first-touch sort and the endgame's
+			// never-touched rank to titles with real work — and never saw a
+			// container all run). "Touched" now means a step FINISHED with
+			// real output (see markTitleWorked); a slot-race deferral does
+			// not burn the fairness signal.
+			if e.FlagProgress != nil {
+				if g, err := e.store.GetGoal(ctx, goalID); err == nil {
 					if cur, _, ok := e.FlagProgress(g.Title); ok {
 						e.mu.Lock()
 						e.flagBase[goalID] = cur
@@ -993,6 +1255,20 @@ func (e *Engine) goalOverBudget(ctx context.Context, goalID string) (bool, strin
 		if ok && e.now().Sub(first) > wb {
 			if reason := e.refuelBudget(ctx, goalID, wb); reason != "" {
 				e.log.Info("budget: wall budget extended", "goal", goalID, "reason", reason)
+			} else if e.StepGate != nil && !e.StepGate(ctx, goalID) {
+				// Slot-starvation freeze: the goal is not spending its wall
+				// on attack work — it is waiting for a container slot the
+				// engine cannot give it. Burning its whole first pass as
+				// queue wait killed titles unread (run 46196: e3-02 claimed
+				// one 27-second step, got a platform 409, deferred
+				// WAITING_SLOT, and aged out its 30m wall in the queue
+				// without a single recon request — its title then read
+				// "worked" and never got a container). Re-anchor the clock:
+				// the goal stays alive and claims the moment a slot frees.
+				e.mu.Lock()
+				e.firstClaim[goalID] = e.now()
+				e.mu.Unlock()
+				return false, ""
 			} else {
 				return true, fmt.Sprintf("wall budget exhausted (%s in flight)", e.now().Sub(first).Round(time.Second))
 			}

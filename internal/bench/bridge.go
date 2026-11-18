@@ -108,6 +108,7 @@ func Brief(c *Client, ch Challenge) string {
 	b.WriteString("- 槽位由引擎统一调度。若 start 返回 409/invalid_state(槽位满):立即结束本步,返回 finding content 以 WAITING_SLOT: 开头并附一句说明。严禁在本步内轮询等待、sleep 循环或创建后台 poller 抢槽——那只会烧掉回合;引擎会在槽位空闲后重新调度你。\n")
 	b.WriteString("- 入口地址仅 VPN 内可达;若不通,先确认 VPN 再重试,不要盲目重启容器。\n")
 	b.WriteString("- 跑分任务有总时限,超时后全部接口返回 invalid_state。\n")
+	b.WriteString("- 若接口返回 409/invalid_state 且正文说明 task over/任务已结束: 这是托管跑分终态,记录原始响应后立即停止探测和重试;不要把它当作错 flag 或槽位满。close 只有在仍被接受时才调用。\n")
 	b.WriteString("- 拿到的每个 flag:先提交(接口 4),确认 correct=true 后再进入下一个 flag。\n\n")
 	b.WriteString("完成判据(自检):接口 1 显示本题 is_completed=true(correct_flag_count == flag_count)。把每个 flag 的值与提交接口的响应作为 Finding 记录(evidence 附 API 原始响应),据此宣布完成。\n")
 	return b.String()

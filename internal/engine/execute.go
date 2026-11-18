@@ -65,6 +65,16 @@ func (e *Engine) executeStep(ctx context.Context, goalID, stepID string) {
 		<-hbDone
 		fctx, fcancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer fcancel()
+		if isRunnerCapacityError(err) {
+			// Host process/memory exhaustion is infrastructure, not a failed
+			// challenge step. Return the claim without consuming an attempt;
+			// the breaker below pauses new claims while capacity recovers.
+			e.noteRunnerFailure("execute:capacity")
+			if uerr := e.store.UnclaimStep(fctx, goalID, stepID, "zhulongx", "runner capacity unavailable — deferred at zero cost: "+err.Error()); uerr != nil && !errors.Is(uerr, store.ErrClaimLost) {
+				log.Error("execute: capacity defer failed", "err", uerr)
+			}
+			return
+		}
 		// Launch failures are transient infra (spawn crash / dead gateway):
 		// retryable, with the runner breaker — not the attempt policy — as
 		// the guard against a dead runtime churning through attempts.
@@ -114,12 +124,14 @@ func (e *Engine) executeStep(ctx context.Context, goalID, stepID string) {
 	defer dcancel()
 
 	if err != nil {
-		// Deadline salvage: the adapter returns the agent's streamed text
-		// together with ErrTimeout. A report that landed just before the
-		// deadline finishes the step normally; anything else becomes a
-		// TIMEOUT_PARTIAL finding — the partial work enters the graph, the
-		// step is DONE, and no attempt is burned on a from-zero retry.
-		if errors.Is(err, pi.ErrTimeout) && res != nil {
+		// Deadline/stall salvage: the adapter returns the agent's streamed
+		// text together with ErrTimeout or ErrTurnStall. A report that
+		// landed just before the silence finishes the step normally;
+		// anything else becomes a TIMEOUT_PARTIAL finding — the partial
+		// work enters the graph, the step is DONE, and no attempt is burned
+		// on a from-zero retry. A stalled turn is infra noise, not a model
+		// failure: the ledger on disk carries the pass forward.
+		if (errors.Is(err, pi.ErrTimeout) || errors.Is(err, pi.ErrTurnStall)) && res != nil {
 			if payload, _ := contract.ExtractJSONObject(res.Text); payload != nil {
 				if answer, verr := contract.ValidateExecute(payload); verr == nil {
 					log.Info("execute: deadline hit after the report — salvaged")
@@ -135,9 +147,16 @@ func (e *Engine) executeStep(ctx context.Context, goalID, stepID string) {
 		switch {
 		case errors.Is(err, pi.ErrTimeout):
 			msg = "timeout"
+		case errors.Is(err, pi.ErrTurnStall):
+			msg = "turn stalled (no agent events) — runner wedged"
 		case errors.Is(err, pi.ErrPolicyViolation):
 			// the agent crossed the tool boundary: retrying the same step
 			// with the same policy would just abort again
+			msg = err.Error()
+			retryable = false
+		case errors.Is(err, pi.ErrCommandLoop):
+			// Replaying an exact command loop would recreate the same dead end
+			// and pin the challenge container, so let Decide choose another path.
 			msg = err.Error()
 			retryable = false
 		case errors.Is(err, pi.ErrProcessExit):
@@ -191,6 +210,27 @@ func (e *Engine) executeStep(ctx context.Context, goalID, stepID string) {
 	e.finishAnswer(dctx, log, goalID, stepID, answer, res)
 }
 
+// isRunnerCapacityError identifies local process/memory exhaustion. These
+// failures are retryable without charging the challenge step; executable-not-
+// found and protocol errors retain the normal failure path.
+func isRunnerCapacityError(err error) bool {
+	m := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"paging file is too small",
+		"cannot allocate memory",
+		"out of memory",
+		"resource temporarily unavailable",
+		"errno=12",
+		"eagain",
+		"enomem",
+	} {
+		if strings.Contains(m, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // finishAnswer is the shared tail of both execute paths (live report and
 // deadline-salvaged report): WAITING_SLOT deferral, evidence fallback, and
 // the finding write.
@@ -228,6 +268,7 @@ func (e *Engine) finishAnswer(ctx context.Context, log *slog.Logger, goalID, ste
 		return
 	}
 	e.noteStepFinish(goalID)
+	e.markTitleWorked(ctx, goalID)
 	e.harvestFlags(ctx, goalID, answer.Content)
 	log.Info("execute: step done", "finding", fd.ID, "tools", res.ToolCalls)
 	e.noteRunnerSuccess()
@@ -273,6 +314,7 @@ func (e *Engine) finishPartial(ctx context.Context, log *slog.Logger, goalID, st
 	e.mu.Lock()
 	e.passWorked[goalID] = true
 	e.mu.Unlock()
+	e.markTitleWorked(ctx, goalID)
 	e.harvestFlags(ctx, goalID, res.Text) // the kill can land mid-report, flag and all
 	log.Info("execute: step done with partial finding (deadline salvage)", "finding", fd.ID, "tools", res.ToolCalls)
 	e.noteRunnerSuccess()
@@ -288,6 +330,22 @@ func (e *Engine) noteStepFinish(goalID string) {
 	e.lastFinish[goalID] = e.now()
 	e.passWorked[goalID] = true
 	e.mu.Unlock()
+}
+
+// markTitleWorked flips the first-touch fairness signal for the goal's title.
+// "Touched" means a step finished with real output — an attack attempt, not a
+// slot race. Run 46196: e3-02's only claimed step in its whole life was a
+// 27-second 409 → WAITING_SLOT deferral; with the claim-time mark that title
+// read "worked" forever, lost the untouched-first sort AND the endgame
+// never-touched rank, and never saw a container while five already-failed
+// titles got second helpings. The mark lives at the two real-finish tails
+// (natural report and deadline salvage) so deferrals stay free.
+func (e *Engine) markTitleWorked(ctx context.Context, goalID string) {
+	if g, err := e.store.GetGoal(ctx, goalID); err == nil {
+		e.mu.Lock()
+		e.firstTouch[g.Title] = true
+		e.mu.Unlock()
+	}
 }
 
 // failStep records the failure and the retry decision.

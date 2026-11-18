@@ -25,6 +25,26 @@ type fakeRunner struct {
 	closed int
 }
 
+func TestRunnerCapacityErrorIsDeferred(t *testing.T) {
+	for _, msg := range []string{
+		"runner launch failed: paging file is too small for this operation to complete",
+		"fork/exec pi: resource temporarily unavailable",
+		"cannot allocate memory",
+	} {
+		if !isRunnerCapacityError(errors.New(msg)) {
+			t.Fatalf("capacity error not recognized: %q", msg)
+		}
+	}
+	for _, msg := range []string{
+		"fork/exec pi: no such file or directory",
+		"pi: command failed: invalid protocol",
+	} {
+		if isRunnerCapacityError(errors.New(msg)) {
+			t.Fatalf("non-capacity error misclassified: %q", msg)
+		}
+	}
+}
+
 func (f *fakeRunner) Prompt(_ context.Context, msg string) (*pi.PromptResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -345,6 +365,83 @@ func TestGoalWallBudgetStops(t *testing.T) {
 	}
 }
 
+func TestSlotStarvedWallFreezesInsteadOfAgingOut(t *testing.T) {
+	// Run 46196 (e3-02): the title's only claimed step was a 27-second 409
+	// → WAITING_SLOT deferral; the goal then sat in the queue while its 30m
+	// wall budget burned as calendar time and the pass died unread. With
+	// every container slot busy (StepGate closed) an exhausted wall must
+	// re-anchor instead of stopping the goal — queue wait is not attack
+	// time. The moment a slot frees, the calendar counts again and the stop
+	// lands exactly as before.
+	ctx := context.Background()
+	e, st, _ := newEngine(t, ok(`{}`))
+	e.cfg.Runtime.GoalWallBudget = cfg.Duration(time.Minute)
+	fake := time.Date(2026, 11, 11, 9, 0, 0, 0, time.UTC)
+	e.now = func() time.Time { return fake }
+	g, _ := st.CreateGoal(ctx, "starved", "o", "obj")
+
+	gateOpen := false
+	e.StepGate = func(context.Context, string) bool { return gateOpen }
+	e.mu.Lock()
+	e.firstClaim[g.ID] = fake.Add(-5 * time.Minute) // wall long gone, zero steps ever landed
+	e.mu.Unlock()
+
+	if over, why := e.goalOverBudget(ctx, g.ID); over {
+		t.Fatalf("slot-starved goal must not age out on queue wait (%s)", why)
+	}
+	e.mu.Lock()
+	anchored := e.firstClaim[g.ID]
+	e.mu.Unlock()
+	if !anchored.Equal(fake) {
+		t.Fatalf("wall clock must re-anchor to now while gate-closed, got %s", anchored)
+	}
+
+	fake = fake.Add(2 * time.Minute) // inside the re-anchored window
+	if over, _ := e.goalOverBudget(ctx, g.ID); over {
+		t.Fatal("re-anchored goal must stay alive inside the fresh window")
+	}
+
+	gateOpen = true
+	fake = fake.Add(5 * time.Minute) // slot freed — wall spent for real now
+	over, why := e.goalOverBudget(ctx, g.ID)
+	if !over || !strings.Contains(why, "wall budget exhausted") {
+		t.Fatalf("gate-open exhausted wall must stop the goal, got over=%v why=%s", over, why)
+	}
+}
+
+func TestFirstTouchRequiresRealWork(t *testing.T) {
+	// Run 46196 (e3-02): the claim-time touch mark turned one 27-second
+	// 409 → WAITING_SLOT deferral into "worked forever" — the title lost the
+	// first-touch fairness sort and the endgame never-touched rank and never
+	// saw a container again while five already-failed titles got second
+	// helpings. A deferral must stay free; only a step that FINISHES with
+	// real output marks the title worked.
+	ctx := context.Background()
+	e, st, _ := newEngine(t,
+		ok(`{"accepted":true,"data":{"steps":[{"from":["f_0001"],"description":"s1"}]}}`),
+		ok(`{"accepted":true,"data":{"finding":{"content":"WAITING_SLOT: no challenge container yet"}}}`),
+		ok(`{"accepted":true,"data":{"finding":{"content":"recon mapped","evidence":"e"}}}`),
+	)
+	g, _ := st.CreateGoal(ctx, "wait", "o", "obj")
+	st.AddHumanFact(ctx, g.ID, "seed", "t")
+	e.decide(ctx, g.ID, "initial")
+	steps, _ := st.ListSteps(ctx, g.ID)
+	st.ClaimNextStep(ctx, g.ID, "zhulongx")
+	e.executeStep(ctx, g.ID, steps[0].ID) // deferred: no finding, no touch
+
+	if e.titleTouched("wait") {
+		t.Fatal("a WAITING_SLOT deferral must not mark the title worked")
+	}
+
+	if _, err := st.ClaimNextStep(ctx, g.ID, "zhulongx"); err != nil {
+		t.Fatalf("deferred step must be claimable again: %v", err)
+	}
+	e.executeStep(ctx, g.ID, steps[0].ID) // real report lands
+	if !e.titleTouched("wait") {
+		t.Fatal("a finished step with real output must mark the title worked")
+	}
+}
+
 func TestEndgameBudgetsDeepenInHarvestWindow(t *testing.T) {
 	// Run 42838 walls died one or two moves short of the flag with the next
 	// move already named in the ledger — 30m/6-step pass caps fit first-touch
@@ -391,6 +488,61 @@ func TestEndgameBudgetsDeepenInHarvestWindow(t *testing.T) {
 	}
 	if over, why := e.goalOverBudget(ctx, g.ID); over {
 		t.Fatalf("40m against the 45m harvest cap must keep going (%s)", why)
+	}
+}
+
+func TestPartialMultiFlagBudgetsDeepenBeforeEndgame(t *testing.T) {
+	e, _, _ := newEngine(t)
+	e.cfg.Runtime.GoalStepBudget = 6
+	e.cfg.Runtime.GoalWallBudget = cfg.Duration(30 * time.Minute)
+	e.cfg.Runtime.MultiFlagStepBudget = 12
+	e.cfg.Runtime.MultiFlagWallBudget = cfg.Duration(60 * time.Minute)
+	e.cfg.Runtime.RunDeadline = cfg.Duration(6 * time.Hour)
+	e.cfg.Runtime.EndgameAfter = cfg.Duration(time.Hour)
+	e.FlagProgress = func(title string) (int, int, bool) {
+		switch title {
+		case "bench:partial-multi":
+			return 2, 6, true
+		case "bench:untouched-multi":
+			return 0, 6, true
+		case "bench:single":
+			return 0, 1, true
+		default:
+			return 0, 0, false
+		}
+	}
+	e.mu.Lock()
+	e.startedAt = time.Now().Add(-time.Hour)
+	e.mu.Unlock()
+
+	if got := e.stepBudgetFor("bench:partial-multi"); got != 12 {
+		t.Fatalf("partial multi-flag step budget = %d, want 12", got)
+	}
+	if got := e.wallBudgetFor("bench:partial-multi"); got != 60*time.Minute {
+		t.Fatalf("partial multi-flag wall budget = %v, want 60m", got)
+	}
+	for _, title := range []string{"bench:untouched-multi", "bench:single"} {
+		if got := e.stepBudgetFor(title); got != 6 {
+			t.Fatalf("%s step budget = %d, want base 6", title, got)
+		}
+		if got := e.wallBudgetFor(title); got != 30*time.Minute {
+			t.Fatalf("%s wall budget = %v, want base 30m", title, got)
+		}
+	}
+	// A smaller endgame override must not erase the deeper partial-multi
+	// budget when both policies apply.
+	e.cfg.Runtime.EndgameStepBudget = 10
+	e.cfg.Runtime.EndgameWallBudget = cfg.Duration(45 * time.Minute)
+	e.cfg.Runtime.RunDeadline = cfg.Duration(2 * time.Hour)
+	e.cfg.Runtime.EndgameAfter = cfg.Duration(90 * time.Minute)
+	e.mu.Lock()
+	e.startedAt = time.Now().Add(-40 * time.Minute)
+	e.mu.Unlock()
+	if got := e.stepBudgetFor("bench:partial-multi"); got != 12 {
+		t.Fatalf("endgame must preserve the larger multi-flag step budget, got %d", got)
+	}
+	if got := e.wallBudgetFor("bench:partial-multi"); got != 60*time.Minute {
+		t.Fatalf("endgame must preserve the larger multi-flag wall budget, got %v", got)
 	}
 }
 
@@ -925,6 +1077,39 @@ func TestExecuteTimeoutPartialBecomesFinding(t *testing.T) {
 	}
 }
 
+func TestExecuteTurnStallSalvagesPartial(t *testing.T) {
+	// Run 46631: a wedged tool execution silences the agent (last message
+	// streamed, no tool result ever) while the step heartbeat keeps the
+	// claim — the slot burned 24m/42m on silence. The stall error must take
+	// the SAME salvage path as a deadline: streamed tail → finding, step
+	// DONE, one attempt, never a from-zero retry.
+	ctx := context.Background()
+	e, st, _ := newEngine(t,
+		ok(`{"accepted":true,"data":{"steps":[{"from":["f_0001"],"description":"s"}]}}`),
+		func(string) (*pi.PromptResult, error) {
+			return &pi.PromptResult{
+				Text:   "attacked the wall; OA admin x 10k miss; password must be findable",
+				Events: []string{"ev1"},
+			}, pi.ErrTurnStall
+		},
+	)
+	g, _ := st.CreateGoal(ctx, "stall", "o", "obj")
+	st.AddHumanFact(ctx, g.ID, "seed", "t")
+	e.decide(ctx, g.ID, "initial")
+	steps, _ := st.ListSteps(ctx, g.ID)
+	st.ClaimNextStep(ctx, g.ID, "zhulongx")
+	e.executeStep(ctx, g.ID, steps[0].ID)
+
+	steps, _ = st.ListSteps(ctx, g.ID)
+	if steps[0].Status != fgs.StepDone || steps[0].Attempts != 1 {
+		t.Fatalf("stalled turn must salvage (not fail) the step: %+v", steps[0])
+	}
+	fds, _ := st.ListFindings(ctx, g.ID, false)
+	if len(fds) != 1 || !strings.Contains(fds[0].Content, "findable") {
+		t.Fatalf("stall partial finding: %+v", fds)
+	}
+}
+
 func TestDecideTimeoutSalvagesVerdict(t *testing.T) {
 	ctx := context.Background()
 	e, st, _ := newEngine(t,
@@ -1273,12 +1458,10 @@ func TestEndgameRankBreadthOverDeepPartial(t *testing.T) {
 		t.Fatal("t+331m of a 350m run with an 80m window is endgame")
 	}
 	rank := e.endgameRank([]fgs.Goal{{ID: partial.ID, Title: "bench:partial"}, {ID: multi.ID, Title: "bench:multi"}, {ID: plain.ID, Title: "bench:plain"}, {ID: fresh.ID, Title: "bench:fresh"}, {ID: um.ID, Title: "bench:um"}})
-	// v20 re-tier (run 43574: banked deep partials starved untouched breadth):
-	// untouched single(3) > deep partial 2/4(2) > worked multi-zero(1) >
-	// worked plain-zero(0). A deep partial is a proven chain, not a cheap
-	// conversion — fresh singles convert, sieges grind.
-	if !(rank[fresh.ID] > rank[partial.ID] && rank[partial.ID] > rank[multi.ID] && rank[multi.ID] > rank[plain.ID]) {
-		t.Fatalf("untouched single > deep partial > worked multi-zero > worked plain-zero: %v", rank)
+	// Untouched breadth stays first. Worked zero-flag singles now share the
+	// deep-partial retry tier so regressions can recover in the harvest window.
+	if !(rank[fresh.ID] > rank[partial.ID] && rank[partial.ID] == rank[plain.ID] && rank[plain.ID] > rank[multi.ID]) {
+		t.Fatalf("untouched single > (deep partial = worked single-zero) > worked multi-zero: %v", rank)
 	}
 	// v21.1 (run 43759: untouched multi b-03 — a 16-minute 0→4 converter
 	// once fed — was swallowed by the zero-multi tier and starved four
@@ -1627,6 +1810,112 @@ func TestEndgameTopUpRefeedsIdleSlots(t *testing.T) {
 	e2.requeues["bench:c-02"] = 1 // zero-progress cap already used
 	if _, ok := e2.requeuePass2(ctx, d2); ok {
 		t.Fatal("zero-progress title must not earn a second requeue mid-run")
+	}
+}
+
+func TestEndgameOrderStarvedFreshPassBeatsIncumbent(t *testing.T) {
+	// Run 46418: the tick's endgame sort carried ONLY the rank tier and fell
+	// through to creation order — but every budget stop mints a fresh goal
+	// with a NEW created_at, so a starved title churns to the back of the
+	// queue every 30 minutes while an incumbent stop→requeue→reclaims its
+	// just-freed slot. c-09 took five consecutive 30-minute blocks (b-02 and
+	// a-14 three each — 305 of ~369 endgame slot-minutes, zero flags) while
+	// a-18/c-02/e2-04, one pass spent each, got nothing until the death
+	// line. endgameOrder is the shared comparator for BOTH allocation
+	// paths; within a rank fewer requeues spent must sort first regardless
+	// of goal age.
+	ctx := context.Background()
+	e, st, _ := newEngine(t, ok(`{}`))
+	e.FlagProgress = func(string) (int, int, bool) { return 0, 1, true }
+
+	incumbent, _ := st.CreateGoal(ctx, "bench:c-09", "o", "obj") // oldest goal, most helpings
+	starved, _ := st.CreateGoal(ctx, "bench:a-18", "o", "obj")   // younger, first retry
+	younger, _ := st.CreateGoal(ctx, "bench:c-02", "o", "obj")   // youngest, first retry
+	e.requeues["bench:c-09"] = 3
+	e.requeues["bench:a-18"] = 1
+	e.requeues["bench:c-02"] = 1
+	e.mu.Lock()
+	e.firstTouch["bench:c-09"] = true // worked zero-singles: all rank 2
+	e.firstTouch["bench:a-18"] = true
+	e.firstTouch["bench:c-02"] = true
+	e.mu.Unlock()
+
+	gs := []fgs.Goal{*incumbent, *starved, *younger}
+	rank := e.endgameRank(gs)
+	sort.SliceStable(gs, e.endgameOrder(gs, rank))
+	want := []string{"bench:a-18", "bench:c-02", "bench:c-09"}
+	for i, g := range gs {
+		if g.Title != want[i] {
+			t.Fatalf("slot %d must go to %s (fewest requeues first, creation order among equals), got %s", i, want[i], g.Title)
+		}
+	}
+	if incumbent.CreatedAt.After(starved.CreatedAt) {
+		t.Fatal("test premise broken: incumbent must be the older goal")
+	}
+}
+
+func TestEndgameMintPrefersFreshRetryOverThirdHelping(t *testing.T) {
+	// Run 46196 09:36: the mint gave b-02 a THIRD pass (2/6 banked, walls
+	// held for three hours, 31 minutes of runway, zero return) while c-09 —
+	// first retry, worked single-flag title with a live admin foothold named
+	// in its ledger — waited and got the death-line slot instead. Both sit in
+	// rank 2 (deep partial / worked zero-single); within a rank fewer
+	// requeues spent now wins before banked progress, so a fresh second look
+	// outranks a third helping. At EQUAL requeues the banked converter still
+	// beats the dud — 42838's order, covered by
+	// TestEndgameTopUpRefeedsIdleSlots.
+	ctx := context.Background()
+	e, st, _ := newEngine(t, ok(`{}`))
+	e.cfg.Runtime.RunDeadline = cfg.Duration(6 * time.Hour)
+	e.cfg.Runtime.EndgameAfter = cfg.Duration(5 * time.Hour)
+	e.cfg.Runtime.EndgameMinActive = 3
+	e.startedAt = e.now().Add(-2 * time.Hour) // inside the harvest window
+	e.FlagProgress = func(title string) (int, int, bool) {
+		if title == "bench:b-02" {
+			return 2, 6, true // banked deep partial
+		}
+		return 0, 1, true // a-01 active incomplete; c-09 worked zero-single
+	}
+
+	act, _ := st.CreateGoal(ctx, "bench:a-01", "o", "obj")
+	bank, _ := st.CreateGoal(ctx, "bench:b-02", "o", "obj")
+	if err := st.SetGoalStatus(ctx, bank.ID, fgs.GoalStopped, fgs.ActorEngine); err != nil {
+		t.Fatal(err)
+	}
+	fresh, _ := st.CreateGoal(ctx, "bench:c-09", "o", "obj")
+	if err := st.SetGoalStatus(ctx, fresh.ID, fgs.GoalStopped, fgs.ActorEngine); err != nil {
+		t.Fatal(err)
+	}
+	e.requeues["bench:b-02"] = 2 // two passes spent: the third-helping shape
+	e.requeues["bench:c-09"] = 1
+	e.mu.Lock()
+	e.firstTouch["bench:a-01"] = true
+	e.firstTouch["bench:b-02"] = true
+	e.firstTouch["bench:c-09"] = true
+	e.mu.Unlock()
+
+	goals, err := st.ListGoals(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var actives []fgs.Goal
+	for _, g := range goals {
+		if g.Status == fgs.GoalActive {
+			actives = append(actives, g)
+		}
+	}
+	out := e.endgameTopUp(ctx, goals, actives)
+	if len(out) != 3 {
+		t.Fatalf("fleet must be fed to 3 actives, got %d", len(out))
+	}
+	if out[0].ID != act.ID {
+		t.Fatalf("the already-active goal must keep its slot, got %s", out[0].ID)
+	}
+	if out[1].Title != "bench:c-09" {
+		t.Fatalf("the fresh retry must take the first minted slot, got %s", out[1].Title)
+	}
+	if out[2].Title != "bench:b-02" {
+		t.Fatalf("the twice-failed siege waits for the second slot, got %s", out[2].Title)
 	}
 }
 
@@ -2152,5 +2441,129 @@ func TestSterileRequeueRefundsFuse(t *testing.T) {
 	}
 	if rq2 != 2 {
 		t.Fatalf("worked pass keeps its slot then re-mints within caps, requeues = %d", rq2)
+	}
+}
+
+func TestStalledPartialLosesConverterPrivileges(t *testing.T) {
+	// v27 (run 46870): a banked partial that stops converting must lose the
+	// converter exemptions after FlagStallPasses zero-delta pass boundaries —
+	// the endgame requeue lift (short fuse instead of 8), the rank-2
+	// deep-partial tier (demoted to the worked-zero tier), and live-work
+	// credit. Any new flag resets the streak, so a converting title never
+	// trips it (the same run's OTHER intranet converted twice mid-siege).
+	ctx := context.Background()
+	e, st, _ := newEngine(t, ok(`{}`))
+	e.cfg.Runtime.RunDeadline = cfg.Duration(10 * time.Hour) // mid-run; endgame off
+	e.cfg.Runtime.EndgameAfter = 0
+	e.startedAt = e.now()
+	correct := 3
+	e.FlagProgress = func(string) (int, int, bool) { return correct, 6, true }
+
+	g0, _ := st.CreateGoal(ctx, "bench:stall", "o", "obj")
+
+	// Pass 1 ends having banked 3 flags (0→3): a converter, streak reset.
+	ng1, okMint := e.requeuePass2(ctx, g0)
+	if !okMint {
+		t.Fatal("converting pass must requeue normally")
+	}
+	if e.stalledTitle("bench:stall") {
+		t.Fatal("a converting title must never count as stalled")
+	}
+
+	// Pass 2 ends with zero new flags: streak 1 — privileges still held.
+	ng2, okMint := e.requeuePass2(ctx, ng1)
+	if !okMint {
+		t.Fatal("first zero-delta pass must not break the fuse (limit is 2)")
+	}
+	if e.stalledTitle("bench:stall") {
+		t.Fatal("streak 1 of 2 must not yet stall the title")
+	}
+
+	// Pass 3 ends with zero new flags: streak 2 — stalled. Mid-run the
+	// banked exemption is gone (maxFor drops to the dud fuse of 1 and the
+	// two already spent requeues block the mint).
+	if ng3, okMint := e.requeuePass2(ctx, ng2); okMint {
+		t.Fatalf("stalled partial must lose its mid-run requeue exemption, minted %v", ng3.ID)
+	}
+	if !e.stalledTitle("bench:stall") {
+		t.Fatal("two consecutive zero-delta boundaries must stall the title")
+	}
+
+	// Rank demotion: a stalled deep partial drops from tier 2 to tier 1 —
+	// below every untouched title — but keeps idle-slot eligibility.
+	rank := e.endgameRank([]fgs.Goal{*ng2})
+	if rank[ng2.ID] != 1 {
+		t.Fatalf("stalled partial must rank at the worked-zero tier, got %d", rank[ng2.ID])
+	}
+
+	// Endgame: the stalled title still earns the short fuse (idle slots are
+	// worth converting), just not the converter lift of 8.
+	e.cfg.Runtime.RunDeadline = cfg.Duration(2 * time.Hour)
+	e.cfg.Runtime.EndgameAfter = cfg.Duration(90 * time.Minute)
+	e.startedAt = e.now().Add(-time.Hour) // elapsed 1h ≥ deadline−window: endgame
+	if _, okMint := e.requeuePass2(ctx, ng2); !okMint {
+		t.Fatal("stalled partial must still requeue in the endgame (short fuse)")
+	}
+
+	// A new flag anywhere resets the streak: the title converts again.
+	correct = 4
+	e.notePassBoundary(&fgs.Goal{ID: "synthetic", Title: "bench:stall"})
+	if e.stalledTitle("bench:stall") {
+		t.Fatal("banking a new flag must reset the stall streak")
+	}
+	rank = e.endgameRank([]fgs.Goal{*ng2})
+	if rank[ng2.ID] == 1 {
+		t.Fatal("re-converting partial must regain its tier")
+	}
+}
+
+func TestHintRepeatTextMarksPoolDry(t *testing.T) {
+	// The platform charges every hint view; a repeat text means the pool is
+	// exhausted. The noop rescue is one-shot per GOAL, so a later pass's goal
+	// can fire it again for the same TITLE — the repeat must mark the pool
+	// dry, seed nothing, and never pay for another pull on any later path
+	// (the requeue pre-seed respects the dry flag too).
+	ctx := context.Background()
+	e, st, _ := newEngine(t, ok(`{}`))
+	e.cfg.Runtime.RunDeadline = cfg.Duration(10 * time.Hour)
+	e.startedAt = e.now()
+	e.cfg.Runtime.DecideNoopLimit = 2
+	e.FlagProgress = func(string) (int, int, bool) { return 1, 4, true }
+	pulls := 0
+	e.NoopRescue = func(context.Context, string) (string, bool) {
+		pulls++
+		return "hint: the key sleeps in the config", true
+	}
+
+	// Pass-1 goal: two empty rounds fire the rescue once, hint seeded, title
+	// marked as pulled.
+	g1, _ := st.CreateGoal(ctx, "bench:dry", "o", "obj")
+	e.countNoop(ctx, g1.ID, true)
+	e.countNoop(ctx, g1.ID, true)
+	if pulls != 1 {
+		t.Fatalf("rescue must fire once per goal, got %d pulls", pulls)
+	}
+
+	// Pass-2 goal of the same title: the rescue fires again (fresh goal),
+	// the platform repeats the text — pool dry, nothing seeded.
+	g2, _ := st.CreateGoal(ctx, "bench:dry", "o", "obj")
+	e.countNoop(ctx, g2.ID, true)
+	e.countNoop(ctx, g2.ID, true)
+	if pulls != 2 {
+		t.Fatalf("second goal must pull once to discover the repeat, got %d", pulls)
+	}
+	if !e.hintDryTitle("bench:dry") {
+		t.Fatal("exact-text repeat must mark the pool dry")
+	}
+	if gg, err := st.GetGoal(ctx, g2.ID); err != nil || gg.Status != fgs.GoalStopped {
+		t.Fatalf("an unseedable rescue must fall through to the noop stop, err=%v status=%v", err, gg.Status)
+	}
+
+	// Dry flag holds across every later path: the requeue pre-seed must not
+	// pay for another view.
+	g3, _ := st.CreateGoal(ctx, "bench:dry", "o", "obj")
+	e.requeuePass2(ctx, &fgs.Goal{ID: g3.ID, Title: "bench:dry", Origin: "o", Objective: "obj"})
+	if pulls != 2 {
+		t.Fatalf("dry pool must never be pulled again, got %d pulls", pulls)
 	}
 }

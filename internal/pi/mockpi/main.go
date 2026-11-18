@@ -98,6 +98,25 @@ func main() {
 					"assistantMessageEvent": map[string]any{"type": "text_delta", "delta": "partial streamed output"},
 				})
 				continue
+			case "slow_stream":
+				// deltas arrive with gaps LONGER than a single sample of the
+				// stall window start, but every gap is shorter than the full
+				// window: a stall watchdog that re-arms on each event must
+				// carry this turn to agent_end, while a one-shot timer would
+				// abort a live stream.
+				resp(cmd.ID, "prompt", true, nil, "")
+				emit(map[string]any{
+					"type":                  "message_update",
+					"assistantMessageEvent": map[string]any{"type": "text_delta", "delta": "slow but alive "},
+				})
+				time.Sleep(500 * time.Millisecond)
+				emit(map[string]any{
+					"type":                  "message_update",
+					"assistantMessageEvent": map[string]any{"type": "text_delta", "delta": "second delta"},
+				})
+				time.Sleep(500 * time.Millisecond)
+				emit(map[string]any{"type": "agent_end"})
+				continue
 			case "exit_late":
 				resp(cmd.ID, "prompt", true, nil, "")
 				time.Sleep(delay)

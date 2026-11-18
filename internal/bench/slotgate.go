@@ -48,8 +48,15 @@ type SlotGate struct {
 	completed  map[string]bool   // code -> platform is_completed
 	correct    map[string]int    // code -> correct_flag_count (progress / endgame priority)
 	total      map[string]int    // code -> flag_count
-	reserved   map[string]time.Time
-	lastWork   map[string]time.Time // code -> last time a running step used its container
+	// submitCorrect records the highest correct count a SubmitResult carried
+	// per code. The list snapshot is the gate's only other progress source
+	// and it is eventually-consistent with the scoring pipeline — the submit
+	// response is the ground truth the run itself produced, so Progress takes
+	// the max of the two (run 46870 audit: the engine's scheduling truth must
+	// not depend on which of two racers reports first).
+	submitCorrect map[string]int
+	reserved      map[string]time.Time
+	lastWork      map[string]time.Time // code -> last time a running step used its container
 	// pendingRelease parks codes whose close POST failed: the gate re-asks
 	// the platform every releaseRetryTTL until the snapshot shows the
 	// container down, so one transient 5xx on a one-shot close cannot leak
@@ -77,6 +84,7 @@ func NewSlotGate(st *store.Store, c *Client, maxSlots int, log *slog.Logger) *Sl
 		reserved:        map[string]time.Time{},
 		lastWork:        map[string]time.Time{},
 		pendingRelease:  map[string]time.Time{},
+		submitCorrect:   map[string]int{},
 		releaseRetryTTL: 30 * time.Second,
 	}
 }
@@ -96,6 +104,43 @@ func (g *SlotGate) Progress(code string) (cur, total int, ok bool) {
 		ok = false
 	}
 	return
+}
+
+// SetSubmitProgress feeds the gate the ground truth a SubmitResult carried:
+// correct/total flag counts straight from the scoring pipeline. The list
+// snapshot may trail a just-banked flag, and scheduling decisions made in
+// that window (completion sweeps, endgame ranking, stall accounting) would
+// read the past. Counts only move forward — a stale or out-of-order response
+// cannot regress progress. Completion flips here too so the idle sweep can
+// reap a fully-solved challenge's container without waiting for the list.
+func (g *SlotGate) SetSubmitProgress(code string, correct, total int) {
+	if code == "" || correct <= 0 {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if correct <= g.submitCorrect[code] {
+		return // stale or out-of-order response: counts only move forward
+	}
+	g.submitCorrect[code] = correct
+	if g.correct == nil {
+		g.correct = map[string]int{}
+	}
+	if g.total == nil {
+		g.total = map[string]int{}
+	}
+	if g.completed == nil {
+		g.completed = map[string]bool{}
+	}
+	if correct > g.correct[code] {
+		g.correct[code] = correct
+	}
+	if total > 0 && total > g.total[code] {
+		g.total[code] = total
+	}
+	if t := g.total[code]; t > 0 && g.correct[code] >= t {
+		g.completed[code] = true
+	}
 }
 
 // Submittable reports whether a flag for this challenge is still worth
@@ -217,9 +262,15 @@ func (g *SlotGate) refreshLocked(ctx context.Context) []string {
 	total := make(map[string]int, len(challenges))
 	for _, ch := range challenges {
 		status[ch.UniqueCode] = ch.ContainerStatus
-		completed[ch.UniqueCode] = ch.IsCompleted
-		correct[ch.UniqueCode] = ch.CorrectFlagCount
+		c := ch.CorrectFlagCount
+		if sc := g.submitCorrect[ch.UniqueCode]; sc > c {
+			// A submit already banked more than the list admits — the
+			// scoring response is the run's own ground truth; take the max.
+			c = sc
+		}
+		correct[ch.UniqueCode] = c
 		total[ch.UniqueCode] = ch.FlagCount
+		completed[ch.UniqueCode] = ch.IsCompleted || (ch.FlagCount > 0 && c >= ch.FlagCount)
 	}
 	g.status = status
 	g.completed = completed

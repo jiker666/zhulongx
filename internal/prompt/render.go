@@ -65,6 +65,7 @@ func RenderExecute(g *store.Graph, stepID string) string {
 		"step_description": desc,
 		"depends_on":       deps,
 		"graph_yaml":       renderGraphSection(g),
+		"hints":            renderHintsSection(g),
 	}
 	return render(executeTemplate, repl)
 }

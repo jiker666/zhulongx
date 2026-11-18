@@ -365,3 +365,46 @@ func TestSlotGateOnSnapshotFiresAfterRefresh(t *testing.T) {
 		t.Fatal("each stale-expired Allow must re-poll and re-fire the callback")
 	}
 }
+
+func TestSlotGateSubmitProgressOverridesStaleList(t *testing.T) {
+	// The list snapshot trails the scoring pipeline; a SubmitResult's
+	// correct count is the run's own ground truth. Progress must take the
+	// max of the two, and a completed-by-submit challenge must read
+	// completed without waiting for the list (v27: scheduling truth may not
+	// depend on which of two racers reports first).
+	f := newFixture(t, 1)
+	f.challenges = []Challenge{{UniqueCode: "b-03", ContainerStatus: "running", FlagCount: 4, CorrectFlagCount: 1}}
+	a := f.goal(t, "b-03", fgs.GoalActive)
+	f.gate.Allow(context.Background(), a) // first poll seeds the snapshot
+
+	// A submit banks flag #2 while the list still says 1.
+	f.gate.SetSubmitProgress("b-03", 2, 4)
+	if cur, total, ok := f.gate.Progress("b-03"); !ok || cur != 2 || total != 4 {
+		t.Fatalf("Progress must report the submit-grade count, got %d/%d ok=%v", cur, total, ok)
+	}
+
+	// A later list refresh that still lags must not regress the count.
+	f.now = f.now.Add(9 * time.Second)
+	f.gate.Refresh(context.Background())
+	if cur, _, _ := f.gate.Progress("b-03"); cur != 2 {
+		t.Fatalf("stale list must not regress submit-grade progress, got %d", cur)
+	}
+
+	// Completion via submit flips completed even when the list disagrees…
+	f.gate.SetSubmitProgress("b-03", 4, 4)
+	f.challenges[0].CorrectFlagCount = 2 // list still trailing
+	f.now = f.now.Add(9 * time.Second)
+	f.gate.Refresh(context.Background())
+	if cur, _, _ := f.gate.Progress("b-03"); cur != 4 {
+		t.Fatalf("refresh must reconcile to the submit max, got %d", cur)
+	}
+	if f.gate.Submittable("b-03") {
+		t.Fatal("a submit-completed challenge must not accept further submissions")
+	}
+
+	// …and counts only move forward: a stale response cannot regress.
+	f.gate.SetSubmitProgress("b-03", 3, 4)
+	if cur, _, _ := f.gate.Progress("b-03"); cur != 4 {
+		t.Fatalf("out-of-order submit response must not regress progress, got %d", cur)
+	}
+}
