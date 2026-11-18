@@ -19,10 +19,28 @@ ComfyUI-Manager 公开 README/安全通告。选材 = 公开产品行为,与任�
    如果部署装了 Manager 或任何第三方节点集,等于多了一堆可调用的 Python 面。
    Manager 公开面:`/customnode/getlist`、`/customnode/install`(装 git url =
    拉任意代码,老版本无鉴权)、`/manager/reboot`。
-3. **startup-scripts 自动执行**:`user/default/startup-scripts/*.py` 在服务端启动
-   时执行(公开机制)。**凡是拿到文件写原语的(uploads/assets/dataset 写、
-   Manager 安装),第一落点就是 startup-scripts + 等重启/触发 reboot** ——
+3. **startup-scripts 自动执行(认准 Manager 的那份)**:ComfyUI-Manager 在
+   `user/default/ComfyUI-Manager/startup-scripts/install-scripts.txt` 执行
+   **argv 数组**(公开格式,pip 安装请求会被记录进去):写自己的数组
+   (`["..","#FORCE","/usr/local/bin/python","-c","<code>"]` = 直接 RCE,
+   `#FORCE` 段标记照抄公开格式)再 `GET /manager/reboot` 即兑换,重启后
+   以 root 跑。
+   注意与 ComfyUI 自身的启动目录区分——RCE 兑换认 Manager 这条。
+   **凡是拿到文件写原语的(uploads/assets/dataset 写、Manager 安装),
+   第一落点就是 startup-scripts + 等重启/触发 reboot** ——
    写文件 × 重启 = RCE 的标准兑换路径。
+3b. **userdata 写原语(0.9.x 实测语义,别按想象写)**:`POST /api/userdata`
+   收**纯相对名**——带子目录的相对名直接落盘(`ComfyUI-Manager/startup-scripts/install-scripts.txt`
+   一发命中,这就是最短链,3b→3 两步到 root RCE);但 traversal 会被门挡:
+   `..%2F` 编码穿越在 POST 上是 **403 BLOCKED**,不要在穿越变体上磨。
+   读受保护文件反过来要 `%2F` 编码:`GET /api/userdata/ComfyUI-Manager%2Fconfig.ini`
+   200、不编码 404——读门与写门的编码语义相反,分开记。
+   `config.ini` 覆写(`security_level=weak`)只是**可选**解锁
+   `/customnode/install/*`:那条路由只往队列记任务、等下次启动才执行,
+   空队列不会跑——拿它当旁证可以,**别等它兑现 RCE**;startup-scripts
+   直写才是主路。`/customnode/install/pip` 403 是 security 门、
+   `/manager/queue/install` 500 是过了门(数据形状错而已)——按过没过门
+   分流,别把 403 当面死。
 4. **数据集/模型加载节点的路径语义**(公开源码约定):dataset 类节点用 glob 在
    `input/`(或 `input/dataset/`)下找 `*.pt|*.json|*.csv`;glob 不匹配时报错信息
    会回显**目录是否存在**与**候选名规则** —— 用报错差分当目录 oracle,逐个猜

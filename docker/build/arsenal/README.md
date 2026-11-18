@@ -45,4 +45,5 @@
 | geoserver-ogc-xpath-oracle.py | GeoServer OGC filter XPath 盲注 oracle（先试 CVE-2024-36401 RCE 族） | REFERENCE |
 | db-privesc-postgres.md | PostgreSQL 提权/文件读手册（SET ROLE→SECURITY DEFINER→lo_import/dblink→.pgpass 阶梯） | REFERENCE |
 | ssrf-bypass-pack.md | SSRF/URL 校验绕过手册（校验器分类→解析差异电池→gopher/file 兑现） | REFERENCE |
+| ofbiz-rce-pack.md | Apache OFBiz 8443 指纹→CVE-2023-46550/51467/45195 绕过家族→SOAPService 反序列化→EntitySQLProcessor/Derby/FTL 后渗透速查（含慢启动 2-4m 铁律） | REFERENCE |
 | race-harness.py | Race/TOCTOU 一次性模板（barrier 起跑+轮内自重置+自动验胜） | TEMPLATE |
