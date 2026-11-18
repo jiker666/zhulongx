@@ -1,0 +1,49 @@
+# zhulongx agent image for the CTFY-0001 agent protocol (registry.ctfy.io).
+# Build context is assembled by build-ctfy.sh (driver binary + doctrine +
+# the shared toolbox: arsenal, wordlists, skills).
+#
+# Protocol-critical differences from the TSecBench image:
+#   - NO ~/.pi/agent/models.json or settings.json shipped or written: the
+#     platform writes the funded provider config there before start
+#     (CTFY-0001 §1.1) and an image-shipped file at those paths wins.
+#   - sshpass + openssh-client: awd matches defend over ssh.
+#   - ENTRYPOINT is absolute; cwd is the platform working directory.
+FROM node:22-bookworm-slim
+
+ENV DEBIAN_FRONTEND=noninteractive TERM=xterm
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3 python3-pip \
+      binutils gdb \
+      curl wget netcat-openbsd iputils-ping dnsutils \
+      openssh-client sshpass unzip xz-utils file git jq ca-certificates \
+      ripgrep fd-find nmap \
+      hydra john \
+    && ln -s /usr/bin/fdfind /usr/local/bin/fd \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python attack/RE stack (offline at runtime)
+RUN pip3 install --no-cache-dir --break-system-packages \
+      pwntools capstone unicorn keystone-engine pyelftools \
+      z3-solver pycryptodome requests \
+      sqlmap flask-unsign dirsearch pyjwt
+
+# Offline wordlists (staged under docker/build/wordlists by build.sh)
+COPY build/wordlists /usr/share/wordlists
+
+# pi agent runtime, same pin as the TSecBench image
+RUN npm install -g @mariozechner/pi-coding-agent@0.73.1
+
+# ctfy driver + doctrine + shared toolbox
+COPY build/ctfyagent /opt/zhx/ctfyagent
+COPY build/ctfy-doctrine.md /opt/zhx/ctfy-doctrine.md
+COPY build/ctfy-entrypoint.sh /opt/zhx/ctfy-entrypoint.sh
+COPY build/arsenal /opt/zhx/arsenal
+RUN chmod +x /opt/zhx/ctfyagent /opt/zhx/ctfy-entrypoint.sh
+
+# skills land in the pi config dir; models.json/settings.json are
+# intentionally absent (platform-owned, see header)
+COPY build/skills /root/.pi/agent/skills
+RUN echo '{}' > /root/.pi/agent/auth.json && echo '{}' > /root/.pi/agent/trust.json
+
+WORKDIR /ctfy/work
+ENTRYPOINT ["/opt/zhx/ctfy-entrypoint.sh"]
